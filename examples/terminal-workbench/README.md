@@ -73,7 +73,8 @@ The optional inspector has a separate checked script:
 ```
 
 The image and font are bundled assets; the runbook uses inline HTML. These
-samples work offline. Pacifico's license is included in `assets/OFL.txt`.
+samples work offline. Pacifico's license is included in `assets/OFL.txt`
+and in the font's license metadata, so packaged copies retain it.
 Text assertions target labels around the raster samples; interactive
 rendering shows their colors, blur, blending and lettering.
 
