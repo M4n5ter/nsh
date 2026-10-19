@@ -109,6 +109,12 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
   host failing, and in a job object that kills it when the job closes (`run::KillOnClose`): Windows ends a child with
   its parent only in a job, so the host goes with `nsh` however it ends (a closed console, a killed process). The
   command line an app with a Rust crate re-executes into is put in such a job too.
+- `nsh run --target tui` runs `nsh-tui-host` in the current terminal on Linux, macOS and Windows, reporting
+  `HostPlatform::Tui`. It inherits terminal streams, applies hot updates, reloads with Ctrl+R and exits with Ctrl+Q.
+  The CLI buffers its output until the host restores the terminal; stopping or restarting the host requests graceful
+  shutdown before forcing termination. `nsh package --target tui` creates a console executable beside `nsh/` resources,
+  archived as `.tar.gz` on Unix and `.zip` on Windows; `--run` uses the current terminal and waits for exit.
+  See [Terminal backend](tui.md) for resource layout and headless `--script` snapshots.
 - `nsh run --target android` forwards the dev server's port to the device (`adb reverse tcp:<port> tcp:<port>`,
   `android::Reverse`) and removes that rule, and only that one (`adb reverse --remove tcp:<port>`), however the run
   ends: normally, by an error, by Ctrl-C or SIGTERM, or for a restart of an app with a Rust crate (exit code 75; the
@@ -134,6 +140,8 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
   their UI sets (older ones) get every bundle.
 - The host's `log` output (including JS `console.*`, target `js`) is forwarded to the CLI terminal with the device name while connected, and goes
   to stderr when disconnected (see "Output" for what the CLI shows of it).
+  Terminal hosts buffer diagnostics for the connected dev server and optionally append them to `NSH_LOG`; forwarded
+  messages strip terminal controls while preserving newlines and tabs.
 - Build failures, bundle evaluation failures and uncaught exceptions show an overlay on the host (dark, the title in red; tap to dismiss; its Copy button copies the error, to paste into an AI chat or a report); it disappears on the next
   successful reload.
 - **Hot module replacement** (`nsh dev` / `nsh run` without `--release`): development bundles keep one CommonJS chunk per
@@ -250,7 +258,9 @@ toolchain cannot know the sets, so `nsh` builds the app its own (`crates/nsh-cli
   release runner: `nsh_platform_ios::set_ui_sets`, then `nsh_ios_host::main` / `nsh_ios_app::main`), `linux-host` /
   `linux-app`, `macos-host` / `macos-app` and `windows-host` / `windows-app` (the same on Linux, macOS and Windows,
   `nsh_platform_linux` / `nsh_platform_macos` / `nsh_platform_windows::set_ui_sets`; `windows-app` is a windowed
-  program, with no console), `android` (the app's `libnsh.so`: `nsh::ui_sets!`, which the Android runtime looks up when
+  program, with no console), `tui-host` / `tui-app` (`nsh_platform_tui::set_ui_sets`, then
+  `nsh_tui_host::main` / `nsh_tui_app::main`; console applications on all three desktops), `android` (the app's
+  `libnsh.so`: `nsh::ui_sets!`, which the Android runtime looks up when
   an engine starts) and `web` (the app's web runtime, a `cdylib` for `wasm32-unknown-unknown` built with the `web`
   profile: `nsh_platform_web::ui_sets!`, whose `nsh_app_init` export `nsh.js` calls; `docs/dev/web.md`, "Apps with Rust
   components"). `gpui-host` / `gpui-app` (`nsh_platform_gpui::set_ui_sets`, under `cfg(any(target_os = "linux",
@@ -272,7 +282,7 @@ toolchain cannot know the sets, so `nsh` builds the app its own (`crates/nsh-cli
   (`NSH_RUST_APP` names the workspace). Everything then knows the app's sets: the bundler keeps their imports, bytecode
   links against their exports, `.nsh/types` declares each set (`.nsh/types/<specifier>.d.ts`, found through tsconfig's
   `"*"` path, which falls back to `node_modules`), `nsh trace` renders it. The hosts `run` and `package` need are built
-  for the app instead of taken from the runtime (iOS `--target` triples; Linux's, macOS's, Windows' and GPUI's `*-host`
+  for the app instead of taken from the runtime (iOS `--target` triples; Linux's, macOS's, Windows', GPUI's and the terminal's `*-host`
   / `*-app` for this machine; Android: the prebuilt `classes.dex` with the app's `libnsh.so` for each ABI of the
   prebuilt runtime, cross-compiled with the NDK; the web: the app's `nsh.wasm` / `nsh-dev.wasm`, with nsh's `nsh.js`).
 - `nsh dev` / `nsh run` watch the crates too, and the local crates they depend on by path (`path = "…"` in
@@ -283,7 +293,7 @@ toolchain cannot know the sets, so `nsh` builds the app its own (`crates/nsh-cli
 - **Rust apps.** With `"root": "<path in the crate>"` in `nsh.json` (in the first crate `"rust"` lists), the app's
   directory resolves to its `nsh.json` (`entry::resolve`; a named `App.tsx` stays the TSX entry), and the app runs with
   no JS: `rust_app::RootConfig` (with `"theme"` and `"appearance"`, also kept in `.nsh/rust/app.json` for the app's
-  command line) adds the members `rust-linux`, `rust-macos`, `rust-windows`, `rust-ios` (each the platform's release
+  command line) adds the members `rust-linux`, `rust-macos`, `rust-windows`, `rust-ios`, `rust-tui` (each the platform's release
   runner library without its feature `js`, whose `run_rust` mounts the generated `app_root()`), `rust-android`
   (`nsh::ui_sets!` and `nsh::main!`, `nsh-platform-android` without `js`; the APK's manifest gets the
   `com.longbridge.nsh.RUST` meta-data `AppActivity` reads) and `rust-web` (`docs/dev/web.md`), and `gpui/rust-gpui`.
@@ -292,6 +302,8 @@ toolchain cannot know the sets, so `nsh` builds the app its own (`crates/nsh-cli
   the app's logs on stderr), Catalyst's in an app bundle (`NSH_DEVELOPMENT`), and installs a package on the simulator
   and Android; on the web a dev session without builds serves the page. A crate change ends the command with `Restart`
   (`RustApp::watch`). The other commands refuse a Rust app's entry. `examples/gallery-rs` is one (`"root": "Gallery"`).
+  The terminal's `rust-tui` wrapper calls `nsh_tui_app::run_rust(app_root())`, uses `NSH_APP_DIR` for resources during
+  development and keeps the same console entry point on Windows.
 - The files the sets' crates ship (`Registry::assets(assets!())`: a crate's `assets/` directory, published as
   `asset:/@<package>/<path>`, so each crate's are apart) go with the app's imported assets: the dev server serves them
   (`DevServer::serve_files`), `nsh build` / `package` / `publish` copy them (`build::Built::assets`: each file's path
@@ -307,10 +319,14 @@ Windows' `nsh-windows-host.exe` / `nsh-windows-app.exe`; the distribution has GP
 for published apps, `nsh-dev.wasm` for the development host, and `nsh.js`: `docs/dev/web.md`) are always built with
 the `web` profile, into `target/wasm32-unknown-unknown/web/`.
 
+Terminal hosts and runners are built in `target/<profile>` (`cargo build -p nsh-tui-host` / `-p nsh-tui-app`) and
+shipped in `runtime/tui/{nsh-tui-host,nsh-tui-app}` (`.exe` on Windows). App-specific variants use the generated
+`.nsh/rust/tui-host`, `tui-app` or `rust-tui` member and the app's own target directory.
+
 ## Releases
 
 `.github/workflows/release.yml` runs `cargo xtask dist` on macOS (Apple silicon: the iOS, Mac Catalyst and macOS
-runtimes and the iOS SDK), Linux and Windows (x86_64), each with the GPUI runtime of its OS and the Android runtime, checks that the packaged CLI
+runtimes and the iOS SDK), Linux and Windows (x86_64), each with the GPUI and terminal runtimes of its OS and the Android runtime, checks that the packaged CLI
 makes and bundles a new app, and archives `dist/nsh` as one directory `nsh/` in `nsh-<platform>.tar.gz` (`.zip` on
 Windows), plus the embedding SDKs alone (`nsh-embed-ios.zip`, `nsh-embed-android.zip`), each with a `.sha256`. Asset
 names carry no version, so `releases/latest/download/<asset>` always resolves; the installers and package managers
@@ -357,4 +373,6 @@ too); `cargo xtask [run] [<app>]` is the same task through the alias in `.cargo/
 drops the variables `cargo run` sets for it (`CARGO_MANIFEST_DIR`, `CARGO_PKG_*`, ...) first: the builds it and `nsh`
 start would inherit them, and since some crates' builds depend on them, every `cargo run` rebuilt ring, taffy and the
 rest of what a plain `cargo build` had built.
+For `--target tui` on Unix, xtask keeps the run in the foreground process group so the host can read the controlling
+terminal, and requests graceful shutdown before a source-change restart.
 `.cargo/config.toml` sets `IPHONEOS_DEPLOYMENT_TARGET = 15.0` for Rust and C alike.

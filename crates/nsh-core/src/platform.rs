@@ -56,7 +56,7 @@ pub enum Os {
     Ios,
     /// Android.
     Android,
-    /// macOS (a desktop backend).
+    /// macOS.
     MacOs,
     /// Windows.
     Windows,
@@ -80,10 +80,9 @@ impl Os {
         }
     }
 
-    /// The OS of a desktop backend (macOS, Windows, Linux): it has windows
-    /// and menus (`nsh/desktop`). Desktop behavior (`desktop={{…}}` props,
-    /// `Platform.select({ desktop })`) also covers desktop-class browsers:
-    /// [`Environment::desktop`].
+    /// A desktop OS (macOS, Windows, Linux). A surface's graphical desktop
+    /// behavior (`nsh/desktop`, `desktop={{…}}` props) also depends on its
+    /// renderer and browser idiom: [`Environment::desktop`].
     pub fn is_desktop(self) -> bool {
         matches!(self, Os::MacOs | Os::Windows | Os::Linux)
     }
@@ -97,6 +96,29 @@ impl Default for Os {
             Os::Android
         } else {
             Os::Ios
+        }
+    }
+}
+
+/// How a surface presents its UI, independently of its operating system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Renderer {
+    /// Platform views or a desktop graphics backend.
+    #[default]
+    Native,
+    /// HTML in a browser page.
+    Web,
+    /// Character cells in a terminal.
+    Terminal,
+}
+
+impl Renderer {
+    /// Its `Platform.renderer` name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Web => "web",
+            Self::Terminal => "terminal",
         }
     }
 }
@@ -119,8 +141,9 @@ pub enum Idiom {
 }
 
 impl Idiom {
-    /// Whether desktop behavior applies on `os` in this idiom: a desktop
-    /// OS, or a browser in the desktop idiom (TS: `Platform.isDesktop`).
+    /// Whether `os` and this idiom describe a desktop: a desktop OS, or a
+    /// browser in the desktop idiom. [`Environment::desktop`] also checks
+    /// the surface's renderer (TS: `Platform.isDesktop`).
     pub fn desktop_on(self, os: Os) -> bool {
         os.is_desktop() || (os == Os::Web && self == Idiom::Desktop)
     }
@@ -158,6 +181,8 @@ pub struct Environment {
     pub screen_reader: bool,
     /// The operating system.
     pub os: Os,
+    /// How this surface presents its UI (`Platform.renderer`).
+    pub renderer: Renderer,
     /// The OS version: major and minor (iOS, desktops), Android's API level
     /// and 0.
     pub os_version: (u16, u16),
@@ -165,19 +190,19 @@ pub struct Environment {
     pub idiom: Idiom,
     /// A browser on an Apple platform (macOS, iOS): its keyboard shortcuts
     /// follow Apple's conventions ([`crate::keymap::apple_keys`]: `mod` is
-    /// Command, labels use ⌘). Only read for [`Os::Web`]; the other OSes
-    /// imply theirs.
+    /// Command, labels use ⌘). Only read for [`Os::Web`]; graphical native
+    /// backends infer theirs from the OS. Terminals use Control.
     pub apple_keyboard: bool,
     /// The user's locale (number and date formats: `Intl`'s default).
     pub locale: Locale,
 }
 
 impl Environment {
-    /// Desktop behavior applies: a desktop OS, or a browser in the desktop
-    /// idiom (`desktop={{…}}` props, `Platform.select({ desktop })`,
-    /// `Platform.isDesktop`).
+    /// Graphical desktop behavior applies: a desktop OS with a graphical
+    /// renderer, or a browser in the desktop idiom (`desktop={{…}}` props,
+    /// `Platform.select({ desktop })`, `Platform.isDesktop`).
     pub fn desktop(&self) -> bool {
-        self.idiom.desktop_on(self.os)
+        self.renderer != Renderer::Terminal && self.idiom.desktop_on(self.os)
     }
 }
 
@@ -196,6 +221,7 @@ impl Default for Environment {
             pixel_ratio: 1.0,
             screen_reader: false,
             os: Os::default(),
+            renderer: Renderer::Native,
             os_version: (0, 0),
             idiom: Idiom::Phone,
             apple_keyboard: false,
@@ -437,7 +463,39 @@ pub enum FetchOp {
 
 #[cfg(test)]
 mod tests {
-    use super::Locale;
+    use super::{Environment, Idiom, Locale, Os, Renderer};
+
+    #[test]
+    fn renderer_separates_terminal_from_graphical_desktop_behavior() {
+        for os in [Os::MacOs, Os::Windows, Os::Linux] {
+            let native = Environment {
+                os,
+                idiom: Idiom::Desktop,
+                ..Environment::default()
+            };
+            assert!(native.desktop());
+            let terminal = Environment {
+                renderer: Renderer::Terminal,
+                ..native
+            };
+            assert_eq!(terminal.os, os);
+            assert!(!terminal.desktop());
+        }
+        let browser = Environment {
+            os: Os::Web,
+            renderer: Renderer::Web,
+            idiom: Idiom::Desktop,
+            ..Environment::default()
+        };
+        assert!(browser.desktop());
+        assert!(
+            !Environment {
+                idiom: Idiom::Phone,
+                ..browser
+            }
+            .desktop()
+        );
+    }
 
     #[test]
     fn locales_parse_platform_identifiers() {

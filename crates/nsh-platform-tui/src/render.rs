@@ -1,0 +1,3113 @@
+//! Cell painting for a retained terminal surface. Geometry stays in
+//! points until the final conversion, including ancestor clipping and
+//! scrolling, so the renderer and hit testing share the same coordinate
+//! system.
+
+use nsh_core::{
+    AccessibilityRole, BlendMode, BorderStyle, Color, Dialog, DialogButtonStyle, EventKind,
+    Gradient, GradientKind, GradientSize, NodeId, Rect, ResizeMode, TextAlign, ViewKind, ViewStyle,
+};
+use ratatui::{
+    buffer::{Buffer, CellDiffOption},
+    layout::Rect as CellRect,
+    style::{Color as CellColor, Modifier, Style},
+};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+use crate::{
+    CellMetrics,
+    surface::{Node, Surface},
+};
+
+const FOCUS: Color = Color(0x388b_fdff);
+
+impl Surface {
+    /// Paints the surface inside `area`, leaving cells outside it intact.
+    ///
+    /// The embedding application owns terminal IO and may render several
+    /// independent surfaces into one Ratatui frame.
+    pub fn render(&self, area: CellRect, buffer: &mut Buffer) {
+        self.render_scene(area, buffer, true);
+    }
+
+    pub(crate) fn render_plain(&self, area: CellRect, buffer: &mut Buffer) {
+        self.render_scene(area, buffer, false);
+    }
+
+    fn render_scene(&self, area: CellRect, buffer: &mut Buffer, use_protocols: bool) {
+        let area = area.intersection(buffer.area);
+        if area.is_empty() {
+            return;
+        }
+        let background = if self.dark {
+            Color(0x181b_22ff)
+        } else {
+            Color(0xffff_ffff)
+        };
+        let foreground = if self.dark {
+            Color(0xe6e9_efff)
+        } else {
+            Color::BLACK
+        };
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                buffer[(x, y)].reset();
+                buffer[(x, y)]
+                    .set_bg(cell_color(background))
+                    .set_fg(cell_color(foreground));
+            }
+        }
+
+        let ids = self.paint_ids();
+        if use_protocols {
+            self.protocol.retain(&ids);
+        }
+        let mut overlays = Vec::new();
+        for &id in &ids {
+            while overlays
+                .last()
+                .is_some_and(|&scroll| !self.is_paint_descendant(id, scroll))
+            {
+                if let Some(node) = overlays.pop() {
+                    self.paint_node_overlay(node, area, buffer);
+                }
+            }
+            let (Some(node), Some(frame)) = (self.node(id), self.global_frame(id)) else {
+                continue;
+            };
+            let style = self.animated_style(id);
+            let opacity = self.paint_opacity(id);
+            if style.hidden || opacity <= 0.0 || !finite_rect(frame) {
+                continue;
+            }
+            let clip = self.clip_rect(id);
+            if node.kind == ViewKind::Modal {
+                // A modal dims its presenter before painting its own
+                // background. Transparent modals retain their content's
+                // explicitly mounted fills.
+                fill(
+                    buffer,
+                    area,
+                    area,
+                    Color(0x0000_0066),
+                    1.0,
+                    BlendMode::Normal,
+                    false,
+                );
+                if !node.modal.transparent && style.background_color.is_transparent() {
+                    fill(
+                        buffer,
+                        cells(frame, self.metrics, area),
+                        cells(clip, self.metrics, area),
+                        background,
+                        opacity,
+                        BlendMode::Normal,
+                        true,
+                    );
+                }
+            }
+            self.paint_decor(frame, clip, &style, opacity, area, buffer);
+            let foreground = node.bindings.iter().find_map(|(property, value)| {
+                if *property != nsh_animation::AnimationProp::Color {
+                    return None;
+                }
+                Some(match self.animation.eval(*value) {
+                    nsh_animation::AnimationValue::Color(color) => Color(color),
+                    value => Color(value.number() as u32),
+                })
+            });
+            match node.kind {
+                ViewKind::Input => paint_input(
+                    node,
+                    self.focus == Some(id),
+                    frame,
+                    clip,
+                    opacity,
+                    foreground,
+                    self.metrics,
+                    area,
+                    buffer,
+                ),
+                ViewKind::Image => {
+                    if let Some(raster) = &node.image_raster {
+                        let (image_frame, image_clip, mode) = image_geometry(node, frame, clip);
+                        let protocol = use_protocols
+                            && self.try_image_protocol(
+                                id,
+                                raster,
+                                image_frame,
+                                image_clip,
+                                mode,
+                                style.tint_color,
+                                opacity,
+                                area,
+                                buffer,
+                                &ids,
+                            );
+                        if !protocol {
+                            crate::image::paint(
+                                raster,
+                                image_frame,
+                                image_clip,
+                                mode,
+                                style.tint_color,
+                                opacity,
+                                self.metrics,
+                                area,
+                                buffer,
+                            );
+                        }
+                    }
+                }
+                ViewKind::Canvas => {
+                    if let Some(raster) = &node.canvas_raster {
+                        let protocol = use_protocols
+                            && self.try_image_protocol(
+                                id,
+                                raster,
+                                frame,
+                                clip,
+                                ResizeMode::Stretch,
+                                None,
+                                opacity,
+                                area,
+                                buffer,
+                                &ids,
+                            );
+                        if !protocol {
+                            crate::image::paint(
+                                raster,
+                                frame,
+                                clip,
+                                ResizeMode::Stretch,
+                                None,
+                                opacity,
+                                self.metrics,
+                                area,
+                                buffer,
+                            );
+                        }
+                    }
+                }
+                ViewKind::Screen => self.paint_header(id, frame, clip, opacity, area, buffer),
+                ViewKind::Native => {
+                    if let Some(component) = &node.native {
+                        component.render(&self.component_context(id, area), buffer);
+                    }
+                }
+                ViewKind::WebView | ViewKind::Video => {
+                    let rect = cells(frame, self.metrics, area);
+                    let label = if node.kind == ViewKind::WebView {
+                        "Web view: use a terminal host component"
+                    } else {
+                        "Video: use a terminal host component"
+                    };
+                    write_text(
+                        buffer,
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        label,
+                        cells(clip, self.metrics, area).intersection(area),
+                        Color(0x8080_80ff),
+                        opacity,
+                        Modifier::ITALIC,
+                    );
+                }
+                _ => {}
+            }
+            if let Some((text, layout, content)) = &node.text {
+                let content = relative_frame(frame, node.frame, *content);
+                let selection = node.editor.selection();
+                if self.focus == Some(id)
+                    && text.is_selectable()
+                    && selection.0 < selection.1
+                    && let Some(terminal) = layout.0.downcast_ref::<crate::text::TerminalLayout>()
+                {
+                    let color = text.selection_color.unwrap_or(Color(0x388b_fd66));
+                    for run in terminal
+                        .runs
+                        .iter()
+                        .filter(|run| run.start < selection.1 && run.end > selection.0)
+                    {
+                        let rect = Rect {
+                            x: content.x + run.x,
+                            y: content.y + run.y,
+                            width: f32::from(run.width) * self.metrics.width(),
+                            height: self.metrics.height(),
+                        };
+                        fill(
+                            buffer,
+                            cells(rect, self.metrics, area),
+                            cells(clip, self.metrics, area),
+                            color,
+                            opacity,
+                            BlendMode::Normal,
+                            false,
+                        );
+                    }
+                }
+                let filter = style
+                    .effects
+                    .as_ref()
+                    .and_then(|effects| nsh_core::compose_color_matrices(&effects.filters));
+                if foreground.is_some() || filter.is_some() {
+                    crate::text::render_text_filtered(
+                        layout,
+                        (content.x, content.y),
+                        clip,
+                        opacity,
+                        foreground,
+                        filter.as_ref(),
+                        self.metrics,
+                        area,
+                        buffer,
+                    );
+                } else {
+                    crate::text::render_text(
+                        layout,
+                        (content.x, content.y),
+                        clip,
+                        opacity,
+                        self.metrics,
+                        area,
+                        buffer,
+                    );
+                }
+            }
+            if (node.kind == ViewKind::Scroll && node.scroll.shows_indicator)
+                || style.borders.is_visible()
+                || style.outline.is_visible()
+            {
+                overlays.push(id);
+            }
+        }
+
+        // Native adornments follow the content, just as scroll indicators
+        // and a keyboard focus ring sit above child views in GUI backends.
+        while let Some(id) = overlays.pop() {
+            self.paint_node_overlay(id, area, buffer);
+        }
+        if let Some(id) = self.focus.filter(|_| self.dialog.is_none())
+            && let (Some(node), Some(frame)) = (self.node(id), self.global_frame(id))
+            && !node.props.accessibility.state.disabled
+        {
+            let rect = cells(frame, self.metrics, area);
+            let clip = cells(self.clip_rect(id), self.metrics, area).intersection(area);
+            if focus_uses_text_indicator(node, rect) {
+                let rect = rect.intersection(clip).intersection(buffer.area);
+                for y in rect.y..rect.bottom() {
+                    for x in rect.x..rect.right() {
+                        let cell = &mut buffer[(x, y)];
+                        if focus_text_cell(cell) {
+                            cell.set_style(Style::new().add_modifier(Modifier::UNDERLINED));
+                        }
+                    }
+                }
+            } else {
+                let text_cells = capture_border_text(buffer, rect, clip);
+                stroke_frame(
+                    buffer,
+                    frame,
+                    self.metrics,
+                    area,
+                    clip,
+                    [true; 4],
+                    [FOCUS; 4],
+                    BorderStyle::Solid,
+                    [true; 4],
+                    1.0,
+                );
+                // Point padding may be smaller than a terminal cell. A
+                // focus indicator must preserve the label and caret when
+                // their cell overlaps the snapped border.
+                for (position, mut cell) in text_cells {
+                    cell.set_style(Style::new().add_modifier(Modifier::UNDERLINED));
+                    buffer[position] = cell;
+                }
+            }
+        }
+        if let Some((message, until)) = &self.toast
+            && *until > self.now
+        {
+            paint_toast(message, self.dark, area, buffer);
+        }
+        if let Some(dialog) = &self.dialog {
+            paint_dialog(dialog, self.dialog_selection, self.dark, area, buffer);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_image_protocol(
+        &self,
+        id: NodeId,
+        raster: &std::sync::Arc<crate::image::Raster>,
+        frame: Rect,
+        clip: Rect,
+        mode: ResizeMode,
+        tint: Option<Color>,
+        opacity: f32,
+        area: CellRect,
+        buffer: &mut Buffer,
+        ids: &[NodeId],
+    ) -> bool {
+        let Some(config) = self.protocol.config() else {
+            return false;
+        };
+        let Some(request) = crate::protocol::Request::capture(
+            raster.clone(),
+            config,
+            frame,
+            clip,
+            mode,
+            tint,
+            opacity,
+            self.metrics,
+            area,
+            buffer,
+        ) else {
+            return false;
+        };
+        if !self.image_protocol_unobscured(id, request.region(), area, ids) {
+            return false;
+        }
+        self.paint_image_protocol(id, request, buffer)
+    }
+
+    /// Protocol escape anchors reserve whole cells. Reject real foreground
+    /// ink and native adornments intersecting them; transparent layout-only
+    /// containers do not obscure their descendants' images.
+    fn image_protocol_unobscured(
+        &self,
+        id: NodeId,
+        region: CellRect,
+        area: CellRect,
+        ids: &[NodeId],
+    ) -> bool {
+        if self.dialog.is_some()
+            || self
+                .toast
+                .as_ref()
+                .is_some_and(|(_, until)| *until > self.now)
+        {
+            return false;
+        }
+        let mut after = false;
+        for &other in ids {
+            let Some(node) = self.node(other) else {
+                continue;
+            };
+            let Some(frame) = self.global_frame(other) else {
+                continue;
+            };
+            let style = self.animated_style(other);
+            if style.hidden || self.paint_opacity(other) <= 0.0 {
+                continue;
+            }
+            let clip = cells(self.clip_rect(other), self.metrics, area).intersection(area);
+            let rect = cells(frame, self.metrics, area).intersection(clip);
+            let hits = |rect: CellRect| !region.intersection(rect.intersection(clip)).is_empty();
+            // Borders and scrollbars are painted after their descendants.
+            if (style.borders.is_visible() && protocol_border_hits(rect, region))
+                || (node.kind == ViewKind::Scroll
+                    && node.scroll.shows_indicator
+                    && (hits(CellRect::new(
+                        rect.right().saturating_sub(1),
+                        rect.y,
+                        1,
+                        rect.height,
+                    )) || (node.scroll.horizontal
+                        && hits(CellRect::new(
+                            rect.x,
+                            rect.bottom().saturating_sub(1),
+                            rect.width,
+                            1,
+                        )))))
+            {
+                return false;
+            }
+            if style.outline.is_visible() {
+                let offset = style.outline.offset + style.outline.width / 2.0;
+                let outline = Rect {
+                    x: frame.x - offset,
+                    y: frame.y - offset,
+                    width: frame.width + offset * 2.0,
+                    height: frame.height + offset * 2.0,
+                };
+                if protocol_border_hits(
+                    cells(outline, self.metrics, area).intersection(clip),
+                    region,
+                ) {
+                    return false;
+                }
+            }
+            if other == id {
+                after = true;
+                continue;
+            }
+            // Never layer two independently managed image protocols or mix
+            // another raster over their reserved cells.
+            if matches!(node.kind, ViewKind::Image | ViewKind::Canvas)
+                && (node.image_raster.is_some() || node.canvas_raster.is_some())
+                && hits(rect)
+            {
+                return false;
+            }
+            if !after {
+                continue;
+            }
+            if node.kind == ViewKind::Modal {
+                return false;
+            }
+            if let Some((_, _, content)) = &node.text
+                && hits(cells(
+                    relative_frame(frame, node.frame, *content),
+                    self.metrics,
+                    area,
+                ))
+            {
+                return false;
+            }
+            if matches!(
+                node.kind,
+                ViewKind::Input | ViewKind::Native | ViewKind::WebView | ViewKind::Video
+            ) && hits(rect)
+            {
+                return false;
+            }
+            if node.kind == ViewKind::Screen
+                && node.screen.header_shown
+                && hits(cells(
+                    Rect {
+                        height: node.screen.header_height.min(frame.height),
+                        ..frame
+                    },
+                    self.metrics,
+                    area,
+                ))
+            {
+                return false;
+            }
+            if (!style.background_color.is_transparent()
+                || style
+                    .effects
+                    .as_ref()
+                    .is_some_and(|e| !e.background_images.is_empty()))
+                && hits(rect)
+            {
+                return false;
+            }
+            if style.shadow.is_visible() {
+                let spread = style.shadow.radius * 2.0;
+                let shadow = Rect {
+                    x: frame.x + style.shadow.offset_x - spread,
+                    y: frame.y + style.shadow.offset_y - spread,
+                    width: frame.width + spread * 2.0,
+                    height: frame.height + spread * 2.0,
+                };
+                if hits(cells(shadow, self.metrics, area)) {
+                    return false;
+                }
+            }
+            if let Some(effects) = &style.effects {
+                for shadow in effects.box_shadows.iter().filter(|s| s.is_visible()) {
+                    let spread = shadow.spread.max(0.0) + shadow.blur.max(0.0);
+                    let shadow = Rect {
+                        x: frame.x + shadow.offset_x - spread,
+                        y: frame.y + shadow.offset_y - spread,
+                        width: frame.width + spread * 2.0,
+                        height: frame.height + spread * 2.0,
+                    };
+                    if hits(cells(shadow, self.metrics, area)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        if let Some(focus) = self.focus
+            && let (Some(node), Some(frame)) = (self.node(focus), self.global_frame(focus))
+            && !node.props.accessibility.state.disabled
+            && !focus_uses_text_indicator(node, cells(frame, self.metrics, area))
+            && protocol_border_hits(
+                cells(frame, self.metrics, area).intersection(cells(
+                    self.clip_rect(focus),
+                    self.metrics,
+                    area,
+                )),
+                region,
+            )
+        {
+            return false;
+        }
+        true
+    }
+
+    fn is_paint_descendant(&self, id: NodeId, ancestor: NodeId) -> bool {
+        let mut parent = Some(id);
+        while let Some(id) = parent {
+            if id == ancestor {
+                return true;
+            }
+            let Some(node) = self.node(id) else {
+                return false;
+            };
+            if node.kind == ViewKind::Modal {
+                return false;
+            }
+            parent = node.parent;
+        }
+        false
+    }
+
+    fn paint_node_overlay(&self, id: NodeId, area: CellRect, buffer: &mut Buffer) {
+        if let (Some(node), Some(frame)) = (self.node(id), self.global_frame(id)) {
+            let style = self.animated_style(id);
+            let opacity = self.paint_opacity(id);
+            let clip = self.clip_rect(id);
+            if style.borders.is_visible() || style.outline.is_visible() {
+                let saved = capture_border_text(
+                    buffer,
+                    cells(frame, self.metrics, area),
+                    cells(clip, self.metrics, area),
+                );
+                self.paint_borders(frame, clip, &style, opacity, area, buffer);
+                for (position, cell) in saved {
+                    buffer[position] = cell;
+                }
+            }
+            if node.kind == ViewKind::Scroll && node.scroll.shows_indicator {
+                paint_scrollbars(node, frame, clip, opacity, self.metrics, area, buffer);
+            }
+        }
+    }
+
+    fn paint_opacity(&self, id: NodeId) -> f32 {
+        let mut id = Some(id);
+        let mut opacity = 1.0;
+        while let Some(current) = id {
+            let Some(node) = self.node(current) else {
+                break;
+            };
+            let style = self.animated_style(current);
+            if style.hidden {
+                return 0.0;
+            }
+            opacity *= style.opacity.clamp(0.0, 1.0);
+            if self.pressed == Some(current) {
+                opacity *= node.props.active_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+            }
+            if node.kind == ViewKind::Modal {
+                break;
+            }
+            id = node.parent;
+        }
+        opacity
+    }
+
+    fn paint_decor(
+        &self,
+        frame: Rect,
+        clip: Rect,
+        style: &ViewStyle,
+        opacity: f32,
+        area: CellRect,
+        buffer: &mut Buffer,
+    ) {
+        let rect = cells(frame, self.metrics, area);
+        let clip = cells(clip, self.metrics, area).intersection(area);
+        if rect.is_empty() || clip.is_empty() {
+            return;
+        }
+        let matrix = style
+            .effects
+            .as_ref()
+            .and_then(|effects| nsh_core::compose_color_matrices(&effects.filters));
+        let filtered = |c| filter_color(c, matrix.as_ref());
+        if style.shadow.is_visible() {
+            paint_shadow(
+                frame,
+                clip,
+                style.shadow.offset_x,
+                style.shadow.offset_y,
+                style.shadow.radius * 2.0,
+                0.0,
+                style.shadow.color,
+                opacity * style.shadow.opacity,
+                self.metrics,
+                area,
+                buffer,
+            );
+        }
+        if let Some(effects) = &style.effects {
+            for shadow in effects
+                .box_shadows
+                .iter()
+                .rev()
+                .filter(|s| !s.inset && s.is_visible())
+            {
+                paint_shadow(
+                    frame,
+                    clip,
+                    shadow.offset_x,
+                    shadow.offset_y,
+                    shadow.blur,
+                    shadow.spread,
+                    filtered(shadow.color),
+                    opacity,
+                    self.metrics,
+                    area,
+                    buffer,
+                );
+            }
+        }
+        let gradients: Vec<_> = style
+            .effects
+            .iter()
+            .flat_map(|e| e.background_images.iter())
+            .filter(|g| g.stops.len() >= 2)
+            .map(|g| (g, g.resolved_stops()))
+            .collect();
+        for y in rect.intersection(clip).y..rect.intersection(clip).bottom() {
+            for x in rect.intersection(clip).x..rect.intersection(clip).right() {
+                let mut color = filtered(style.background_color);
+                for (gradient, stops) in gradients.iter().rev() {
+                    let px = (f32::from(x - area.x) + 0.5) * self.metrics.width() - frame.x;
+                    let py = (f32::from(y - area.y) + 0.5) * self.metrics.height() - frame.y;
+                    color = over_color(
+                        filtered(gradient_color(
+                            gradient,
+                            stops,
+                            px,
+                            py,
+                            frame.width,
+                            frame.height,
+                        )),
+                        color,
+                    );
+                }
+                if !color.is_transparent() {
+                    let cell = &mut buffer[(x, y)];
+                    let alpha = alpha(color) * opacity;
+                    cell.set_bg(blend(color, cell.bg, opacity, style.blend_mode));
+                    if alpha >= 0.999 {
+                        cell.set_symbol(" ")
+                            .set_style(Style::new().remove_modifier(Modifier::all()));
+                    } else {
+                        cell.set_fg(blend(color, cell.fg, opacity, style.blend_mode));
+                    }
+                }
+            }
+        }
+        if let Some(effects) = &style.effects {
+            for shadow in effects
+                .box_shadows
+                .iter()
+                .rev()
+                .filter(|s| s.inset && s.is_visible())
+            {
+                paint_inset_shadow(frame, clip, shadow, opacity, self.metrics, area, buffer);
+            }
+        }
+    }
+
+    fn paint_borders(
+        &self,
+        frame: Rect,
+        clip: Rect,
+        style: &ViewStyle,
+        opacity: f32,
+        area: CellRect,
+        buffer: &mut Buffer,
+    ) {
+        let clip = cells(clip, self.metrics, area).intersection(area);
+        let matrix = style
+            .effects
+            .as_ref()
+            .and_then(|effects| nsh_core::compose_color_matrices(&effects.filters));
+        let filtered = |color| filter_color(color, matrix.as_ref());
+        let radii = style.radii();
+        let rounded = [
+            radii.top_left > 0.0,
+            radii.top_right > 0.0,
+            radii.bottom_right > 0.0,
+            radii.bottom_left > 0.0,
+        ];
+        let sides = std::array::from_fn(|i| {
+            style.borders.widths[i] > 0.0 && !style.borders.colors[i].is_transparent()
+        });
+        if style.borders.is_visible() {
+            stroke_frame(
+                buffer,
+                frame,
+                self.metrics,
+                area,
+                clip,
+                sides,
+                style.borders.colors.map(filtered),
+                style.borders.style,
+                rounded,
+                opacity,
+            );
+        }
+        if style.outline.is_visible() {
+            let offset = style.outline.offset + style.outline.width / 2.0;
+            let outline = Rect {
+                x: frame.x - offset,
+                y: frame.y - offset,
+                width: frame.width + offset * 2.0,
+                height: frame.height + offset * 2.0,
+            };
+            stroke_frame(
+                buffer,
+                outline,
+                self.metrics,
+                area,
+                clip,
+                [true; 4],
+                [filtered(style.outline.color); 4],
+                style.outline.style,
+                rounded,
+                opacity,
+            );
+        }
+    }
+
+    fn paint_header(
+        &self,
+        id: NodeId,
+        frame: Rect,
+        clip: Rect,
+        opacity: f32,
+        area: CellRect,
+        buffer: &mut Buffer,
+    ) {
+        let Some(node) = self.node(id) else { return };
+        let config = &node.screen;
+        if !config.header_shown || config.header_height <= 0.0 {
+            return;
+        }
+        let header = cells(
+            Rect {
+                height: config.header_height.min(frame.height),
+                ..frame
+            },
+            self.metrics,
+            area,
+        );
+        let clip = cells(clip, self.metrics, area).intersection(area);
+        let background = config.background_color.unwrap_or(if self.dark {
+            Color(0x2428_32ff)
+        } else {
+            Color(0xf4f5_f7ff)
+        });
+        if !config.header_transparent {
+            fill(
+                buffer,
+                header,
+                clip,
+                background,
+                opacity,
+                BlendMode::Normal,
+                true,
+            )
+        }
+        let has_back = node
+            .parent
+            .and_then(|p| self.node(p))
+            .is_some_and(|parent| {
+                parent
+                    .children
+                    .iter()
+                    .filter(|&&id| self.node(id).is_some_and(|n| n.kind == ViewKind::Screen))
+                    .position(|&child| child == id)
+                    .is_some_and(|i| i > 0)
+            });
+        let row = header.y + header.height.saturating_sub(1) / 2;
+        if has_back && config.back_visible && config.left.is_none() {
+            let label = format!("‹ {}", config.back_title.as_deref().unwrap_or("Back"));
+            write_text(
+                buffer,
+                header.x.saturating_add(1),
+                row,
+                header.width.saturating_sub(2).min(18),
+                &label,
+                clip,
+                config.tint_color.unwrap_or(FOCUS),
+                opacity,
+                Modifier::empty(),
+            );
+        }
+        if config.title_view.is_none()
+            && let Some(title) = &config.title
+        {
+            let width = UnicodeWidthStr::width(title.as_ref())
+                .min(header.width.saturating_sub(4) as usize) as u16;
+            let x = header.x + header.width.saturating_sub(width) / 2;
+            write_text(
+                buffer,
+                x,
+                row,
+                width,
+                title,
+                clip,
+                config.title_color.unwrap_or(if self.dark {
+                    Color(0xe6e9_efff)
+                } else {
+                    Color::BLACK
+                }),
+                opacity,
+                Modifier::BOLD,
+            );
+        }
+    }
+}
+
+fn focus_uses_text_indicator(node: &Node, rect: CellRect) -> bool {
+    rect.height == 1
+        || (rect.height <= 2
+            && node.kind == ViewKind::View
+            && (node.props.accessibility.role == AccessibilityRole::Button
+                || [
+                    EventKind::Press,
+                    EventKind::LongPress,
+                    EventKind::PressIn,
+                    EventKind::PressOut,
+                ]
+                .into_iter()
+                .any(|event| node.events.contains(event))))
+}
+
+fn focus_text_cell(cell: &ratatui::buffer::Cell) -> bool {
+    // Image protocols reserve their cells and may encode an image ID in
+    // the foreground color. Focus only decorates ordinary text glyphs.
+    cell.diff_option == CellDiffOption::None
+        && !border_symbol(cell.symbol())
+        && cell.symbol().chars().any(|c| !c.is_whitespace())
+        && !cell.symbol().chars().any(|c| {
+            c.is_control()
+                || matches!(c,'\u{2580}'..='\u{259f}'|'\u{2800}'..='\u{28ff}'|'\u{10eeee}')
+        })
+}
+
+fn border_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        " " | "─"
+            | "│"
+            | "┌"
+            | "┐"
+            | "┘"
+            | "└"
+            | "╭"
+            | "╮"
+            | "╯"
+            | "╰"
+            | "╌"
+            | "╎"
+            | "┈"
+            | "┊"
+    )
+}
+
+fn capture_border_text(
+    buffer: &Buffer,
+    rect: CellRect,
+    clip: CellRect,
+) -> Vec<((u16, u16), ratatui::buffer::Cell)> {
+    let painted = rect.intersection(clip).intersection(buffer.area);
+    let mut saved = Vec::new();
+    for y in painted.y..painted.bottom() {
+        let mut start = painted.right();
+        let mut end = painted.x;
+        for x in painted.x..painted.right() {
+            let cell = &buffer[(x, y)];
+            if !border_symbol(cell.symbol()) || cell.modifier.contains(Modifier::REVERSED) {
+                start = start.min(x);
+                end =
+                    end.max(x.saturating_add(UnicodeWidthStr::width(cell.symbol()).max(1) as u16));
+            }
+        }
+        for x in painted.x..painted.right() {
+            if (x == rect.x || x == rect.right() - 1 || y == rect.y || y == rect.bottom() - 1)
+                && (start..end).contains(&x)
+            {
+                saved.push(((x, y), buffer[(x, y)].clone()));
+            }
+        }
+    }
+    saved
+}
+
+fn image_geometry(node: &Node, frame: Rect, clip: Rect) -> (Rect, Rect, ResizeMode) {
+    if node.resize_mode == ResizeMode::Center
+        && let Some((width, height)) = node.image_source.as_ref().and_then(|source| source.size)
+        && width.is_finite()
+        && height.is_finite()
+        && width > 0.0
+        && height > 0.0
+    {
+        let width = width
+            * if node.frame.width > 0.0 {
+                frame.width / node.frame.width
+            } else {
+                1.0
+            };
+        let height = height
+            * if node.frame.height > 0.0 {
+                frame.height / node.frame.height
+            } else {
+                1.0
+            };
+        let image = Rect {
+            x: frame.x + (frame.width - width) * 0.5,
+            y: frame.y + (frame.height - height) * 0.5,
+            width,
+            height,
+        };
+        (
+            image,
+            crate::surface::intersect(frame, clip),
+            ResizeMode::Stretch,
+        )
+    } else {
+        (frame, clip, node.resize_mode)
+    }
+}
+
+fn finite_rect(rect: Rect) -> bool {
+    [rect.x, rect.y, rect.width, rect.height]
+        .iter()
+        .all(|v| v.is_finite())
+        && rect.width > 0.0
+        && rect.height > 0.0
+}
+
+fn protocol_border_hits(rect: CellRect, region: CellRect) -> bool {
+    if rect.is_empty() {
+        return false;
+    }
+    [
+        CellRect::new(rect.x, rect.y, rect.width, 1),
+        CellRect::new(rect.x, rect.bottom() - 1, rect.width, 1),
+        CellRect::new(rect.x, rect.y, 1, rect.height),
+        CellRect::new(rect.right() - 1, rect.y, 1, rect.height),
+    ]
+    .into_iter()
+    .any(|border| !border.intersection(region).is_empty())
+}
+
+fn cells(rect: Rect, metrics: CellMetrics, area: CellRect) -> CellRect {
+    if !finite_rect(rect) {
+        return CellRect::default();
+    }
+    // Clamp each edge separately: saturating a negative origin before
+    // finding the far edge incorrectly moves clipped views to the right.
+    let x = (rect.x / metrics.width())
+        .floor()
+        .max(0.0)
+        .min(f32::from(area.width));
+    let y = (rect.y / metrics.height())
+        .floor()
+        .max(0.0)
+        .min(f32::from(area.height));
+    let right = ((rect.x + rect.width) / metrics.width())
+        .ceil()
+        .max(0.0)
+        .min(f32::from(area.width));
+    let bottom = ((rect.y + rect.height) / metrics.height())
+        .ceil()
+        .max(0.0)
+        .min(f32::from(area.height));
+    CellRect::new(
+        area.x + x as u16,
+        area.y + y as u16,
+        (right - x).max(0.0) as u16,
+        (bottom - y).max(0.0) as u16,
+    )
+}
+
+fn relative_frame(global: Rect, local: Rect, content: Rect) -> Rect {
+    let sx = if local.width > 0.0 {
+        global.width / local.width
+    } else {
+        1.0
+    };
+    let sy = if local.height > 0.0 {
+        global.height / local.height
+    } else {
+        1.0
+    };
+    Rect {
+        x: global.x + content.x * sx,
+        y: global.y + content.y * sy,
+        width: content.width * sx,
+        height: content.height * sy,
+    }
+}
+
+fn fill(
+    buffer: &mut Buffer,
+    rect: CellRect,
+    clip: CellRect,
+    color: Color,
+    opacity: f32,
+    mode: BlendMode,
+    clear: bool,
+) {
+    let rect = rect.intersection(clip).intersection(buffer.area);
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            let cell = &mut buffer[(x, y)];
+            cell.set_bg(blend(color, cell.bg, opacity, mode));
+            if clear && alpha(color) * opacity >= 0.999 {
+                cell.set_symbol(" ");
+            } else {
+                cell.set_fg(blend(color, cell.fg, opacity, mode));
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke(
+    buffer: &mut Buffer,
+    rect: CellRect,
+    clip: CellRect,
+    sides: [bool; 4],
+    colors: [Color; 4],
+    style: BorderStyle,
+    rounded: [bool; 4],
+    opacity: f32,
+) {
+    if rect.is_empty() {
+        return;
+    }
+    let clip = clip.intersection(buffer.area);
+    let [top, right, bottom, left] = sides;
+    let mut put = |x: u16, y: u16, symbol: &str, color: Color| {
+        if clip.contains((x, y).into()) {
+            let cell = &mut buffer[(x, y)];
+            let fg = blend(color, cell.bg, opacity, BlendMode::Normal);
+            cell.set_symbol(symbol).set_fg(fg);
+        }
+    };
+    let horizontal = match style {
+        BorderStyle::Solid => "─",
+        BorderStyle::Dashed => "╌",
+        BorderStyle::Dotted => "┈",
+    };
+    let vertical = match style {
+        BorderStyle::Solid => "│",
+        BorderStyle::Dashed => "╎",
+        BorderStyle::Dotted => "┊",
+    };
+    for x in rect.x..rect.right() {
+        if top {
+            put(x, rect.y, horizontal, colors[0])
+        }
+        if bottom && rect.height > 1 {
+            put(x, rect.bottom() - 1, horizontal, colors[2])
+        }
+    }
+    for y in rect.y..rect.bottom() {
+        if left {
+            put(rect.x, y, vertical, colors[3])
+        }
+        if right && rect.width > 1 {
+            put(rect.right() - 1, y, vertical, colors[1])
+        }
+    }
+    if rect.width > 1 && rect.height > 1 {
+        if top && left {
+            put(
+                rect.x,
+                rect.y,
+                if rounded[0] { "╭" } else { "┌" },
+                colors[0],
+            )
+        }
+        if top && right {
+            put(
+                rect.right() - 1,
+                rect.y,
+                if rounded[1] { "╮" } else { "┐" },
+                colors[0],
+            )
+        }
+        if bottom && right {
+            put(
+                rect.right() - 1,
+                rect.bottom() - 1,
+                if rounded[2] { "╯" } else { "┘" },
+                colors[2],
+            )
+        }
+        if bottom && left {
+            put(
+                rect.x,
+                rect.bottom() - 1,
+                if rounded[3] { "╰" } else { "└" },
+                colors[2],
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke_frame(
+    buffer: &mut Buffer,
+    frame: Rect,
+    metrics: CellMetrics,
+    area: CellRect,
+    clip: CellRect,
+    mut sides: [bool; 4],
+    colors: [Color; 4],
+    style: BorderStyle,
+    rounded: [bool; 4],
+    opacity: f32,
+) {
+    // Clipping a box must not move its border to the clipping edge.
+    sides[0] &= frame.y >= 0.0;
+    sides[1] &= frame.x + frame.width <= f32::from(area.width) * metrics.width();
+    sides[2] &= frame.y + frame.height <= f32::from(area.height) * metrics.height();
+    sides[3] &= frame.x >= 0.0;
+    stroke(
+        buffer,
+        cells(frame, metrics, area),
+        clip,
+        sides,
+        colors,
+        style,
+        rounded,
+        opacity,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_input(
+    node: &Node,
+    focused: bool,
+    frame: Rect,
+    clip: Rect,
+    opacity: f32,
+    foreground: Option<Color>,
+    metrics: CellMetrics,
+    area: CellRect,
+    buffer: &mut Buffer,
+) {
+    let geometry = input_geometry(node, frame, metrics, area);
+    let rect = geometry.visible;
+    let clip = cells(clip, metrics, area)
+        .intersection(rect)
+        .intersection(area);
+    if clip.is_empty() {
+        return;
+    }
+    let actual_columns = geometry.columns;
+    let actual_rows = geometry.rows;
+    let origin_x = geometry.column;
+    let origin_y = geometry.row;
+    let columns = if node.input.multiline {
+        actual_columns
+    } else {
+        usize::MAX
+    };
+    let (scroll_row, scroll_col) = input_scroll(node, focused, actual_columns, actual_rows);
+    let selection = node.editor.selected_range();
+    let placeholder = node.editor.text().is_empty();
+    let text = if placeholder {
+        node.input.placeholder.as_str()
+    } else {
+        node.editor.text()
+    };
+    let color = if placeholder {
+        node.input.placeholder_color.unwrap_or(Color(0x8080_80ff))
+    } else {
+        foreground.unwrap_or(node.input.style.color)
+    };
+    let modifiers = text_modifiers(node.input.style);
+    let selected_color = node.input.selection_color.unwrap_or(Color(0x388b_fdcc));
+    let (mut row, mut column) = (0usize, 0usize);
+    let alignments = input_line_offsets(node, focused, actual_columns);
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        if grapheme == "\n" {
+            row += 1;
+            column = 0;
+            continue;
+        }
+        let secure = !placeholder && node.input.secure;
+        let width = if secure {
+            1
+        } else if grapheme == "\t" {
+            4 - column % 4
+        } else {
+            UnicodeWidthStr::width(grapheme)
+        };
+        if column > 0 && column.saturating_add(width) > columns {
+            row += 1;
+            column = 0
+        }
+        if let (Some(y), Some(x)) = (row.checked_sub(scroll_row), column.checked_sub(scroll_col)) {
+            let x = origin_x
+                .saturating_add(x as i64)
+                .saturating_add(alignments.get(row).copied().unwrap_or(0) as i64);
+            let y = origin_y.saturating_add(y as i64);
+            if (0..=i64::from(u16::MAX)).contains(&x) && (0..=i64::from(u16::MAX)).contains(&y) {
+                let selected =
+                    focused && !placeholder && selection.start <= offset && offset < selection.end;
+                let symbol = if secure {
+                    "•"
+                } else if grapheme == "\t" {
+                    " "
+                } else {
+                    grapheme
+                };
+                paint_grapheme(
+                    buffer,
+                    x as u16,
+                    y as u16,
+                    width,
+                    symbol,
+                    clip,
+                    color,
+                    selected.then_some(selected_color),
+                    opacity,
+                    modifiers,
+                );
+            }
+        }
+        column = column.saturating_add(width);
+    }
+    if focused && !node.input.caret_hidden && node.input.editable {
+        let (row, column) = node.editor.cursor_cell(columns, node.input.secure);
+        let y = origin_y.saturating_add(row.saturating_sub(scroll_row) as i64);
+        let x = origin_x
+            .saturating_add(column.saturating_sub(scroll_col) as i64)
+            .saturating_add(alignments.get(row).copied().unwrap_or(0) as i64)
+            .min(origin_x.saturating_add(actual_columns.saturating_sub(1) as i64));
+        if (0..=i64::from(u16::MAX)).contains(&x)
+            && (0..=i64::from(u16::MAX)).contains(&y)
+            && clip.contains((x as u16, y as u16).into())
+        {
+            buffer[(x as u16, y as u16)].set_style(Style::new().add_modifier(Modifier::REVERSED));
+        }
+    }
+}
+
+pub(crate) struct InputGeometry {
+    pub(crate) column: i64,
+    pub(crate) row: i64,
+    pub(crate) columns: usize,
+    pub(crate) rows: usize,
+    pub(crate) visible: CellRect,
+}
+
+pub(crate) fn input_geometry(
+    node: &Node,
+    frame: Rect,
+    metrics: CellMetrics,
+    area: CellRect,
+) -> InputGeometry {
+    let inner = if node.input_content.width > 0.0 && node.input_content.height > 0.0 {
+        relative_frame(frame, node.frame, node.input_content)
+    } else {
+        frame
+    };
+    InputGeometry {
+        column: i64::from(area.x) + (inner.x / metrics.width()).floor() as i64,
+        row: i64::from(area.y) + (inner.y / metrics.height()).floor() as i64,
+        columns: (inner.width / metrics.width()).floor().max(1.0) as usize,
+        rows: (inner.height / metrics.height()).ceil().max(1.0) as usize,
+        visible: cells(inner, metrics, area),
+    }
+}
+
+pub(crate) fn input_line_offsets(node: &Node, focused: bool, columns: usize) -> Vec<usize> {
+    let columns = columns.max(1);
+    let text = if node.editor.text().is_empty() {
+        node.input.placeholder.as_str()
+    } else {
+        node.editor.text()
+    };
+    let secure = !node.editor.text().is_empty() && node.input.secure;
+    let wrap = if node.input.multiline {
+        columns
+    } else {
+        usize::MAX
+    };
+    let mut widths = Vec::new();
+    let mut column = 0usize;
+    for grapheme in text.graphemes(true) {
+        if grapheme == "\n" {
+            widths.push(column);
+            column = 0;
+            continue;
+        }
+        let width = if secure {
+            1
+        } else if grapheme == "\t" {
+            4 - column % 4
+        } else {
+            UnicodeWidthStr::width(grapheme)
+        };
+        if column > 0 && column.saturating_add(width) > wrap {
+            widths.push(column);
+            column = 0;
+        }
+        column = column.saturating_add(width);
+    }
+    widths.push(column);
+    if node.input.multiline && column >= columns {
+        widths.extend(std::iter::repeat_n(0, column / columns));
+    }
+    let cursor = node.editor.cursor_cell(wrap, node.input.secure);
+    widths
+        .into_iter()
+        .enumerate()
+        .map(|(row, width)| {
+            let free = columns.saturating_sub(width);
+            let alignment = match node.input.align {
+                TextAlign::Center => free / 2,
+                TextAlign::Right => free,
+                TextAlign::Auto if node.input.rtl => free,
+                _ => 0,
+            };
+            // Right alignment can put the insertion boundary just outside
+            // the field. Keep one cell for its native caret on that row.
+            if focused && row == cursor.0 {
+                alignment.min(columns.saturating_sub(cursor.1.saturating_add(1)))
+            } else {
+                alignment
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn input_scroll(
+    node: &Node,
+    focused: bool,
+    columns: usize,
+    rows: usize,
+) -> (usize, usize) {
+    if !focused {
+        return (0, 0);
+    }
+    let (row, column) = node.editor.cursor_cell(
+        if node.input.multiline {
+            columns.max(1)
+        } else {
+            usize::MAX
+        },
+        node.input.secure,
+    );
+    if node.input.multiline {
+        (row.saturating_sub(rows.saturating_sub(1)), 0)
+    } else {
+        (0, column.saturating_sub(columns.saturating_sub(1)))
+    }
+}
+
+fn text_modifiers(style: nsh_core::ResolvedTextStyle) -> Modifier {
+    let mut modifiers = Modifier::empty();
+    if style.font_weight >= 600 {
+        modifiers |= Modifier::BOLD
+    }
+    if style.italic {
+        modifiers |= Modifier::ITALIC
+    }
+    if style.decoration.underline {
+        modifiers |= Modifier::UNDERLINED
+    }
+    if style.decoration.line_through {
+        modifiers |= Modifier::CROSSED_OUT
+    }
+    modifiers
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_grapheme(
+    buffer: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: usize,
+    symbol: &str,
+    clip: CellRect,
+    color: Color,
+    selected: Option<Color>,
+    opacity: f32,
+    modifier: Modifier,
+) {
+    if width == 0
+        || symbol.chars().any(|c| c.is_control())
+        || !clip.contains((x, y).into())
+        || usize::from(x).saturating_add(width) > usize::from(clip.right())
+    {
+        return;
+    }
+    for i in 0..width {
+        let cell = &mut buffer[(x + i as u16, y)];
+        if let Some(selected) = selected {
+            cell.set_bg(blend(selected, cell.bg, opacity, BlendMode::Normal));
+        }
+        let fg = blend(color, cell.bg, opacity, BlendMode::Normal);
+        cell.set_style(Style::new().fg(fg).add_modifier(modifier))
+            .set_symbol(if i == 0 { symbol } else { " " });
+    }
+}
+
+fn paint_scrollbars(
+    node: &Node,
+    frame: Rect,
+    clip: Rect,
+    opacity: f32,
+    metrics: CellMetrics,
+    area: CellRect,
+    buffer: &mut Buffer,
+) {
+    let rect = cells(frame, metrics, area);
+    let clip = cells(clip, metrics, area)
+        .intersection(rect)
+        .intersection(area);
+    if rect.is_empty() || clip.is_empty() {
+        return;
+    }
+    let color = Color(0x8080_80b0);
+    if node.scroll.content.height > frame.height + 0.5 {
+        let length = usize::from(rect.height);
+        let thumb = ((frame.height / node.scroll.content.height) * length as f32)
+            .ceil()
+            .max(1.0) as usize;
+        let offset = (node.scroll.y / (node.scroll.content.height - frame.height)).clamp(0.0, 1.0);
+        let start = (offset * length.saturating_sub(thumb) as f32).round() as usize;
+        let x = rect.right() - 1;
+        for i in start..start.saturating_add(thumb).min(length) {
+            let y = rect.y + i as u16;
+            if clip.contains((x, y).into()) {
+                let cell = &mut buffer[(x, y)];
+                let fg = blend(color, cell.bg, opacity, BlendMode::Normal);
+                cell.set_symbol("▐").set_fg(fg);
+            }
+        }
+    }
+    if node.scroll.content.width > frame.width + 0.5 {
+        let length = usize::from(rect.width);
+        let thumb = ((frame.width / node.scroll.content.width) * length as f32)
+            .ceil()
+            .max(1.0) as usize;
+        let offset = (node.scroll.x / (node.scroll.content.width - frame.width)).clamp(0.0, 1.0);
+        let offset = if node.scroll.mirrored {
+            1.0 - offset
+        } else {
+            offset
+        };
+        let start = (offset * length.saturating_sub(thumb) as f32).round() as usize;
+        let y = rect.bottom() - 1;
+        for i in start..start.saturating_add(thumb).min(length) {
+            let x = rect.x + i as u16;
+            if clip.contains((x, y).into()) {
+                let cell = &mut buffer[(x, y)];
+                let fg = blend(color, cell.bg, opacity, BlendMode::Normal);
+                cell.set_symbol("▁").set_fg(fg);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_text(
+    buffer: &mut Buffer,
+    mut x: u16,
+    y: u16,
+    width: u16,
+    text: &str,
+    clip: CellRect,
+    color: Color,
+    opacity: f32,
+    modifier: Modifier,
+) {
+    let end = x.saturating_add(width).min(clip.right());
+    for grapheme in text.graphemes(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        if grapheme.chars().any(|c| c.is_control()) {
+            continue;
+        }
+        if usize::from(x).saturating_add(width) > usize::from(end) {
+            break;
+        }
+        paint_grapheme(
+            buffer, x, y, width, grapheme, clip, color, None, opacity, modifier,
+        );
+        x = x.saturating_add(width as u16);
+    }
+}
+
+fn wrapped_lines(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = vec![String::new()];
+    let mut column = 0;
+    for grapheme in text.graphemes(true) {
+        if grapheme == "\n" {
+            lines.push(String::new());
+            column = 0;
+            continue;
+        }
+        if grapheme.chars().any(|c| c.is_control()) {
+            continue;
+        }
+        let w = UnicodeWidthStr::width(grapheme);
+        if column + w > width && column > 0 {
+            lines.push(String::new());
+            column = 0
+        }
+        lines.last_mut().expect("one line").push_str(grapheme);
+        column += w;
+    }
+    lines
+}
+
+fn paint_toast(text: &str, dark: bool, area: CellRect, buffer: &mut Buffer) {
+    if area.width < 4 || area.height < 2 {
+        return;
+    }
+    let width = (UnicodeWidthStr::width(text)
+        .saturating_add(4)
+        .min(usize::from(area.width.saturating_sub(2)))) as u16;
+    let lines = wrapped_lines(text, usize::from(width.saturating_sub(4)));
+    let height = (lines.len() as u16).saturating_add(2).min(area.height);
+    let rect = CellRect::new(
+        area.x + (area.width - width) / 2,
+        area.bottom().saturating_sub(height + 1).max(area.y),
+        width,
+        height,
+    );
+    let background = if dark {
+        Color(0xe6e9_efff)
+    } else {
+        Color(0x2428_32ff)
+    };
+    let foreground = if dark {
+        Color(0x181b_22ff)
+    } else {
+        Color(0xffff_ffff)
+    };
+    fill(buffer, rect, area, background, 1.0, BlendMode::Normal, true);
+    for (i, line) in lines
+        .iter()
+        .take(usize::from(height.saturating_sub(2)))
+        .enumerate()
+    {
+        write_text(
+            buffer,
+            rect.x + 2,
+            rect.y + 1 + i as u16,
+            rect.width.saturating_sub(4),
+            line,
+            area,
+            foreground,
+            1.0,
+            Modifier::empty(),
+        );
+    }
+}
+
+fn paint_dialog(dialog: &Dialog, selected: usize, dark: bool, area: CellRect, buffer: &mut Buffer) {
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    fill(
+        buffer,
+        area,
+        area,
+        Color(0x0000_0080),
+        1.0,
+        BlendMode::Normal,
+        false,
+    );
+    let (mut rect, actions) = dialog_geometry(area.width, area.height, dialog, selected);
+    rect.x += area.x;
+    rect.y += area.y;
+    let width = rect.width;
+    let text_width = width.saturating_sub(4).max(1);
+    let title = dialog
+        .title
+        .as_deref()
+        .map(|s| wrapped_lines(s, usize::from(text_width)))
+        .unwrap_or_default();
+    let message = dialog
+        .message
+        .as_deref()
+        .map(|s| wrapped_lines(s, usize::from(text_width)))
+        .unwrap_or_default();
+    let background = if dark {
+        Color(0x2428_32ff)
+    } else {
+        Color(0xffff_ffff)
+    };
+    let foreground = if dark {
+        Color(0xe6e9_efff)
+    } else {
+        Color::BLACK
+    };
+    fill(buffer, rect, area, background, 1.0, BlendMode::Normal, true);
+    stroke(
+        buffer,
+        rect,
+        area,
+        [true; 4],
+        [Color(0x8080_80ff); 4],
+        BorderStyle::Solid,
+        [true; 4],
+        1.0,
+    );
+    let actions_start = actions
+        .first()
+        .map_or(rect.bottom().saturating_sub(1), |(_, r)| r.y + area.y);
+    let mut y = rect.y + 1;
+    for line in &title {
+        if y >= actions_start {
+            break;
+        }
+        write_text(
+            buffer,
+            rect.x + 2,
+            y,
+            text_width,
+            line,
+            rect,
+            foreground,
+            1.0,
+            Modifier::BOLD,
+        );
+        y += 1;
+    }
+    if !title.is_empty() && !message.is_empty() {
+        y += 1
+    }
+    for line in &message {
+        if y >= actions_start {
+            break;
+        }
+        write_text(
+            buffer,
+            rect.x + 2,
+            y,
+            text_width,
+            line,
+            rect,
+            foreground,
+            1.0,
+            Modifier::empty(),
+        );
+        y += 1;
+    }
+    if dialog.buttons.is_empty() {
+        write_text(
+            buffer,
+            rect.x + 2,
+            actions_start,
+            text_width,
+            "› OK",
+            rect,
+            FOCUS,
+            1.0,
+            Modifier::BOLD,
+        );
+    } else {
+        for (i, action) in actions {
+            let button = &dialog.buttons[i];
+            let y = action.y + area.y;
+            let color = if button.style == DialogButtonStyle::Destructive {
+                Color(0xe548_4dff)
+            } else {
+                FOCUS
+            };
+            let label = format!("{} {}", if i == selected { "›" } else { " " }, button.text);
+            if i == selected {
+                fill(
+                    buffer,
+                    CellRect::new(rect.x + 1, y, width.saturating_sub(2), 1),
+                    rect,
+                    Color(0x388b_fd30),
+                    1.0,
+                    BlendMode::Normal,
+                    false,
+                )
+            }
+            write_text(
+                buffer,
+                rect.x + 2,
+                y,
+                text_width,
+                &label,
+                rect,
+                color,
+                1.0,
+                if i == selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                },
+            );
+        }
+    }
+}
+
+/// Geometry shared by native dialog drawing and mouse hit testing.
+pub(crate) fn dialog_geometry(
+    columns: u16,
+    rows: u16,
+    dialog: &Dialog,
+    selected: usize,
+) -> (CellRect, Vec<(usize, CellRect)>) {
+    if columns < 3 || rows < 3 {
+        return (CellRect::default(), Vec::new());
+    }
+    let width = columns.saturating_sub(4).clamp(3, 64).min(columns);
+    let text_width = usize::from(width.saturating_sub(4).max(1));
+    let title = dialog
+        .title
+        .as_deref()
+        .map(|s| wrapped_lines(s, text_width).len())
+        .unwrap_or(0);
+    let message = dialog
+        .message
+        .as_deref()
+        .map(|s| wrapped_lines(s, text_width).len())
+        .unwrap_or(0);
+    let desired = 3usize
+        .saturating_add(title)
+        .saturating_add(message)
+        .saturating_add(usize::from(title > 0 && message > 0))
+        .saturating_add(dialog.buttons.len().max(1));
+    let height = desired.min(usize::from(rows)) as u16;
+    let rect = CellRect::new(
+        (columns - width) / 2,
+        if dialog.sheet {
+            rows - height
+        } else {
+            (rows - height) / 2
+        },
+        width,
+        height,
+    );
+    let count = dialog
+        .buttons
+        .len()
+        .max(1)
+        .min(usize::from(height.saturating_sub(2)));
+    let start = selected.saturating_sub(count.saturating_sub(1));
+    let y = rect.bottom().saturating_sub(1 + count as u16);
+    let actions = (start..dialog.buttons.len().max(1))
+        .take(count)
+        .enumerate()
+        .map(|(row, i)| {
+            (
+                i,
+                CellRect::new(rect.x + 1, y + row as u16, rect.width.saturating_sub(2), 1),
+            )
+        })
+        .collect();
+    (rect, actions)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_shadow(
+    frame: Rect,
+    clip: CellRect,
+    dx: f32,
+    dy: f32,
+    blur: f32,
+    spread: f32,
+    color: Color,
+    opacity: f32,
+    metrics: CellMetrics,
+    area: CellRect,
+    buffer: &mut Buffer,
+) {
+    let radius = (blur * 0.5).max(0.0);
+    let shadow = Rect {
+        x: frame.x + dx - spread,
+        y: frame.y + dy - spread,
+        width: frame.width + spread * 2.0,
+        height: frame.height + spread * 2.0,
+    };
+    let outer = Rect {
+        x: shadow.x - radius,
+        y: shadow.y - radius,
+        width: shadow.width + radius * 2.0,
+        height: shadow.height + radius * 2.0,
+    };
+    let rect = cells(outer, metrics, area).intersection(clip);
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            let px = (f32::from(x - area.x) + 0.5) * metrics.width();
+            let py = (f32::from(y - area.y) + 0.5) * metrics.height();
+            if px >= frame.x
+                && px < frame.x + frame.width
+                && py >= frame.y
+                && py < frame.y + frame.height
+            {
+                continue;
+            }
+            let distance = (shadow.x - px)
+                .max(px - shadow.x - shadow.width)
+                .max(0.0)
+                .hypot((shadow.y - py).max(py - shadow.y - shadow.height).max(0.0));
+            let factor = if radius > 0.0 {
+                (1.0 - distance / radius).clamp(0.0, 1.0)
+            } else {
+                f32::from(distance == 0.0)
+            };
+            let cell = &mut buffer[(x, y)];
+            cell.set_bg(blend(color, cell.bg, opacity * factor, BlendMode::Normal));
+        }
+    }
+}
+
+fn paint_inset_shadow(
+    frame: Rect,
+    clip: CellRect,
+    shadow: &nsh_core::BoxShadow,
+    opacity: f32,
+    metrics: CellMetrics,
+    area: CellRect,
+    buffer: &mut Buffer,
+) {
+    let rect = cells(frame, metrics, area).intersection(clip);
+    let radius = (shadow.blur * 0.5).max(metrics.width().min(metrics.height()));
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            let px = (f32::from(x - area.x) + 0.5) * metrics.width() - frame.x;
+            let py = (f32::from(y - area.y) + 0.5) * metrics.height() - frame.y;
+            let distance = (px - shadow.offset_x - shadow.spread)
+                .min(frame.width - px + shadow.offset_x - shadow.spread)
+                .min(py - shadow.offset_y - shadow.spread)
+                .min(frame.height - py + shadow.offset_y - shadow.spread);
+            let factor = (1.0 - distance / radius).clamp(0.0, 1.0);
+            let cell = &mut buffer[(x, y)];
+            cell.set_bg(blend(
+                shadow.color,
+                cell.bg,
+                opacity * factor,
+                BlendMode::Normal,
+            ));
+        }
+    }
+}
+
+fn gradient_color(
+    gradient: &Gradient,
+    stops: &[(Color, f32)],
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Color {
+    if stops.is_empty() {
+        return Color::TRANSPARENT;
+    }
+    let mut t = if let Some(angle) = gradient.kind.linear_angle(width, height) {
+        let angle = angle.to_radians();
+        let (dx, dy) = (angle.sin(), -angle.cos());
+        let length = (width * dx).abs() + (height * dy).abs();
+        0.5 + ((x - width * 0.5) * dx + (y - height * 0.5) * dy) / length.max(f32::EPSILON)
+    } else {
+        match gradient.kind {
+            GradientKind::Conic { from, x: cx, y: cy } => {
+                ((x - cx * width).atan2(-(y - cy * height)).to_degrees() - from).rem_euclid(360.0)
+                    / 360.0
+            }
+            GradientKind::Radial {
+                circle,
+                size,
+                x: cx,
+                y: cy,
+            } => {
+                let (cx, cy) = (cx * width, cy * height);
+                let near = matches!(
+                    size,
+                    GradientSize::ClosestSide | GradientSize::ClosestCorner
+                );
+                let rx = if near {
+                    cx.min(width - cx)
+                } else {
+                    cx.max(width - cx)
+                }
+                .abs();
+                let ry = if near {
+                    cy.min(height - cy)
+                } else {
+                    cy.max(height - cy)
+                }
+                .abs();
+                if circle {
+                    let radius = match size {
+                        GradientSize::ClosestSide => rx.min(ry),
+                        GradientSize::FarthestSide => rx.max(ry),
+                        _ => rx.hypot(ry),
+                    };
+                    (x - cx).hypot(y - cy) / radius.max(f32::EPSILON)
+                } else {
+                    let factor = if matches!(
+                        size,
+                        GradientSize::ClosestCorner | GradientSize::FarthestCorner
+                    ) {
+                        std::f32::consts::SQRT_2
+                    } else {
+                        1.0
+                    };
+                    ((x - cx) / (rx * factor).max(f32::EPSILON))
+                        .hypot((y - cy) / (ry * factor).max(f32::EPSILON))
+                }
+            }
+            _ => 0.0,
+        }
+    };
+    if gradient.repeating {
+        let start = stops[0].1;
+        let length = stops.last().map_or(1.0, |s| s.1) - start;
+        if length > 0.0 {
+            t = (t - start).rem_euclid(length) + start
+        }
+    }
+    if t <= stops[0].1 {
+        return stops[0].0;
+    }
+    for pair in stops.windows(2) {
+        let [(a, start), (b, end)] = pair else {
+            unreachable!()
+        };
+        if t <= *end {
+            return interpolate(
+                *a,
+                *b,
+                ((t - start) / (end - start).max(f32::EPSILON)).clamp(0.0, 1.0),
+            );
+        }
+    }
+    stops.last().map_or(Color::TRANSPARENT, |s| s.0)
+}
+
+fn interpolate(a: Color, b: Color, t: f32) -> Color {
+    let a = components(a);
+    let b = components(b);
+    let values: [u8; 4] =
+        std::array::from_fn(|i| (a[i] + (b[i] - a[i]) * t).round().clamp(0.0, 255.0) as u8);
+    Color::rgba(values[0], values[1], values[2], values[3])
+}
+
+fn filter_color(color: Color, matrix: Option<&[f32; 20]>) -> Color {
+    let Some(matrix) = matrix else { return color };
+    let c = components(color).map(|v| v / 255.0);
+    let c: [u8; 4] = std::array::from_fn(|r| {
+        ((c.iter()
+            .enumerate()
+            .map(|(i, v)| matrix[r * 5 + i] * v)
+            .sum::<f32>()
+            + matrix[r * 5 + 4])
+            .clamp(0.0, 1.0)
+            * 255.0)
+            .round() as u8
+    });
+    Color::rgba(c[0], c[1], c[2], c[3])
+}
+
+fn components(color: Color) -> [f32; 4] {
+    [
+        (color.0 >> 24) as f32,
+        ((color.0 >> 16) & 255) as f32,
+        ((color.0 >> 8) & 255) as f32,
+        (color.0 & 255) as f32,
+    ]
+}
+fn alpha(color: Color) -> f32 {
+    (color.0 & 255) as f32 / 255.0
+}
+fn cell_color(color: Color) -> CellColor {
+    CellColor::Rgb(
+        (color.0 >> 24) as u8,
+        (color.0 >> 16) as u8,
+        (color.0 >> 8) as u8,
+    )
+}
+
+fn over_color(foreground: Color, background: Color) -> Color {
+    let a = alpha(foreground);
+    let b = alpha(background);
+    let out = a + b * (1.0 - a);
+    if out <= 0.0 {
+        return Color::TRANSPARENT;
+    }
+    let foreground = components(foreground);
+    let background = components(background);
+    let c: [u8; 3] = std::array::from_fn(|i| {
+        ((foreground[i] * a + background[i] * b * (1.0 - a)) / out)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    });
+    Color::rgba(c[0], c[1], c[2], (out * 255.0).round() as u8)
+}
+
+fn blend(source: Color, destination: CellColor, opacity: f32, mode: BlendMode) -> CellColor {
+    let source = components(source);
+    let destination = rgb(destination);
+    let alpha = source[3] / 255.0 * opacity.clamp(0.0, 1.0);
+    let c: [u8; 3] = std::array::from_fn(|i| {
+        let (s, d) = (source[i] / 255.0, f32::from(destination[i]) / 255.0);
+        let mixed = match mode {
+            BlendMode::Multiply => s * d,
+            BlendMode::Screen => 1.0 - (1.0 - s) * (1.0 - d),
+            BlendMode::Overlay => {
+                if d < 0.5 {
+                    2.0 * s * d
+                } else {
+                    1.0 - 2.0 * (1.0 - s) * (1.0 - d)
+                }
+            }
+            BlendMode::Darken => s.min(d),
+            BlendMode::Lighten => s.max(d),
+            BlendMode::Difference => (s - d).abs(),
+            BlendMode::Exclusion => s + d - 2.0 * s * d,
+            BlendMode::PlusLighter => (s + d).min(1.0),
+            BlendMode::PlusDarker => (s + d - 1.0).max(0.0),
+            _ => s,
+        };
+        ((mixed * alpha + d * (1.0 - alpha)) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    });
+    CellColor::Rgb(c[0], c[1], c[2])
+}
+
+fn rgb(color: CellColor) -> [u8; 3] {
+    match color {
+        CellColor::Rgb(r, g, b) => [r, g, b],
+        CellColor::Black => [0, 0, 0],
+        CellColor::Red => [128, 0, 0],
+        CellColor::Green => [0, 128, 0],
+        CellColor::Yellow => [128, 128, 0],
+        CellColor::Blue => [0, 0, 128],
+        CellColor::Magenta => [128, 0, 128],
+        CellColor::Cyan => [0, 128, 128],
+        CellColor::Gray => [192, 192, 192],
+        CellColor::DarkGray => [128, 128, 128],
+        CellColor::LightRed => [255, 0, 0],
+        CellColor::LightGreen => [0, 255, 0],
+        CellColor::LightYellow => [255, 255, 0],
+        CellColor::LightBlue => [0, 0, 255],
+        CellColor::LightMagenta => [255, 0, 255],
+        CellColor::LightCyan => [0, 255, 255],
+        CellColor::White => [255, 255, 255],
+        CellColor::Indexed(i) => {
+            const BASE: [[u8; 3]; 16] = [
+                [0, 0, 0],
+                [128, 0, 0],
+                [0, 128, 0],
+                [128, 128, 0],
+                [0, 0, 128],
+                [128, 0, 128],
+                [0, 128, 128],
+                [192, 192, 192],
+                [128, 128, 128],
+                [255, 0, 0],
+                [0, 255, 0],
+                [255, 255, 0],
+                [0, 0, 255],
+                [255, 0, 255],
+                [0, 255, 255],
+                [255, 255, 255],
+            ];
+            if i < 16 {
+                BASE[usize::from(i)]
+            } else if i >= 232 {
+                [8 + (i - 232) * 10; 3]
+            } else {
+                let i = i - 16;
+                [i / 36, (i / 6) % 6, i % 6].map(|v| if v == 0 { 0 } else { 55 + v * 40 })
+            }
+        }
+        CellColor::Reset => [255, 255, 255],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nsh_core::{MountBatch, MountItem, ROOT_ID, ResolvedTextStyle, Size, TextEngine};
+
+    use super::*;
+
+    fn mount_node(id: NodeId, kind: ViewKind, parent: NodeId, frame: Rect) -> Vec<MountItem> {
+        vec![
+            MountItem::Create { id, kind },
+            MountItem::Frame { id, frame },
+            MountItem::Insert {
+                parent,
+                child: id,
+                before: None,
+            },
+        ]
+    }
+
+    fn protocol_scene(kind: crate::ProtocolType) -> Surface {
+        let mut surface = Surface::new(20, 8, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::View,
+            ROOT_ID,
+            Rect {
+                width: 160.0,
+                height: 128.0,
+                ..Rect::default()
+            },
+        );
+        items.extend(mount_node(
+            4,
+            ViewKind::Image,
+            2,
+            Rect {
+                x: 8.0,
+                y: 16.0,
+                width: 16.0,
+                height: 32.0,
+            },
+        ));
+        items.extend(mount_node(
+            6,
+            ViewKind::Canvas,
+            2,
+            Rect {
+                x: 40.0,
+                y: 16.0,
+                width: 32.0,
+                height: 32.0,
+            },
+        ));
+        surface.apply(MountBatch { items });
+        let raster = Arc::new(crate::image::Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 128],
+        });
+        surface.node_mut(4).unwrap().image_raster = Some(raster.clone());
+        surface.node_mut(6).unwrap().canvas_raster = Some(raster);
+        surface.set_image_protocol(Some(crate::ImageProtocol::new(kind, 8, 16).unwrap()));
+        surface
+    }
+
+    fn wait_protocol_encodings(surface: &mut Surface) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while surface.protocol.pending() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "protocol jobs did not complete"
+            );
+            surface.tick(0.0);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn image_and_canvas_prefer_protocols_through_transparent_layout_containers() {
+        let mut surface = protocol_scene(crate::ProtocolType::Iterm2);
+        let area = CellRect::new(0, 0, 20, 8);
+        let mut buffer = Buffer::empty(area);
+        surface.render(area, &mut buffer);
+        assert!(
+            !buffer
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains('\u{1b}'))
+        );
+        assert!(
+            surface.animating(),
+            "embedded hosts must poll while encoding is pending"
+        );
+        wait_protocol_encodings(&mut surface);
+        surface.render(area, &mut buffer);
+        assert!(buffer[(1, 1)].symbol().contains("1337;File"));
+        assert!(buffer[(5, 1)].symbol().contains("1337;File"));
+        assert!(!surface.snapshot().contains('\u{1b}'));
+
+        let mut items = mount_node(
+            8,
+            ViewKind::Text,
+            ROOT_ID,
+            Rect {
+                x: 8.0,
+                y: 16.0,
+                width: 8.0,
+                height: 16.0,
+            },
+        );
+        let mut text = nsh_core::AttributedText::default();
+        text.push("X", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        let layout = engine.layout(&engine.prepare(&text), Size::new(8.0, 16.0));
+        items.push(MountItem::Text {
+            id: 8,
+            text: Arc::new(text),
+            layout,
+            content: Rect {
+                width: 8.0,
+                height: 16.0,
+                ..Rect::default()
+            },
+        });
+        surface.apply(MountBatch { items });
+        surface.render(area, &mut buffer);
+        assert_eq!(
+            buffer[(1, 1)].symbol(),
+            "X",
+            "foreground text must restore the half-block path"
+        );
+        assert!(buffer[(5, 1)].symbol().contains("1337;File"));
+        surface.apply(MountBatch {
+            items: vec![MountItem::Delete { id: 8 }],
+        });
+        surface.render(area, &mut buffer);
+        assert!(buffer[(1, 1)].symbol().contains("1337;File"));
+
+        surface.apply(MountBatch {
+            items: mount_node(
+                10,
+                ViewKind::Modal,
+                ROOT_ID,
+                Rect {
+                    width: 160.0,
+                    height: 128.0,
+                    ..Rect::default()
+                },
+            ),
+        });
+        surface.render(area, &mut buffer);
+        assert!(
+            !buffer
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains('\u{1b}'))
+        );
+        surface.apply(MountBatch {
+            items: vec![MountItem::Delete { id: 10 }],
+        });
+        surface.render(area, &mut buffer);
+        assert!(buffer[(1, 1)].symbol().contains("1337;File"));
+    }
+
+    #[test]
+    fn snapshots_do_not_consume_kitty_uploads_or_request_protocol_encodings() {
+        let mut surface = protocol_scene(crate::ProtocolType::Kitty);
+        assert!(!surface.snapshot().contains('\u{1b}'));
+        assert!(!surface.protocol.pending());
+        let area = CellRect::new(0, 0, 20, 8);
+        let mut buffer = Buffer::empty(area);
+        surface.render(area, &mut buffer);
+        wait_protocol_encodings(&mut surface);
+        assert!(!surface.snapshot().contains('\u{1b}'));
+        surface.render(area, &mut buffer);
+        assert!(buffer[(1, 1)].symbol().contains("a=T,U=1"));
+        assert!(buffer[(5, 1)].symbol().contains("a=T,U=1"));
+        let cleanup = surface.image_protocol_cleanup();
+        let mut next = Surface::new(20, 8, CellMetrics::default());
+        next.inherit_image_protocol(&mut surface);
+        assert_eq!(next.image_protocol_cleanup(), cleanup);
+        assert!(!next.protocol.pending());
+    }
+
+    #[test]
+    fn focusing_short_rows_keeps_kitty_images_and_canvas_tiles_intact() {
+        for height in [16.0, 32.0] {
+            let mut surface = protocol_scene(crate::ProtocolType::Kitty);
+            surface.node_mut(2).unwrap().frame.height = height;
+            surface.node_mut(2).unwrap().props.accessibility.role = AccessibilityRole::Button;
+            surface
+                .node_mut(2)
+                .unwrap()
+                .events
+                .set(EventKind::Press, true);
+            for id in [4, 6] {
+                let node = surface.node_mut(id).unwrap();
+                node.frame.y = 0.0;
+                node.frame.height = height;
+            }
+            let mut items = mount_node(
+                8,
+                ViewKind::Text,
+                2,
+                Rect {
+                    x: 88.0,
+                    y: 0.0,
+                    width: 48.0,
+                    height: 16.0,
+                },
+            );
+            let mut text = nsh_core::AttributedText::default();
+            text.push("Row", ResolvedTextStyle::default());
+            let engine = crate::TerminalTextEngine::default();
+            let layout = engine.layout(&engine.prepare(&text), Size::new(48.0, 16.0));
+            items.push(MountItem::Text {
+                id: 8,
+                text: Arc::new(text),
+                layout,
+                content: Rect {
+                    width: 48.0,
+                    height: 16.0,
+                    ..Rect::default()
+                },
+            });
+            surface.apply(MountBatch { items });
+            surface.focus = None;
+            let area = CellRect::new(0, 0, 20, 8);
+            let mut buffer = Buffer::empty(area);
+            surface.render(area, &mut buffer);
+            wait_protocol_encodings(&mut surface);
+            surface.render(area, &mut buffer);
+            assert!(buffer[(1, 0)].symbol().contains("a=T,U=1"));
+            assert!(buffer[(5, 0)].symbol().contains("a=T,U=1"));
+            let graphics = buffer
+                .content
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| cell.symbol().contains('\u{10eeee}'))
+                .map(|(i, cell)| (i, cell.fg, cell.diff_option))
+                .collect::<Vec<_>>();
+            assert!(!graphics.is_empty());
+            surface.focus = Some(2);
+            surface.render(area, &mut buffer);
+            assert!(buffer[(11, 0)].modifier.contains(Modifier::UNDERLINED));
+            for (i, color, diff) in graphics {
+                let cell = &buffer.content[i];
+                assert!(
+                    cell.symbol().contains('\u{10eeee}'),
+                    "row focus must keep the Kitty placement"
+                );
+                assert_eq!(cell.fg, color, "Kitty image IDs use foreground colors");
+                assert_eq!(cell.diff_option, diff);
+                assert!(
+                    cell.modifier.is_empty(),
+                    "row focus must leave graphic tile attributes intact"
+                );
+            }
+            surface.apply(MountBatch {
+                items: mount_node(
+                    10,
+                    ViewKind::Modal,
+                    ROOT_ID,
+                    Rect {
+                        width: 160.0,
+                        height: 128.0,
+                        ..Rect::default()
+                    },
+                ),
+            });
+            surface.render(area, &mut buffer);
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .all(|cell| !cell.symbol().contains('\u{10eeee}')
+                        && !cell.symbol().contains('\u{1b}')),
+                "a later modal must still disable protocol placements"
+            );
+        }
+    }
+
+    #[test]
+    fn text_focus_skips_half_blocks_and_protocol_cells() {
+        let mut text = ratatui::buffer::Cell::default();
+        text.set_symbol("中");
+        assert!(focus_text_cell(&text));
+        for symbol in [" ", "▀", "▄", "█", "⣿", "\u{10eeee}", "\u{1b}_Gdata"] {
+            text.set_symbol(symbol);
+            assert!(!focus_text_cell(&text));
+        }
+        text.set_symbol("x").set_diff_option(CellDiffOption::Skip);
+        assert!(!focus_text_cell(&text));
+    }
+
+    #[test]
+    fn embedded_surface_preserves_host_cells_and_clips_scrolled_text() {
+        let mut surface = Surface::new(8, 3, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::Scroll,
+            ROOT_ID,
+            Rect {
+                x: 8.0,
+                y: 16.0,
+                width: 32.0,
+                height: 16.0,
+            },
+        );
+        items.push(MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(64.0, 16.0),
+        });
+        items.extend(mount_node(
+            4,
+            ViewKind::Text,
+            2,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 64.0,
+                height: 16.0,
+            },
+        ));
+        let mut text = nsh_core::AttributedText::default();
+        text.push("abcdefgh", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        let layout = engine.layout(&engine.prepare(&text), Size::new(64.0, 16.0));
+        items.push(MountItem::Text {
+            id: 4,
+            text: Arc::new(text),
+            layout,
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 64.0,
+                height: 16.0,
+            },
+        });
+        surface.apply(MountBatch { items });
+        surface.node_mut(2).unwrap().scroll.shows_indicator = false;
+        surface.scroll_to(2, 8.0, 0.0);
+        surface.focus = None;
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 12, 5));
+        for cell in &mut buffer.content {
+            cell.set_symbol("#");
+        }
+        surface.render(CellRect::new(2, 1, 8, 3), &mut buffer);
+        assert_eq!(buffer[(0, 0)].symbol(), "#");
+        assert_eq!(buffer[(10, 2)].symbol(), "#");
+        assert_eq!(buffer[(2, 2)].symbol(), " ");
+        assert_eq!(buffer[(3, 2)].symbol(), "b");
+        assert_eq!(buffer[(6, 2)].symbol(), "e");
+        assert_eq!(buffer[(7, 2)].symbol(), " ");
+    }
+
+    #[test]
+    fn input_keeps_caret_visible_and_masks_selected_password_graphemes() {
+        let mut surface = Surface::new(6, 1, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::Input,
+            ROOT_ID,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 48.0,
+                height: 16.0,
+            },
+        );
+        items.push(MountItem::InputValue {
+            id: 2,
+            text: "ab中cdef".into(),
+            count: 0,
+        });
+        surface.apply(MountBatch { items });
+        surface.focus = Some(2);
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 6, 1));
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(1, 0)].symbol(), "c");
+        assert_eq!(buffer[(4, 0)].symbol(), "f");
+        assert!(buffer[(5, 0)].modifier.contains(Modifier::REVERSED));
+        let node = surface.node_mut(2).unwrap();
+        node.input.secure = true;
+        node.input.selection_color = Some(Color(0xff00_00ff));
+        node.editor.set_selection(2, 3);
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(2, 0)].symbol(), "•");
+        assert_eq!(buffer[(2, 0)].bg, CellColor::Rgb(255, 0, 0));
+        assert!(buffer[(3, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buffer.content.iter().all(|c| !c.symbol().contains('中')));
+    }
+
+    #[test]
+    fn a_modal_covers_presenter_scroll_indicators() {
+        let mut surface = Surface::new(8, 4, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::Scroll,
+            ROOT_ID,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 64.0,
+                height: 64.0,
+            },
+        );
+        items.push(MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(64.0, 640.0),
+        });
+        items.extend(mount_node(
+            4,
+            ViewKind::Modal,
+            ROOT_ID,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 64.0,
+                height: 64.0,
+            },
+        ));
+        items.push(MountItem::ViewStyle {
+            id: 4,
+            style: Box::new(ViewStyle {
+                background_color: Color(0x00ff_00ff),
+                ..ViewStyle::default()
+            }),
+        });
+        surface.apply(MountBatch { items });
+        surface.focus = None;
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 8, 4));
+        surface.render(buffer.area, &mut buffer);
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|c| c.symbol() == " " && c.bg == CellColor::Rgb(0, 255, 0))
+        );
+    }
+
+    #[test]
+    fn right_aligned_multiline_input_draws_and_hits_each_visual_line() {
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut surface = Surface::new(10, 3, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::Input,
+            ROOT_ID,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 48.0,
+            },
+        );
+        items.push(MountItem::Input {
+            id: 2,
+            config: Box::new(nsh_core::InputConfig {
+                multiline: true,
+                align: TextAlign::Right,
+                ..nsh_core::InputConfig::default()
+            }),
+        });
+        items.push(MountItem::InputValue {
+            id: 2,
+            text: "ab\n中".into(),
+            count: 0,
+        });
+        surface.apply(MountBatch { items });
+        surface.focus = Some(2);
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 10, 3));
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(8, 0)].symbol(), "a");
+        assert_eq!(buffer[(9, 0)].symbol(), "b");
+        assert_eq!(buffer[(7, 1)].symbol(), "中");
+        assert!(buffer[(9, 1)].modifier.contains(Modifier::REVERSED));
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            surface.handle_event(Event::Mouse(MouseEvent {
+                kind,
+                column: 9,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        assert_eq!(surface.node(2).unwrap().editor.selection(), (1, 1));
+        surface.render(buffer.area, &mut buffer);
+        assert!(buffer[(9, 0)].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn nested_modal_uses_viewport_scene_above_later_presenter_siblings() {
+        let mut surface = Surface::new(12, 6, CellMetrics::default());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 96.0,
+            height: 96.0,
+        };
+        let mut items = mount_node(
+            2,
+            ViewKind::Scroll,
+            ROOT_ID,
+            Rect {
+                x: 16.0,
+                y: 16.0,
+                width: 32.0,
+                height: 32.0,
+            },
+        );
+        items.push(MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(160.0, 160.0),
+        });
+        items.extend(mount_node(
+            4,
+            ViewKind::View,
+            2,
+            Rect {
+                x: 8.0,
+                y: 8.0,
+                width: 16.0,
+                height: 16.0,
+            },
+        ));
+        items.push(MountItem::ViewStyle {
+            id: 4,
+            style: Box::new(ViewStyle {
+                overflow_hidden: true,
+                opacity: 0.5,
+                ..ViewStyle::default()
+            }),
+        });
+        items.extend(mount_node(6, ViewKind::Modal, 4, viewport));
+        items.push(MountItem::ViewStyle {
+            id: 6,
+            style: Box::new(ViewStyle {
+                background_color: Color(0x00ff_00ff),
+                ..ViewStyle::default()
+            }),
+        });
+        items.extend(mount_node(
+            8,
+            ViewKind::Text,
+            6,
+            Rect {
+                x: 8.0,
+                y: 16.0,
+                width: 80.0,
+                height: 16.0,
+            },
+        ));
+        let mut text = nsh_core::AttributedText::default();
+        text.push("Modal", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        let layout = engine.layout(&engine.prepare(&text), Size::new(80.0, 16.0));
+        items.push(MountItem::Text {
+            id: 8,
+            text: Arc::new(text),
+            layout,
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 16.0,
+            },
+        });
+        items.extend(mount_node(10, ViewKind::View, ROOT_ID, viewport));
+        items.push(MountItem::ViewStyle {
+            id: 10,
+            style: Box::new(ViewStyle {
+                background_color: Color(0xff00_00ff),
+                ..ViewStyle::default()
+            }),
+        });
+        surface.apply(MountBatch { items });
+        surface.scroll_to(2, 8.0, 16.0);
+        surface.focus = None;
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 12, 6));
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(surface.global_frame(6), Some(viewport));
+        assert_eq!(surface.clip_rect(6), viewport);
+        assert_eq!(buffer[(1, 1)].symbol(), "M");
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|cell| cell.bg == CellColor::Rgb(0, 255, 0))
+        );
+        assert_eq!(surface.visible_ids(), vec![6, 8]);
+        assert_eq!(surface.hit_test(12.0, 24.0), Some(8));
+    }
+
+    #[test]
+    fn focus_ring_preserves_labels_that_share_a_snapped_border_cell() {
+        let mut surface = Surface::new(10, 4, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::View,
+            ROOT_ID,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 64.0,
+            },
+        );
+        items.push(MountItem::ViewStyle {
+            id: 2,
+            style: Box::new(ViewStyle {
+                border_radius: 8.0,
+                borders: nsh_core::Borders {
+                    widths: [1.0; 4],
+                    colors: [Color::BLACK; 4],
+                    style: BorderStyle::Solid,
+                },
+                ..ViewStyle::default()
+            }),
+        });
+        items.extend(mount_node(
+            6,
+            ViewKind::View,
+            2,
+            Rect {
+                x: 1.0,
+                y: 1.0,
+                width: 78.0,
+                height: 62.0,
+            },
+        ));
+        items.push(MountItem::ViewStyle {
+            id: 6,
+            style: Box::new(ViewStyle {
+                background_color: Color(0x00ff_00ff),
+                ..ViewStyle::default()
+            }),
+        });
+        items.extend(mount_node(
+            4,
+            ViewKind::Text,
+            2,
+            Rect {
+                x: 0.0,
+                y: 4.0,
+                width: 80.0,
+                height: 16.0,
+            },
+        ));
+        let mut text = nsh_core::AttributedText::default();
+        text.push("中 press", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        let layout = engine.layout(&engine.prepare(&text), Size::new(80.0, 16.0));
+        items.push(MountItem::Text {
+            id: 4,
+            text: Arc::new(text),
+            layout,
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 16.0,
+            },
+        });
+        surface.apply(MountBatch { items });
+        surface.focus = Some(2);
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 10, 4));
+        surface.focus = None;
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(9, 2)].symbol(), "│");
+        assert_eq!(buffer[(5, 3)].symbol(), "─");
+        surface.focus = Some(2);
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(0, 0)].symbol(), "中");
+        assert_eq!(buffer[(1, 0)].symbol(), " ");
+        assert_eq!(buffer[(2, 0)].symbol(), " ");
+        assert_eq!(buffer[(3, 0)].symbol(), "p");
+        assert!(buffer[(0, 0)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn center_images_use_logical_asset_size_and_keep_the_nodes_clip() {
+        let mut surface = Surface::new(10, 4, CellMetrics::default());
+        surface.apply(MountBatch {
+            items: mount_node(
+                2,
+                ViewKind::Image,
+                ROOT_ID,
+                Rect {
+                    x: 8.0,
+                    y: 0.0,
+                    width: 64.0,
+                    height: 64.0,
+                },
+            ),
+        });
+        let node = surface.node_mut(2).unwrap();
+        node.resize_mode = ResizeMode::Center;
+        node.image_source = Some(nsh_core::ImageSource {
+            uri: Arc::from("asset:/photo@2x.png"),
+            size: Some((16.0, 32.0)),
+        });
+        let frame = Rect {
+            x: 8.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+        };
+        let (image, clip, mode) = image_geometry(
+            node,
+            frame,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 64.0,
+            },
+        );
+        assert_eq!(
+            image,
+            Rect {
+                x: 32.0,
+                y: 16.0,
+                width: 16.0,
+                height: 32.0
+            }
+        );
+        assert_eq!(clip, frame);
+        assert_eq!(mode, ResizeMode::Stretch);
+    }
+
+    #[test]
+    fn partially_offscreen_geometry_does_not_move_its_far_edge() {
+        let metrics = CellMetrics::default();
+        let area = CellRect::new(7, 3, 10, 4);
+        assert_eq!(
+            cells(
+                Rect {
+                    x: -16.0,
+                    y: 0.0,
+                    width: 24.0,
+                    height: 16.0
+                },
+                metrics,
+                area
+            ),
+            CellRect::new(7, 3, 1, 1)
+        );
+        assert_eq!(
+            cells(
+                Rect {
+                    x: 0.0,
+                    y: -32.0,
+                    width: 8.0,
+                    height: 16.0
+                },
+                metrics,
+                area
+            )
+            .height,
+            0
+        );
+    }
+
+    #[test]
+    fn borders_preserve_per_side_colors_and_clip() {
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 8, 4));
+        stroke(
+            &mut buffer,
+            CellRect::new(0, 0, 8, 4),
+            CellRect::new(1, 0, 6, 4),
+            [true; 4],
+            [
+                Color(0xff00_00ff),
+                Color::BLACK,
+                Color(0x0000_ffff),
+                Color::BLACK,
+            ],
+            BorderStyle::Solid,
+            [true; 4],
+            1.0,
+        );
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+        assert_eq!(buffer[(1, 0)].symbol(), "─");
+        assert_eq!(buffer[(1, 0)].fg, CellColor::Rgb(255, 0, 0));
+        assert_eq!(buffer[(1, 3)].fg, CellColor::Rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn nested_alpha_and_color_filters_are_finite() {
+        assert_eq!(
+            blend(
+                Color(0xff00_0080),
+                CellColor::Rgb(0, 0, 255),
+                0.5,
+                BlendMode::Normal
+            ),
+            CellColor::Rgb(64, 0, 191)
+        );
+        let matrix = nsh_core::compose_color_matrices(&[nsh_core::Filter::Invert(1.0)]).unwrap();
+        assert_eq!(
+            filter_color(Color(0xff00_00ff), Some(&matrix)),
+            Color(0x00ff_ffff)
+        );
+        assert_eq!(
+            over_color(Color(0xff00_0080), Color(0x0000_ffff)),
+            Color(0x8000_7fff)
+        );
+    }
+
+    #[test]
+    fn gradient_samples_follow_css_direction() {
+        let gradient = Gradient {
+            kind: GradientKind::Linear { angle: 90.0 },
+            stops: vec![
+                nsh_core::ColorStop {
+                    color: Color(0xff00_00ff),
+                    position: None,
+                },
+                nsh_core::ColorStop {
+                    color: Color(0x0000_ffff),
+                    position: None,
+                },
+            ],
+            repeating: false,
+        };
+        let stops = gradient.resolved_stops();
+        assert_eq!(
+            gradient_color(&gradient, &stops, 0.0, 8.0, 80.0, 16.0),
+            Color(0xff00_00ff)
+        );
+        assert_eq!(
+            gradient_color(&gradient, &stops, 80.0, 8.0, 80.0, 16.0),
+            Color(0x0000_ffff)
+        );
+    }
+
+    #[test]
+    fn wide_graphemes_are_never_half_drawn_or_allowed_to_escape_clip() {
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 8, 2));
+        write_text(
+            &mut buffer,
+            0,
+            0,
+            3,
+            "中中",
+            CellRect::new(0, 0, 3, 1),
+            Color::BLACK,
+            1.0,
+            Modifier::empty(),
+        );
+        assert_eq!(buffer[(0, 0)].symbol(), "中");
+        assert_eq!(buffer[(2, 0)].symbol(), " ");
+        write_text(
+            &mut buffer,
+            0,
+            1,
+            8,
+            "a\x1b[31m",
+            CellRect::new(0, 0, 8, 2),
+            Color::BLACK,
+            1.0,
+            Modifier::empty(),
+        );
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|cell| !cell.symbol().contains('\x1b'))
+        );
+    }
+
+    #[test]
+    fn dialog_layout_survives_small_embedding_areas() {
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 12, 6));
+        let dialog = Dialog {
+            id: 1,
+            title: Some("Delete 中文?".into()),
+            message: Some("Confirm\nthis operation".into()),
+            buttons: vec![
+                nsh_core::DialogButton {
+                    text: "Cancel".into(),
+                    style: DialogButtonStyle::Cancel,
+                },
+                nsh_core::DialogButton {
+                    text: "Delete".into(),
+                    style: DialogButtonStyle::Destructive,
+                },
+            ],
+            cancelable: true,
+            sheet: false,
+        };
+        paint_dialog(&dialog, 1, false, CellRect::new(2, 1, 8, 4), &mut buffer);
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+        assert!(buffer.content.iter().any(|c| c.symbol() == "›"));
+    }
+}
+
+#[cfg(test)]
+mod native_color_tests {
+    use std::sync::Arc;
+
+    use nsh_animation::{AnimationOp, AnimationProp, Easing, Extrapolate, Output};
+    use nsh_core::{MountBatch, MountItem, ROOT_ID, ResolvedTextStyle, Size, TextEngine};
+
+    use super::*;
+
+    #[test]
+    fn native_text_colors_repaint_without_new_text_or_layout() {
+        let mut surface = Surface::new(4, 2, CellMetrics::default());
+        let mut text = nsh_core::AttributedText::default();
+        text.push("color", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        let layout = engine.layout(&engine.prepare(&text), Size::new(40.0, 16.0));
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Create {
+                    id: 2,
+                    kind: ViewKind::Text,
+                },
+                MountItem::Frame {
+                    id: 2,
+                    frame: Rect {
+                        width: 40.0,
+                        height: 16.0,
+                        ..Rect::default()
+                    },
+                },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+                MountItem::Text {
+                    id: 2,
+                    text: Arc::new(text),
+                    layout,
+                    content: Rect {
+                        width: 40.0,
+                        height: 16.0,
+                        ..Rect::default()
+                    },
+                },
+                MountItem::Animation(AnimationOp::CreateValue {
+                    node: 1,
+                    value: 0.0,
+                }),
+                MountItem::Animation(AnimationOp::CreateInterpolate {
+                    node: 2,
+                    input: 1,
+                    input_range: vec![0.0, 1.0],
+                    output: Output::Colors(vec![0xff0000ff, 0x0000ffff]),
+                    extrapolate_left: Extrapolate::Clamp,
+                    extrapolate_right: Extrapolate::Clamp,
+                    easing: Easing::Linear,
+                }),
+                MountItem::AnimationBindings {
+                    id: 2,
+                    bindings: vec![(AnimationProp::Color, 2)],
+                },
+            ],
+        });
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 4, 2));
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(0, 0)].symbol(), "c");
+        assert_eq!(buffer[(0, 0)].fg, CellColor::Rgb(255, 0, 0));
+        surface.apply(MountBatch {
+            items: vec![MountItem::Animation(AnimationOp::Set {
+                node: 1,
+                value: 1.0,
+            })],
+        });
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(0, 0)].symbol(), "c");
+        assert_eq!(buffer[(0, 0)].fg, CellColor::Rgb(0, 0, 255));
+    }
+}

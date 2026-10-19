@@ -3,7 +3,7 @@
 **Native UI in Rust and TSX, embedded in your app or shipped on its own.** Native Shell is a Rust engine for
 cross-platform apps and AI-generated UI. Write your app in Rust, use TSX for dynamically delivered screens, or
 combine both with shared Rust components. Each platform renders with its own UI: native views on iOS, Android,
-macOS, Windows and Linux, GPUI in GPUI apps and HTML on the web.
+macOS, Windows and Linux, GPUI in GPUI apps, Ratatui in terminals and HTML on the web.
 
 Embed NSH in an existing app or package it as a standalone app. Hosts can load TSX modules at run time as plugins,
 delivered as signed packages and run in a sandbox the host configures.
@@ -31,11 +31,15 @@ Documentation, guides and live demos: **[nsh.dev](https://nsh.dev)**.
 | Windows | Win32, Direct2D, DirectWrite | `AppView` (Rust, `nsh-platform-windows`) | Windows 10 1809+ |
 | Linux | GTK 4, Pango | `AppView` (Rust, `nsh-platform-linux`) | GTK 4.14+ |
 | GPUI (macOS, Windows, Linux) | GPUI (GPUI Fast) | `AppView` (Rust, a GPUI view, `nsh-platform-gpui`) | macOS, Windows; Linux with Vulkan |
+| Terminal (macOS, Windows, Linux) | Ratatui, Crossterm | `AppView` (Rust, a Ratatui region, `nsh-platform-tui`) | Interactive terminal |
 | Web | HTML, CSS | `createPlayer` (JavaScript) or an iframe | Modern browsers |
 
 The GPUI backend (`nsh run --target gpui`, `nsh package --target gpui`) draws apps with GPUI on all three desktops and
 embeds in GPUI and GPUI Kit apps. The web platform (`nsh run --target web`, `nsh package --target web`) publishes apps
 as static sites and runs the website's live demos.
+The terminal backend (`nsh run --target tui`, `nsh package --target tui`) shares the same runtime and layout,
+with keyboard focus, Unicode editing and mouse input. Images and canvas drawing use terminal graphics protocols
+and half-block rendering for portable composition.
 
 ## Quick start
 
@@ -138,6 +142,15 @@ nsh run my-app --target gpui
 </details>
 
 <details>
+<summary>Terminal (macOS, Windows, Linux)</summary>
+
+```sh
+nsh run my-app --target tui
+```
+
+</details>
+
+<details>
 <summary>Web</summary>
 
 ```sh
@@ -159,6 +172,7 @@ Logs and errors show in the terminal. What each platform needs:
 | [`examples/counter`](examples/counter) | The smallest app |
 | [`examples/hopper`](examples/hopper) | A dark, tabbed dashboard built only from primitives: interactive canvas charts, sliders, menus, animation |
 | [`examples/desktop`](examples/desktop) | A desktop app with a title bar and menus of its own (`nsh/desktop`) |
+| [`examples/terminal-workbench`](examples/terminal-workbench) | A three-pane operations console with search, service details, charts, activity and deployment dialogs |
 | [`examples/gallery-rs`](examples/gallery-rs) | The gallery written in Rust, with a TSX entry for mixed development |
 | [`examples/embed-ios`](examples/embed-ios), [`examples/embed-android`](examples/embed-android) | NSH inside existing native apps, with a native component the app registers |
 | [`examples/bench`](examples/bench) | Rust components against the same components in TSX |

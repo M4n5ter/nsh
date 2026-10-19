@@ -3,7 +3,7 @@
 
 use crate::{
     EdgeInsets, Size,
-    platform::{Idiom, Locale, Os},
+    platform::{Idiom, Locale, Os, Renderer},
 };
 
 /// The environment of a surface, as the platform reports it.
@@ -33,6 +33,8 @@ pub struct Environment {
     pub pixel_ratio: f32,
     /// The operating system.
     pub os: Os,
+    /// How the surface presents its UI (native views, HTML or terminal cells).
+    pub renderer: Renderer,
     /// The OS version: major and minor (iOS), Android's API level and 0.
     pub os_version: (u16, u16),
     /// The kind of device.
@@ -40,8 +42,8 @@ pub struct Environment {
     /// The user's locale, for formatting numbers and dates.
     pub locale: Locale,
     /// In a browser, it runs on an Apple platform: shortcuts follow Apple's
-    /// conventions ([`crate::keymap::apple_keys`]); the other OSes imply
-    /// theirs.
+    /// conventions ([`crate::keymap::apple_keys`]); graphical native
+    /// backends infer theirs from the OS. Terminals use Control.
     pub apple_keyboard: bool,
 }
 
@@ -60,6 +62,7 @@ impl Default for Environment {
             rtl: false,
             pixel_ratio: 1.0,
             os: Os::default(),
+            renderer: Renderer::Native,
             os_version: (0, 0),
             idiom: Idiom::Phone,
             locale: Locale::EN_US,

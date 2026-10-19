@@ -1,6 +1,6 @@
 ---
 title: 打包
-description: 用 nsh package 为 iOS 真机、iOS 模拟器、Android、macOS、Windows、Linux 和 Web 构建可安装的应用，包括应用元数据、图标和签名。
+description: 用 nsh package 为 iOS 真机、iOS 模拟器、Android、macOS、Windows、Linux、终端和 Web 构建可安装的应用，包括应用元数据、图标和签名。
 order: 19
 group: platforms
 ---
@@ -8,7 +8,7 @@ group: platforms
 # 打包
 
 `nsh package` 把应用变成可以安装的产物：用于 iOS 模拟器的 `.app`、用于 iOS 真机的已签名 `.ipa`、用于 Android 的已签名
-`.apk`、用于 macOS 的 ad hoc 签名 `.app`、用于 Linux 的目录和 `.tar.gz`、用于 Windows 的目录和 `.zip`，或用于 Web 的静态站点；`--target gpui` 生成本机的桌面包，只是换成 GPUI 运行器。它把应用的 release 构建与 NSH 自带的**预构建运行时**组合在一起，因此不需要 Rust 工具链，不需要 Xcode 项目，也不需要 Gradle。
+`.apk`、用于 macOS 的 ad hoc 签名 `.app`、用于 Linux 的目录和 `.tar.gz`、用于 Windows 的目录和 `.zip`，或用于 Web 的静态站点；`--target gpui` 生成本机的桌面包，只是换成 GPUI 运行器；`--target tui` 生成控制台应用。它把应用的 release 构建与 NSH 自带的**预构建运行时**组合在一起，因此不需要 Rust 工具链，不需要 Xcode 项目，也不需要 Gradle。
 
 ```sh
 nsh package App.tsx --target ios-simulator --run     # build, install and launch in the simulator
@@ -16,6 +16,7 @@ nsh package App.tsx --target android --run           # build, install and launch
 nsh package App.tsx --target macos --run             # build and launch on this Mac
 nsh package App.tsx --target linux --run             # build and launch on this machine
 nsh package App.tsx --target windows --run           # build and launch on this machine
+nsh package App.tsx --target tui --run               # build and run in this terminal
 nsh package App.tsx --target web --run               # build, serve on this machine and open in the browser
 nsh package App.tsx --target ios --sign "Apple Development: Jane Doe (ABCDE12345)" --profile Dev.mobileprovision
 ```
@@ -60,7 +61,7 @@ nsh package App.tsx --target android --app-version 1.4.0 --build 42
 
 | 参数 | 说明 |
 |---|---|
-| `--target <ios \| ios-simulator \| android \| macos \| linux \| windows \| gpui \| web>` | 构建目标（必填）。 |
+| `--target <ios \| ios-simulator \| android \| macos \| linux \| windows \| gpui \| tui \| web>` | 构建目标（必填）。 |
 | `-o, --out <dir>` | 输出目录。默认为 `out`。 |
 | `--name <name>` | 显示名称。 |
 | `--id <id>` | Bundle identifier，如 `com.example.app`。 |
@@ -72,7 +73,7 @@ nsh package App.tsx --target android --app-version 1.4.0 --build 42
 | `--keystore <file>` | Android：release keystore（默认使用 debug 密钥）。 |
 | `--key-alias <alias>` | Android：keystore 中的密钥别名。 |
 | `--keystore-password <password>` | Android：keystore 密码；也可从 `NSH_KEYSTORE_PASSWORD` 读取。 |
-| `--run` | 构建完成后安装并启动：在 iOS 模拟器中，或在 `adb` 能看到的 Android 设备或模拟器上；macOS、Linux、Windows 和 GPUI 应用在本机启动；Web 站点在本机提供服务并在浏览器中打开。不适用于 `--target ios`。 |
+| `--run` | 构建完成后安装并启动：在 iOS 模拟器中，或在 `adb` 能看到的 Android 设备或模拟器上；macOS、Linux、Windows 和 GPUI 应用在本机启动；终端应用在当前终端中运行直到退出；Web 站点在本机提供服务并在浏览器中打开。不适用于 `--target ios`。 |
 
 ## iOS 模拟器
 
@@ -176,6 +177,17 @@ nsh package App.tsx --target gpui --run
 
 Linux 上的 GPUI 包动态链接 WebKitGTK 4.1（Web 视图）和 GStreamer（视频），因此运行它的机器需要安装它们，以及 GTK 3 和 GStreamer 的 base、good 插件（Debian / Ubuntu：`libwebkit2gtk-4.1-0`、`libgstreamer1.0-0`、`libgstreamer-plugins-base1.0-0`、`gstreamer1.0-plugins-good`），此外还需要 Vulkan 驱动和 `libxkbcommon`。
 
+## 终端
+
+```sh
+nsh package App.tsx --target tui --run
+```
+
+写出 `out/<Name>/`，包含控制台可执行文件、`nsh/bundle.nshc`、
+`nsh/assets/…` 和 `nsh/app.json`，并在 macOS 和 Linux 上归档为 `.tar.gz`，
+在 Windows 上归档为 `.zip`。请在可执行文件将运行的操作系统上打包。
+`--run` 使用当前终端，并等待应用退出。参见[终端](./tui.md#打包)。
+
 ## Web
 
 ```sh
@@ -211,6 +223,7 @@ nsh package App.tsx --target web --run
 | Linux | `nsh-linux-app` 可执行文件，重命名为 `<Name>` | `<Name>/nsh/bundle.nshc`、`nsh/assets/…` |
 | Windows | `nsh-windows-app.exe` 可执行文件，重命名为 `<Name>.exe` | `<Name>\nsh\bundle.nshc`、`nsh\assets\…` |
 | GPUI | `nsh-gpui-app` 可执行文件，按本机操作系统的方式重命名 | 与本机操作系统相同 |
+| 终端 | `nsh-tui-app`，重命名为 `<Name>`（Windows 上为 `<Name>.exe`） | `<Name>/nsh/bundle.nshc`、`nsh/assets/…` |
 | Web | `nsh.<digest>.wasm`、`nsh.<digest>.js` | `<Name>/app.<digest>.js`（JS 源码）、`assets/…`、`index.html` |
 
 打包出的应用不注册任何[原生组件](./native-components.md)；如需使用原生组件，请把 NSH 嵌入你自己的应用。
@@ -220,8 +233,8 @@ nsh package App.tsx --target web --run
 `nsh package` 会在 CLI 旁边查找预构建运行时（发行包中的 `bin/../runtime`）。在 NSH 的源码仓库中，它使用
 `target/<triple>/<profile>` 和 `target/android/<profile>`，profile 与 CLI 自身一致（debug 版 CLI 使用 debug 版运行时）：用
 `cargo build -p nsh-ios-app --target aarch64-apple-ios-sim`（真机用 `aarch64-apple-ios`）和 `cargo xtask android`
-构建它们（release 版 CLI 需加上 `--release`）；`nsh-macos-app`（在 macOS 上）、`nsh-linux-app`（在 Linux 上）、`nsh-windows-app`（在 Windows 上）和 `nsh-gpui-app`（在三者任一上）为本机构建，位于 `target/<profile>`（`cargo build -p nsh-macos-app`、`cargo build -p nsh-linux-app`、`cargo build -p nsh-windows-app`、`cargo build --manifest-path crates/gpui/Cargo.toml --target-dir target -p nsh-gpui-app`）；Web 运行时不论 CLI 的 profile 如何，都以 `web` profile 构建，位于 `target/wasm32-unknown-unknown/web/`。环境变量 `NSH_RUNTIME` 可以让 CLI 改用另一个目录，其结构与发行包的
-`runtime/` 相同（`ios/iphoneos`、`ios/iphonesimulator`、`android/release`、`macos`、`linux`、`windows`、`gpui`、`web` 等）。
+构建它们（release 版 CLI 需加上 `--release`）；`nsh-macos-app`（在 macOS 上）、`nsh-linux-app`（在 Linux 上）、`nsh-windows-app`（在 Windows 上）、`nsh-gpui-app` 和 `nsh-tui-app`（在三者任一上）为本机构建，位于 `target/<profile>`（`cargo build -p nsh-macos-app`、`cargo build -p nsh-linux-app`、`cargo build -p nsh-windows-app`、`cargo build --manifest-path crates/gpui/Cargo.toml --target-dir target -p nsh-gpui-app`、`cargo build -p nsh-tui-app`）；Web 运行时不论 CLI 的 profile 如何，都以 `web` profile 构建，位于 `target/wasm32-unknown-unknown/web/`。环境变量 `NSH_RUNTIME` 可以让 CLI 改用另一个目录，其结构与发行包的
+`runtime/` 相同（`ios/iphoneos`、`ios/iphonesimulator`、`android/release`、`macos`、`linux`、`windows`、`gpui`、`tui`、`web` 等）。
 
 ## 另请参阅
 

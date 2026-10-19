@@ -26,7 +26,7 @@ pub use nsh_core::{
     js::Limits,
     platform::{
         ColorScheme, Environment, FetchEvent, FetchOp, HttpBody, HttpHead, HttpRequest, Idiom,
-        Insets, Locale, Os,
+        Insets, Locale, Os, Renderer,
     },
     ui::{Root, Theme},
 };
@@ -1599,6 +1599,7 @@ fn ui_environment(env: &Environment, window: Size) -> nsh_core::ui::Environment 
         rtl: env.rtl,
         pixel_ratio: env.pixel_ratio,
         os: env.os,
+        renderer: env.renderer,
         os_version: env.os_version,
         idiom: env.idiom,
         locale: env.locale,
@@ -1789,6 +1790,18 @@ mod tests {
             super::ui_environment(&environment, nsh_core::Size::new(840.0, 630.0)).title_bar,
             title_bar
         );
+    }
+
+    #[test]
+    fn rust_environment_preserves_the_terminal_renderer() {
+        let environment = super::Environment {
+            os: super::Os::MacOs,
+            renderer: super::Renderer::Terminal,
+            ..Default::default()
+        };
+        let ui = super::ui_environment(&environment, nsh_core::Size::new(960.0, 640.0));
+        assert_eq!(ui.os, super::Os::MacOs);
+        assert_eq!(ui.renderer, super::Renderer::Terminal);
     }
 
     use nsh_core::{MountItem, Size};

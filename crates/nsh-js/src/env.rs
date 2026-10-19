@@ -11,7 +11,7 @@ use std::{
     ptr,
 };
 
-use nsh_core::platform::{Appearance, ColorScheme, Environment, Idiom, Os};
+use nsh_core::platform::{Appearance, ColorScheme, Environment, Idiom, Os, Renderer};
 use rquickjs::qjs;
 
 use crate::{
@@ -467,6 +467,8 @@ fn platform(ctx: *mut JsContext) -> JsValue {
         ctx,
         &[
             (c"OS", string(ctx, e.os.name())),
+            (c"renderer", string(ctx, e.renderer.name())),
+            (c"isTerminal", boolean(e.renderer == Renderer::Terminal)),
             (c"isDesktop", boolean(e.desktop())),
             (c"Version", os_version(ctx, &e)),
             (c"isPad", boolean(e.idiom == Idiom::Pad)),
@@ -478,8 +480,9 @@ fn platform(ctx: *mut JsContext) -> JsValue {
     )
 }
 
-/// `Platform.select(spec)`: this OS's value, else `mobile` / `desktop`,
-/// else `native` (not on the web, as in React Native), else `default`.
+/// `Platform.select(spec)`: terminals try `terminal`, then the OS. Graphical
+/// surfaces try the OS, then `mobile` / `desktop`. Both try `native` (off
+/// the web) and `default` afterwards.
 unsafe extern "C" fn platform_select(
     ctx: *mut JsContext,
     _this: JsValue,
@@ -492,10 +495,18 @@ unsafe extern "C" fn platform_select(
         return UNDEFINED;
     }
     let env = current(ctx);
+    let terminal = env.renderer == Renderer::Terminal;
     let kind = if env.desktop() { "desktop" } else { "mobile" };
-    let keys = [env.os.name(), kind, "native", "default"];
+    let keys = [
+        terminal.then_some("terminal"),
+        Some(env.os.name()),
+        (!terminal).then_some(kind),
+        Some("native"),
+        Some("default"),
+    ];
     for key in keys
         .into_iter()
+        .flatten()
         .filter(|k| *k != "native" || env.os != Os::Web)
     {
         let key = std::ffi::CString::new(key).unwrap_or_default();
@@ -735,9 +746,11 @@ pub(crate) const DEVICE_TYPES: &str = r#"export interface PlatformSelectSpec<T> 
   windows?: T;
   linux?: T;
   web?: T;
+  /** Terminal rendering, before the operating system's value. */
+  terminal?: T;
   /** iOS, Android, and phone and tablet browsers. */
   mobile?: T;
-  /** macOS, Windows, Linux, and desktop browsers. */
+  /** Graphical macOS, Windows, Linux, and desktop browsers. */
   desktop?: T;
   /** Every platform but the web. */
   native?: T;
@@ -746,7 +759,11 @@ pub(crate) const DEVICE_TYPES: &str = r#"export interface PlatformSelectSpec<T> 
 
 export interface PlatformStatic {
   readonly OS: OS;
-  /** Desktop behavior applies: macOS, Windows, Linux, and browsers with a
+  /** How the surface presents its UI, independently of the operating system. */
+  readonly renderer: "native" | "web" | "terminal";
+  /** The surface renders in terminal cells. */
+  readonly isTerminal: boolean;
+  /** Graphical desktop behavior applies: macOS, Windows, Linux, and browsers with a
    * mouse and a wide viewport (`interfaceIdiom` `"desktop"`). */
   readonly isDesktop: boolean;
   /** iOS and desktops: the version string (`"17.5"`); Android: the API
@@ -760,9 +777,9 @@ export interface PlatformStatic {
     readonly osVersion: string | number;
     readonly interfaceIdiom: "phone" | "pad" | "mac" | "tv" | "desktop";
   };
-  /** The value for this platform: its OS (`ios`, `macos`, `web`, ...),
-   * else `mobile` / `desktop`, else `native` (not on the web), else
-   * `default`. */
+  /** Terminals try `terminal`, then the OS. Graphical surfaces try the OS
+   * (`ios`, `macos`, `web`, ...), then `mobile` / `desktop`. Both try
+   * `native` (off the web), then `default`. */
   select<T>(spec: PlatformSelectSpec<T>): T | undefined;
 }
 

@@ -288,6 +288,7 @@ fn environment(width: f32, height: f32, dark: bool, pixel_ratio: f32) -> Environ
 fn page() -> Environment {
     PAGE.with(Cell::get).unwrap_or(Environment {
         os: Os::Web,
+        renderer: nsh_engine::Renderer::Web,
         ..Environment::default()
     })
 }

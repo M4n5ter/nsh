@@ -55,6 +55,8 @@ The user's preferred text size relative to the default (`1` is the default size;
 ```ts
 const Platform: {
   readonly OS: "ios" | "android" | "macos" | "windows" | "linux" | "web";
+  readonly renderer: "native" | "web" | "terminal";
+  readonly isTerminal: boolean;
   readonly isDesktop: boolean;
   readonly Version: string | number;
   readonly isPad: boolean;
@@ -73,7 +75,9 @@ The platform the app runs on, constant while it runs.
 | Member | Description |
 |---|---|
 | `OS` | The operating system. iOS, the iOS simulator and Mac Catalyst report `"ios"`, browsers `"web"`. |
-| `isDesktop` | A desktop OS (macOS, Windows, Linux), or a browser with a mouse and a wide window. |
+| `renderer` | The surface's presentation: platform views / desktop graphics (`"native"`), browser HTML (`"web"`) or terminal cells (`"terminal"`). |
+| `isTerminal` | The surface renders in terminal cells. `OS` reports the terminal host's operating system. |
+| `isDesktop` | A graphical desktop backend (macOS, Windows, Linux), or a browser with a mouse and a wide window. |
 | `Version` | iOS and desktops: the version string (`"17.5"`); Android: the API level (a number). |
 | `isPad` | A tablet: an iPad, or an Android tablet. |
 | `isTV` | A TV (Apple TV idiom, Android TV). |
@@ -91,14 +95,18 @@ interface PlatformSelectSpec<T> {
   macos?: T;
   windows?: T;
   linux?: T;
+  web?: T;
+  terminal?: T; // terminal rendering, before the OS
   mobile?: T;   // iOS and Android
   desktop?: T;  // macOS, Windows and Linux
-  native?: T;   // every platform
+  native?: T;   // platforms other than the web
   default?: T;
 }
 ```
 
 Returns the value for the current OS (`ios`, `android`, `web`, ...), else `mobile` / `desktop`, else `native` (every platform but the web), else `default`, else `undefined`. In a browser, `mobile` or `desktop` follows the idiom.
+
+Terminals try `terminal`, then the host OS, then `native` and `default`. Use `Platform.select({ terminal: "Press Enter", default: "Tap" })` for terminal interaction hints.
 
 ```ts
 const shadow = Platform.select({

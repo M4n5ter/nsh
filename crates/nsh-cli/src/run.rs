@@ -33,6 +33,8 @@ pub(crate) enum Target {
     /// The GPUI development host, in a window on this machine (macOS,
     /// Windows or Linux).
     Gpui,
+    /// The development host in this terminal.
+    Tui,
 }
 
 impl Target {
@@ -58,6 +60,7 @@ impl Target {
             Target::Macos => crate::runtime::Platform::MacOs,
             Target::Windows => crate::runtime::Platform::Windows,
             Target::Gpui => crate::runtime::Platform::Gpui,
+            Target::Tui => crate::runtime::Platform::Tui,
             Target::Ios | Target::Android | Target::Web => {
                 crate::runtime::Platform::IphoneSimulator
             }
@@ -115,7 +118,8 @@ pub(crate) fn run(
         | Target::Macos
         | Target::Windows
         | Target::Web
-        | Target::Gpui => None,
+        | Target::Gpui
+        | Target::Tui => None,
     };
     // The host it starts connects by itself: no addresses to show.
     let session = DevSession::start(entry, port, release)?;
@@ -172,6 +176,11 @@ pub(crate) fn run(
             let mut command = Command::new(&host);
             command.args(&args);
             run_local(&session, &mut command, "the GPUI host")
+        }
+        Target::Tui => {
+            let mut command = Command::new(&host);
+            command.args(&args);
+            run_terminal(&mut command, |stop| session.watch(stop))
         }
         Target::Ios => {
             let app = package_ios(&work, &host)?;
@@ -250,13 +259,13 @@ fn run_rust_app(
     };
     let run = work.join("rust");
     match target {
-        Target::Linux | Target::Macos | Target::Windows | Target::Gpui => {
+        Target::Linux | Target::Macos | Target::Windows | Target::Gpui | Target::Tui => {
             let runner = crate::runtime::file(target.platform(), false)?;
             let dir = run.join("run/nsh");
             resources(&dir)?;
             let mut command = Command::new(&runner);
             command.env("NSH_APP_DIR", &dir);
-            if cfg!(target_os = "macos") {
+            if cfg!(target_os = "macos") && target != Target::Tui {
                 // A runner that crashed must not ask to reopen its windows.
                 command.args(["-ApplePersistenceIgnoreState", "YES"]);
             }
@@ -264,7 +273,11 @@ fn run_rust_app(
                 "running {name} ({})",
                 ui::dim("Rust, no JS runtime")
             ));
-            run_rust_local(&app, &mut command)
+            if target == Target::Tui {
+                run_terminal(&mut command, |stop| app.watch(stop))
+            } else {
+                run_rust_local(&app, &mut command)
+            }
         }
         Target::Catalyst => {
             let runner = crate::runtime::file(Platform::MacCatalyst, false)?;
@@ -424,6 +437,63 @@ fn run_local(session: &DevSession, command: &mut Command, what: &str) -> anyhow:
     let _ = child.wait();
     drop(stoppable);
     result
+}
+
+/// Runs a terminal host with inherited console handles. The parent keeps
+/// serving rebuilds while its diagnostics wait until the screen is restored.
+fn run_terminal(
+    command: &mut Command,
+    watch: impl FnOnce(&mut dyn FnMut() -> anyhow::Result<bool>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    }
+    let _stoppable = ui::Stoppable::new();
+    let _terminal = ui::TerminalSession::new();
+    let mut child = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("launch {}", command.get_program().to_string_lossy()))?;
+    #[cfg(windows)]
+    let _job = KillOnClose::assign(&child);
+    let result = watch(&mut || match child.try_wait()? {
+        Some(status) if status.success() => Ok(true),
+        Some(status) => bail!("the terminal host exited with {status}"),
+        None => Ok(false),
+    });
+    stop_terminal(&mut child);
+    result
+}
+
+/// Gives the runner time to restore raw mode, mouse capture and the
+/// alternate screen before a restart or an interrupted command exits.
+pub(crate) fn stop_terminal(child: &mut std::process::Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    #[cfg(unix)]
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: the process is our child and has not been waited for.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+        // SAFETY: `run_terminal` created this child's console process group.
+        unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) };
+    }
+    for _ in 0..40 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// A job object that ends its processes when it closes: when dropped, or
@@ -776,7 +846,8 @@ fn info_plist(target: Target) -> String {
         | Target::Macos
         | Target::Windows
         | Target::Web
-        | Target::Gpui => {
+        | Target::Gpui
+        | Target::Tui => {
             "<key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>\n    \
              <key>MinimumOSVersion</key><string>15.0</string>\n    \
              <key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array>\n    \
@@ -808,6 +879,52 @@ mod tests {
     use clap::ValueEnum as _;
 
     use super::Target;
+
+    #[test]
+    fn tui_target_uses_the_terminal_runtime() {
+        assert_eq!(Target::from_str("tui", false).unwrap(), Target::Tui);
+        assert_eq!(Target::Tui.platform().binary(false), "nsh-tui-host");
+        assert_eq!(Target::Tui.platform().triple(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_shutdown_waits_for_child_cleanup() {
+        use std::{
+            fs,
+            process::{Command, Stdio},
+            time::Duration,
+        };
+
+        let directory =
+            std::env::temp_dir().join(format!("nsh-terminal-stop-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let mut child = Command::new("sh")
+            .args(["-c", "trap 'printf restored > \"$1/restored\"; exit 0' TERM; printf ready > \"$1/ready\"; while :; do sleep 0.01; done", "nsh-terminal-test"])
+            .arg(&directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..200 {
+            if directory.join("ready").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let ready = directory.join("ready").exists();
+        super::stop_terminal(&mut child);
+        let restored = fs::read_to_string(directory.join("restored")).ok();
+        let status = child.wait().unwrap();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(ready, "the test child must install its signal handler");
+        assert_eq!(restored.as_deref(), Some("restored"));
+        assert!(
+            status.success(),
+            "the child must exit after its own cleanup"
+        );
+    }
 
     #[test]
     fn gpui_is_a_target_with_its_own_host() {

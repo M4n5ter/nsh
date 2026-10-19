@@ -55,6 +55,8 @@ const fontScale: Accessor<number>;
 ```ts
 const Platform: {
   readonly OS: "ios" | "android" | "macos" | "windows" | "linux" | "web";
+  readonly renderer: "native" | "web" | "terminal";
+  readonly isTerminal: boolean;
   readonly isDesktop: boolean;
   readonly Version: string | number;
   readonly isPad: boolean;
@@ -73,7 +75,9 @@ const Platform: {
 | 成员 | 说明 |
 |---|---|
 | `OS` | 操作系统。iOS、iOS 模拟器和 Mac Catalyst 都报告 `"ios"`，浏览器报告 `"web"`。 |
-| `isDesktop` | 是否为桌面系统（macOS、Windows、Linux），或有鼠标且窗口较宽的浏览器。 |
+| `renderer` | 界面的呈现方式：平台视图或桌面图形（`"native"`）、浏览器 HTML（`"web"`）或终端字符单元格（`"terminal"`）。 |
+| `isTerminal` | 界面渲染为终端字符单元格。`OS` 报告终端宿主的操作系统。 |
+| `isDesktop` | 图形桌面后端（macOS、Windows、Linux），或有鼠标且窗口较宽的浏览器。 |
 | `Version` | iOS 和桌面系统：版本字符串（`"17.5"`）；Android：API 级别（数字）。 |
 | `isPad` | 平板：iPad 或 Android 平板。 |
 | `isTV` | 电视（Apple TV 形态、Android TV）。 |
@@ -91,14 +95,18 @@ interface PlatformSelectSpec<T> {
   macos?: T;
   windows?: T;
   linux?: T;
+  web?: T;
+  terminal?: T; // 终端渲染，优先于操作系统
   mobile?: T;   // iOS 和 Android
   desktop?: T;  // macOS、Windows 和 Linux
-  native?: T;   // 所有平台
+  native?: T;   // 除 Web 外的所有平台
   default?: T;
 }
 ```
 
 依次返回当前操作系统（`ios`、`android`、`web` 等）对应的值，否则 `mobile` / `desktop`，否则 `native`（除 Web 外的所有平台），否则 `default`，都没有则返回 `undefined`。在浏览器中，`mobile` 还是 `desktop` 由界面风格决定。
+
+终端依次查找 `terminal`、宿主操作系统、`native` 和 `default`。可用 `Platform.select({ terminal: "Press Enter", default: "Tap" })` 为终端选择交互提示。
 
 ```ts
 const shadow = Platform.select({

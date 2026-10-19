@@ -6,7 +6,7 @@ order: 12.5
 
 # nsh/desktop
 
-`nsh/desktop` 包含只有桌面才有的东西：窗口和它的标题栏、应用菜单和右键菜单。它在 macOS、Windows 和 Linux 上可用。这个模块在所有平台上都可以导入，因此同一个 bundle 可以在所有平台运行：在 iOS 和 Android 上它的函数什么也不做，`isAvailable` 告诉你当前是否在桌面上。
+`nsh/desktop` 在 macOS、Windows 和 Linux 上提供图形桌面窗口、标题栏、应用菜单和右键菜单。这个模块在所有平台上都可以导入，因此同一个 bundle 可以在所有平台运行。`isAvailable` 告诉你当前界面是否具备这些图形桌面 API。
 
 ```ts
 import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
@@ -18,7 +18,7 @@ import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
 const isAvailable: boolean;
 ```
 
-在 macOS、Windows 和 Linux 上为 `true`，其他平台为 `false`。
+在 macOS、Windows 和 Linux 图形后端上为 `true`。
 
 ## Window
 

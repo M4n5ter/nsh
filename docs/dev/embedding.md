@@ -1,6 +1,6 @@
 # Packaging and embedding
 
-- `nsh package <entry> --target ios|ios-simulator|android|linux|macos|windows|gpui` builds an installable app from the prebuilt runtime: metadata from
+- `nsh package <entry> --target ios|ios-simulator|android|linux|macos|windows|gpui|tui` builds an installable app from the prebuilt runtime: metadata from
   `nsh.json` next to the entry (`name`, `id`, `version`, `build`, `icon`; `appearance` also sets `UIUserInterfaceStyle`
   and a dark window theme, so the launch screen is in it) or flags. iOS: `.app`, `.ipa` with `--sign <identity>
   --profile <file.mobileprovision>` (entitlements come from the profile; icons are compiled by `actool` into `Assets.car`).
@@ -25,6 +25,9 @@
   `nsh/` next to itself, or `Contents/Resources/nsh` inside an app bundle (`nsh_gpui_app::resources`). The Linux
   runner links WebKitGTK 4.1 (GTK 3) and GStreamer dynamically (features `webview`, `video`): they must be installed
   where the package runs, as GTK 4 must for Linux packages.
+  Terminal: a directory containing the console runner (`crates/nsh-tui-app`), `nsh/bundle.nshc`, `nsh/assets/` and
+  `nsh/app.json`, plus `.tar.gz` on Unix or `.zip` on Windows. Rust roots are compiled into the runner; `--run`
+  inherits terminal streams and waits for exit. Resource layout and verification scripts: [Terminal backend](tui.md).
 - Embedding: iOS apps link `NativeShell.xcframework` and `import NativeShell` (Swift: `NshAppView`, a `UIView`;
   `NshTrust`, `NshPackage`, `NshLimits`, `NshError`); Android apps add `nsh.aar` and use `com.longbridge.nsh.NshView`.
   `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`. Rust desktop apps use the platform
@@ -36,6 +39,12 @@
   the focus it is given (`Focusable`). The crate depends on `gpui-fast` 0.1 from crates.io (re-exported as
   `nsh_platform_gpui::gpui`); GPUI Kit's `gpui-fast` feature makes `gpui_component` use that same crate, so both share
   one GPUI. `open_app_window` opens a window showing an app in a running GPUI app.
+  Terminal apps embed `nsh_platform_tui::AppView`: create it with `AppView::new(AppOptions)`, load an `App` through
+  `load(App) -> io::Result<()>`, call `tick(f64) -> io::Result<bool>` with monotonic seconds and paint with
+  `render(ratatui::layout::Rect, &mut ratatui::buffer::Buffer)`. The host owns terminal IO, calls `resize(columns,
+  rows)` for its assigned region and routes `handle_event(Event)` using mouse coordinates local to that region.
+  Each view owns its engine and native component registry; [`run_app`](tui.md#public-embedding-api) provides the
+  standalone terminal lifecycle. See [Terminal backend](tui.md) for embedding contracts and public APIs.
 - **Native components** (`nsh/native`; `component.rs`, `ComponentBox.java`): the embedding app registers its own native
   views by name — Swift `NshAppView.register(component:) { context in … }` (`NshComponent`: `view`, `setProp`,
   `command`), Java `NshView.registerComponent(name, factory)` (`NshComponent`), Rust `AppView::register_component`

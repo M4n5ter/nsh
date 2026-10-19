@@ -9,6 +9,7 @@
 //! dist/nsh/runtime/linux/{nsh-linux-host,nsh-linux-app}        development host, packaged app runner
 //! dist/nsh/runtime/windows/{nsh-windows-host,nsh-windows-app}.exe  development host, packaged app runner
 //! dist/nsh/runtime/gpui/{nsh-gpui-host,nsh-gpui-app}[.exe]     development host, packaged app runner (GPUI)
+//! dist/nsh/runtime/tui/{nsh-tui-host,nsh-tui-app}[.exe]       terminal host, packaged app runner
 //! dist/nsh/runtime/android/{release,dev}/                      classes.dex, lib/<abi>/libnsh.so
 //! dist/nsh/runtime/web/{nsh.wasm,nsh-dev.wasm,nsh.js}          the web runtimes (published apps', the dev host's)
 //! dist/nsh/embed/ios/{NativeShell,NativeShellDev}.xcframework  embedding in iOS apps
@@ -103,6 +104,18 @@ pub(crate) fn dist() -> anyhow::Result<()> {
                 &out.join("runtime/windows").join(exe(package)),
             )?;
         }
+    }
+
+    // Terminal runtimes use this machine's console and carry no GUI host.
+    for (package, what) in [
+        ("nsh-tui-host", "the terminal development host"),
+        ("nsh-tui-app", "the terminal release runner"),
+    ] {
+        cargo(&["build", "--release", "-p", package], what)?;
+        copy(
+            &release.join("release").join(exe(package)),
+            &out.join("runtime/tui").join(exe(package)),
+        )?;
     }
 
     // One build each: built together, cargo would unify the host's `dev`

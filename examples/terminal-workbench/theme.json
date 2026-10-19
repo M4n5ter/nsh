@@ -1,0 +1,30 @@
+{
+  "name": "Operations Workbench",
+  "author": "Native Shell",
+  "themes": [
+    {
+      "name": "Workbench dark",
+      "mode": "dark",
+      "radius": 4,
+      "radius.lg": 8,
+      "font.size": 16,
+      "colors": {
+        "background": "#0b111a",
+        "foreground": "#e2ebf3",
+        "border": "#293747",
+        "primary.background": "#8ae5c7",
+        "primary.active.background": "#69c8ab",
+        "primary.foreground": "#0b1b19",
+        "secondary.background": "#213040",
+        "secondary.active.background": "#314456",
+        "secondary.foreground": "#d7e5ef",
+        "group_box.background": "#111c28",
+        "group_box.foreground": "#e2ebf3",
+        "muted.foreground": "#8fa4b8",
+        "input.border": "#35485d",
+        "caret": "#8ae5c7",
+        "selection.background": "#285346"
+      }
+    }
+  ]
+}

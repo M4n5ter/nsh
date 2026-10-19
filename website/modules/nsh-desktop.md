@@ -6,7 +6,7 @@ order: 12.5
 
 # nsh/desktop
 
-`nsh/desktop` holds what only desktops have: the window and its title bar, the application menu and context menus. It works on macOS, Windows and Linux. The module can be imported on every platform, so one bundle runs everywhere: on iOS and Android its functions do nothing, and `isAvailable` tells you whether you are on a desktop.
+`nsh/desktop` provides graphical desktop windows and title bars, the application menu and context menus on macOS, Windows and Linux. The module can be imported on every platform, so one bundle runs everywhere. `isAvailable` tells you whether the surface has these graphical desktop APIs.
 
 ```ts
 import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
@@ -18,7 +18,7 @@ import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
 const isAvailable: boolean;
 ```
 
-`true` on macOS, Windows and Linux; `false` elsewhere.
+`true` on graphical macOS, Windows and Linux backends.
 
 ## Window
 

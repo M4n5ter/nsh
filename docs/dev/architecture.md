@@ -50,6 +50,12 @@ Input                        native gestures -> EngineControl::dispatch_event ->
   element per surface with GPUI's primitives (`DrawCx` keeps the transform and opacity GPUI lacks); each commit is one
   closure on GPUI's main thread (`rt::invoke`), and every main-thread entry point ends with `rt::flush`, which
   notifies the views of changed surfaces; native animations run on the window's frames.
+- **Terminal** (`tui.md`): one retained `Surface` per engine, drawn into a Ratatui buffer. The engine typesets
+  terminal graphemes with `TerminalTextEngine`; the terminal loop applies each mount batch and handles focus,
+  editing, scrolling and native animation locally. Layout remains in points (8×16 per cell by default); one
+  per-surface worker rasterizes images and canvases and encodes supported terminal graphics protocols. Embedding hosts own terminal IO and event routing;
+  `run_app` supplies raw-mode lifecycle and a full-screen loop. `Renderer::Terminal` keeps the rendering medium
+  separate from the host OS.
 - **Web APIs** (TS apps only; Rust code uses crates of its choice): `fetch` with `Headers` / `Request` / `Response`, the
   Streams API (readable streams with byte streams and BYOB readers, writable and transform streams, `pipeTo` /
   `pipeThrough`, `TextEncoderStream` / `TextDecoderStream`), `Blob` / `File` / `FormData`, `URL` / `URLSearchParams`,

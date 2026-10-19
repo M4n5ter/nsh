@@ -161,6 +161,8 @@ if (Platform.OS === "android") {
 
 `Platform.select(spec)` 返回当前平台对应的值。它依次查找该操作系统自己的键，然后是 `mobile`（iOS、Android、手机和平板浏览器）或 `desktop`（macOS、Windows、Linux、桌面浏览器），再是 `native`（除 Web 外的所有平台，与 React Native 相同），最后是 `default`：
 
+终端界面报告 `Platform.renderer === "terminal"`、`Platform.isTerminal === true`，`Platform.OS` 为宿主操作系统。终端依次选择 `terminal`、宿主操作系统、`native` 和 `default`。图形桌面界面应用 `desktop={{…}}` 属性。
+
 ```tsx
 const styles = {
   card: {

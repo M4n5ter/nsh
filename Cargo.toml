@@ -38,12 +38,24 @@ nsh-platform-android = { version = "0.1.1", path = "crates/nsh-platform-android"
 nsh-platform-linux = { version = "0.1.1", path = "crates/nsh-platform-linux", default-features = false }
 nsh-platform-macos = { version = "0.1.1", path = "crates/nsh-platform-macos", default-features = false }
 nsh-platform-windows = { version = "0.1.1", path = "crates/nsh-platform-windows", default-features = false }
+nsh-platform-tui = { version = "0.1.1", path = "crates/nsh-platform-tui", default-features = false }
 nsh-dev = { version = "0.1.1", path = "crates/nsh-dev" }
 
 anyhow = "1"
 thiserror = "2"
 clap = { version = "4.6", features = ["derive"] }
 crossbeam-channel = "0.5"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
+unicode-linebreak = "0.1"
+unicode-bidi = "0.3"
+tiny-skia = "0.12"
+fontdb = { version = "0.23", default-features = false, features = ["std", "fs", "fontconfig"] }
+rustybuzz = "0.20"
+signal-hook = "0.3"
 notify = "8.2"
 log = "0.4"
 env_logger = "0.11"

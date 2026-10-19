@@ -17,6 +17,7 @@ mod runtime;
 mod rust_app;
 mod sign;
 mod trace;
+mod tui;
 mod ui;
 mod web;
 mod windows;
@@ -169,7 +170,7 @@ enum Command {
     /// Catalyst app (default on macOS), the macOS (AppKit) app, the Linux
     /// app (default on Linux), the Windows app (default on Windows), the
     /// GPUI app (on any of the three), an iOS simulator, an Android device
-    /// or emulator, or a browser.
+    /// or emulator, a browser, or the terminal.
     Run {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.

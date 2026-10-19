@@ -145,11 +145,13 @@ function BottomBar() {
 | 成员 | 说明 |
 |---|---|
 | `Platform.OS` | `"ios"`、`"android"`、`"macos"`、`"windows"`、`"linux"` 或 `"web"`。Mac Catalyst 报告 `"ios"`。 |
+| `Platform.renderer` | `"native"`（平台视图或桌面图形）、`"web"`（浏览器 HTML）或 `"terminal"`（终端字符单元格）。 |
+| `Platform.isTerminal` | 界面渲染为终端字符单元格；`Platform.OS` 仍为宿主操作系统。 |
 | `Platform.Version` | iOS 和桌面平台：版本字符串（`"17.5"`）；Android：API 级别（数字）。 |
 | `Platform.isPad` | iPad（或 iPad 界面风格）。 |
 | `Platform.isTV` | 电视。 |
 | `Platform.isMacCatalyst` | Mac 界面风格的 Mac Catalyst。 |
-| `Platform.isDesktop` | macOS、Windows 或 Linux，或桌面浏览器（Web 上界面风格为 `"desktop"`）。 |
+| `Platform.isDesktop` | macOS、Windows 或 Linux 图形后端，或桌面浏览器（Web 上界面风格为 `"desktop"`）。 |
 | `Platform.constants` | `{ osVersion, interfaceIdiom }`，界面风格为 `"phone"`、`"pad"`、`"mac"`、`"tv"` 或 `"desktop"`。 |
 | `Platform.select(spec)` | 当前平台对应的值；见[平台特定代码](./platform-specific.md#platformselect)。 |
 

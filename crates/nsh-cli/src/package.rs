@@ -4,7 +4,8 @@
 //! `codesign` and `sips`, Linux packaging `tar`; Windows packaging needs
 //! nothing (`windows.rs`), nor does the web's (`web.rs`). GPUI packages are
 //! made as the native backend's of the machine they are made on, with the
-//! GPUI release runner.
+//! GPUI release runner. Terminal apps use a console runner and resources
+//! archived as `.tar.gz` on Unix and `.zip` on Windows.
 
 use std::{
     fs,
@@ -43,6 +44,8 @@ pub(crate) enum PackageTarget {
     /// GPUI, for this machine's OS: packaged as `linux`, `macos` or
     /// `windows` are, with the GPUI release runner.
     Gpui,
+    /// A terminal: a console executable and resources, archived for this OS.
+    Tui,
 }
 
 impl PackageTarget {
@@ -215,6 +218,9 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         PackageTarget::Web => {
             return crate::web::package(&options, config, &name, &id, &built);
         }
+        PackageTarget::Tui => {
+            return crate::tui::package(&options, config, &name, &id, &executable, &built);
+        }
         PackageTarget::Gpui => unreachable!("packaged as this OS's apps are"),
     };
     let runner = runtime::file(platform, true)?;
@@ -251,7 +257,8 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         | PackageTarget::Macos
         | PackageTarget::Windows
         | PackageTarget::Web
-        | PackageTarget::Gpui => "iphonesimulator",
+        | PackageTarget::Gpui
+        | PackageTarget::Tui => "iphonesimulator",
     };
     let mut info = info_plist(&name, &id, &executable, config, sdk);
     if let Some(icon) = &config.icon {
@@ -279,7 +286,8 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         | PackageTarget::Macos
         | PackageTarget::Windows
         | PackageTarget::Web
-        | PackageTarget::Gpui => {
+        | PackageTarget::Gpui
+        | PackageTarget::Tui => {
             unreachable!("packaged above")
         }
         PackageTarget::Ios => {

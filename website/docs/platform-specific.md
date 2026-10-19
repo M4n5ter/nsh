@@ -161,6 +161,8 @@ if (Platform.OS === "android") {
 
 `Platform.select(spec)` returns the value for this platform. It looks for the OS's own key, then `mobile` (iOS, Android, phone and tablet browsers) or `desktop` (macOS, Windows, Linux, desktop browsers), then `native` (every platform but the web, as in React Native), then `default`:
 
+Terminal surfaces report `Platform.renderer === "terminal"` and `Platform.isTerminal === true`, with the host OS in `Platform.OS`. They select `terminal`, then the host OS, then `native`, then `default`. Graphical desktop surfaces apply `desktop={{…}}` props.
+
 ```tsx
 const styles = {
   card: {

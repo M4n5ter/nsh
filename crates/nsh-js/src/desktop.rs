@@ -98,6 +98,12 @@ fn os(ctx: *mut JsContext) -> Os {
     unsafe { &(*crate::state::state(ctx)).dom }.os()
 }
 
+/// Native window and menu commands apply to graphical desktop surfaces.
+fn available(ctx: *mut JsContext) -> bool {
+    let environment = crate::env::current(ctx);
+    environment.os.is_desktop() && environment.desktop()
+}
+
 fn throw(ctx: *mut JsContext, message: &str) -> JsValue {
     let message = std::ffi::CString::new(message).unwrap_or_default();
     // SAFETY: throws on a live context; `%s` keeps the message literal.
@@ -317,7 +323,7 @@ unsafe extern "C" fn set_application_menu(
     argc: c_int,
     argv: *mut JsValue,
 ) -> JsValue {
-    if !os(ctx).is_desktop() {
+    if !available(ctx) {
         return UNDEFINED;
     }
     let list = arg(argc, argv, 0);
@@ -347,7 +353,7 @@ unsafe extern "C" fn popup(
     // SAFETY: a new promise and its resolving functions (owned).
     let promise = unsafe { qjs::JS_NewPromiseCapability(ctx, funcs.as_mut_ptr()) };
     free(ctx, funcs[1]);
-    if !os(ctx).is_desktop() {
+    if !available(ctx) {
         // Nothing shows: settled at once.
         // SAFETY: an owned resolving function, called then freed.
         unsafe {
@@ -450,13 +456,16 @@ pub(crate) const EXPORTS: &[Item] = &[
     (
         "isAvailable",
         Export::Value(|ctx| {
-            if os(ctx).is_desktop() {
+            if available(ctx) {
                 qjs::JS_TRUE
             } else {
                 qjs::JS_FALSE
             }
         }),
-        Ts::value("True on desktops (macOS, Windows, Linux).", "boolean"),
+        Ts::value(
+            "True on graphical desktops (macOS, Windows, Linux).",
+            "boolean",
+        ),
     ),
     (
         "titleBar",

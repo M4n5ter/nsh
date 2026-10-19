@@ -321,3 +321,30 @@ fn components_read_the_pixel_ratio_the_device_and_the_locale() {
     let (texts, ..) = until(&rx, shown);
     assert!(texts.iter().any(|t| t == shown), "{texts:?}");
 }
+
+/// Reads the same terminal identity and shortcut conventions as JS.
+#[component]
+fn TerminalEnvironment() -> impl IntoElement {
+    on_key("mod+k", |_| {});
+    text(format!(
+        "{} {} {} {} {}",
+        os().name(),
+        renderer().name(),
+        is_terminal(),
+        is_desktop(),
+        key_label("mod+k"),
+    ))
+}
+
+#[test]
+fn rust_components_read_terminal_identity_and_control_shortcuts() {
+    let (_engine, rx, _) = start::<TerminalEnvironment>(Environment {
+        os: Os::MacOs,
+        idiom: Idiom::Desktop,
+        renderer: Renderer::Terminal,
+        ..Environment::default()
+    });
+    let shown = "macos terminal true false Ctrl+K";
+    let (texts, ..) = until(&rx, shown);
+    assert!(texts.iter().any(|text| text == shown), "{texts:?}");
+}

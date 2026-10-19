@@ -18,6 +18,7 @@
 //! mount items, the signing commands' lines).
 
 use std::{
+    collections::VecDeque,
     fmt::Display,
     io::{BufRead as _, BufReader, IsTerminal as _, Write as _},
     path::Path,
@@ -389,6 +390,8 @@ pub(crate) fn duration(d: Duration) -> String {
 
 /// What is printed, and the spinner drawn below it.
 struct Out {
+    terminal_sessions: usize,
+    deferred: VecDeque<String>,
     /// Running steps; the last one is drawn.
     spinners: Vec<Spinner>,
     /// The spinner line is on screen.
@@ -407,6 +410,8 @@ static OUT: Mutex<Out> = Mutex::new(Out {
     spinners: Vec::new(),
     drawn: false,
     frame: 0,
+    terminal_sessions: 0,
+    deferred: VecDeque::new(),
 });
 
 const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -425,6 +430,9 @@ impl Out {
     }
 
     fn draw(&mut self, err: &mut impl std::io::Write) {
+        if self.terminal_sessions > 0 {
+            return;
+        }
         let Some(spinner) = self.spinners.last() else {
             return self.clear(err);
         };
@@ -458,6 +466,15 @@ impl Out {
 /// Prints `text` (whole lines) above the spinner.
 fn print(text: &str) {
     let mut out = out();
+    if out.terminal_sessions > 0 {
+        // Keep diagnostics for after the child restores the screen, with
+        // bounded memory even when the app logs every animation frame.
+        out.deferred.push_back(text.chars().take(4096).collect());
+        if out.deferred.len() > 128 {
+            out.deferred.pop_front();
+        }
+        return;
+    }
     let mut err = std::io::stderr().lock();
     out.clear(&mut err);
     let _ = err.write_all(text.as_bytes());
@@ -465,6 +482,36 @@ fn print(text: &str) {
         let _ = err.write_all(b"\n");
     }
     out.draw(&mut err);
+}
+
+/// Gives an interactive child exclusive access to the terminal. Parent
+/// progress and device logs are buffered until the child restores it.
+pub(crate) struct TerminalSession(());
+
+impl TerminalSession {
+    pub(crate) fn new() -> Self {
+        let mut out = out();
+        out.clear(&mut std::io::stderr().lock());
+        out.terminal_sessions += 1;
+        Self(())
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let mut out = out();
+        out.terminal_sessions -= 1;
+        if out.terminal_sessions == 0 {
+            let mut err = std::io::stderr().lock();
+            for line in out.deferred.drain(..) {
+                let _ = err.write_all(line.as_bytes());
+                if !line.ends_with('\n') {
+                    let _ = err.write_all(b"\n");
+                }
+            }
+            out.draw(&mut err);
+        }
+    }
 }
 
 /// The terminal's width, when stderr is one.

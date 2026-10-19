@@ -27,7 +27,7 @@ use super::{
 use crate::{
     Command, Dialog, EdgeInsets, LayoutAnimation, NodeId, Size, StatusBarSetting,
     canvas::CanvasFont,
-    platform::{Appearance, Idiom, Locale, Os},
+    platform::{Appearance, Idiom, Locale, Os, Renderer},
     style::Color,
     time::Instant,
 };
@@ -276,12 +276,24 @@ pub fn idiom() -> Idiom {
         .with_untracked(|e| e.idiom)
 }
 
-/// Whether desktop behavior applies: a desktop OS, or a browser in the
-/// desktop idiom (TS: `Platform.isDesktop`); it does not change.
+/// How the surface presents its UI (TS: `Platform.renderer`); it does not change.
+pub fn renderer() -> Renderer {
+    with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
+        .expect("the core sets the environment")
+        .with_untracked(|e| e.renderer)
+}
+
+/// Whether this surface renders in terminal cells (TS: `Platform.isTerminal`).
+pub fn is_terminal() -> bool {
+    renderer() == Renderer::Terminal
+}
+
+/// Whether graphical desktop behavior applies: a desktop OS with a graphical
+/// renderer, or a browser in the desktop idiom (TS: `Platform.isDesktop`).
 pub fn is_desktop() -> bool {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
-        .with_untracked(|e| e.idiom.desktop_on(e.os))
+        .with_untracked(|e| e.renderer != Renderer::Terminal && e.idiom.desktop_on(e.os))
 }
 
 /// The app's theme (reading it subscribes: a new theme reaches what read
@@ -652,19 +664,20 @@ pub struct KeyOptions {
 }
 
 /// Whether shortcuts follow Apple's conventions here (`mod` is Command):
-/// the OS, or for a browser the platform it runs on.
+/// the OS, or for a browser the platform it runs on. Terminals use Control.
 fn apple_keys() -> bool {
-    let (os, apple) = with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
+    let (os, apple, terminal) = with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
-        .with_untracked(|e| (e.os, e.apple_keyboard));
-    crate::keymap::apple_keys(os, apple)
+        .with_untracked(|e| (e.os, e.apple_keyboard, e.renderer == Renderer::Terminal));
+    !terminal && crate::keymap::apple_keys(os, apple)
 }
 
 /// Runs `handler` when `keystroke` is pressed while the current owner
 /// lives (TS: `keymap.bind`): `"mod+k"` (`mod` is Command on Apple
-/// platforms, Control elsewhere), `"shift+mod+l"`, `"escape"`, ... (the
-/// keystrokes of `nsh/keymap`). The handler gets the keystroke as written.
-/// Desktop platforms fire them; elsewhere they are kept but no key does.
+/// graphical platforms, Control in terminals and elsewhere),
+/// `"shift+mod+l"`, `"escape"`, ... (the keystrokes of `nsh/keymap`). The
+/// handler gets the keystroke as written.
+/// Desktop and terminal backends fire them.
 ///
 /// # Panics
 ///
@@ -685,7 +698,8 @@ pub fn on_key_with(keystroke: &str, options: KeyOptions, handler: impl Fn(&str) 
     let os = os();
     let parsed = crate::keymap::Keystroke::parse_with(keystroke, apple_keys())
         .unwrap_or_else(|e| panic!("on_key: {e}"));
-    if let Some(why) = parsed.reserved(os) {
+    // A terminal uses the Control-based host shortcuts on every OS.
+    if let Some(why) = parsed.reserved(if is_terminal() { Os::Linux } else { os }) {
         panic!("on_key: {keystroke:?} cannot be bound: {why}");
     }
     let owner = Owner::current();

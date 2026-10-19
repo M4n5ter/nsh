@@ -19,6 +19,7 @@ use std::{
 use nsh_core::{
     EventKind, Op, Prop, ROOT_ID,
     keymap::{KeyBinding, Keystroke, When, apple_keys},
+    platform::{Os, Renderer},
 };
 use rquickjs::qjs;
 
@@ -62,9 +63,10 @@ fn os(ctx: Ctx) -> nsh_core::platform::Os {
 }
 
 /// Whether shortcuts follow Apple's conventions here (`mod` is Command):
-/// the app's OS, or for a browser the platform it runs on.
+/// the app's OS, or for a browser the platform it runs on. Terminals use Control.
 fn apple(ctx: Ctx) -> bool {
-    apple_keys(os(ctx), crate::env::current(ctx).apple_keyboard)
+    let environment = crate::env::current(ctx);
+    environment.renderer != Renderer::Terminal && apple_keys(os(ctx), environment.apple_keyboard)
 }
 
 /// The `keymap` object.
@@ -139,12 +141,18 @@ native! {
         };
         let (when, repeat) = parse_options(ctx, options)?;
         let (os, apple) = (os(ctx), apple(ctx));
+        // A terminal uses the Control-based host shortcuts on every OS.
+        let reserved_os = if crate::env::current(ctx).renderer == Renderer::Terminal {
+            Os::Linux
+        } else {
+            os
+        };
         // Every binding is checked before any is made.
         let mut parsed = Vec::with_capacity(pairs.len());
         for (text, handler) in pairs {
             let keystroke = Keystroke::parse_with(&text, apple)
                 .map_err(|e| type_error(ctx, &format!("keymap.bind: {e}")))?;
-            if let Some(why) = keystroke.reserved(os) {
+            if let Some(why) = keystroke.reserved(reserved_os) {
                 return Err(type_error(
                     ctx,
                     &format!("keymap.bind: {text:?} cannot be bound: {why}"),
@@ -288,12 +296,12 @@ pub(crate) const TYPES: &str = r#"export interface KeyBindingOptions {
   repeat?: boolean;
 }
 
-/** The app's keyboard shortcuts (desktop platforms; elsewhere bindings are
- * kept but no key fires them). A keystroke is modifiers and a key joined by
+/** The app's keyboard shortcuts (desktop and terminal backends).
+ * A keystroke is modifiers and a key joined by
  * `+`, in any case (lowercase is the recommended style; a capital letter is
  * the same key, not Shift): `"mod+k"`, `"ctrl+shift+p"`, `"alt+enter"`, `"escape"`,
  * `"f5"`, `"mod+plus"`. Modifiers: `mod` (`cmdorctrl`): Command on Apple
- * platforms (and in a browser on one), Control elsewhere, for the app's own shortcuts; `cmd`
+ * graphical platforms (and in a browser on one), Control in terminals and elsewhere, for the app's own shortcuts; `cmd`
  * (`command`, `meta`, `super`, `win`), `ctrl` (`control`), `alt` (`option`,
  * `opt`), `shift`. Keys: the character a key types on the US layout without
  * Shift (`k`, `1`, `/`, `[`; `"shift+/"` for `?`), `plus` (`=`), `minus`

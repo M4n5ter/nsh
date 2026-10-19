@@ -12,7 +12,8 @@ Android views (`nsh-platform-android`), macOS with AppKit views (`nsh-platform-m
 with Direct2D (`nsh-platform-windows`), Linux with GTK 4 widgets (`nsh-platform-linux`). The GPUI backend
 (`nsh-platform-gpui`) draws on macOS, Windows and Linux and embeds in GPUI / GPUI Kit apps; the web platform
 (`nsh-platform-web`) renders apps as HTML in a browser page, and `nsh package --target web` publishes them as static
-sites. The only UI set is `nsh/ui/mobile` (it renders on every platform); a desktop set is planned.
+sites. The terminal backend (`nsh-platform-tui`) draws into Ratatui buffers on all three desktops and embeds in
+terminal apps. The only UI set is `nsh/ui/mobile` (it renders on every platform); a desktop set is planned.
 
 This file is the short version. The details are in `docs/dev/` (read the page of the area you change first) and in
 the module docs of the code (`//!`, Javadoc), which are the reference for how a module works inside.
@@ -85,6 +86,13 @@ crates/
                        AppView, standalone app; feature `dev` as above; `--script` steps (docs/dev/windows.md)
   nsh-windows-host/    Development host on Windows (`nsh run --target windows`): connects to a dev server or runs a bundle
   nsh-windows-app/     Release runner on Windows: the executable of apps built by `nsh package --target windows`
+  nsh-platform-tui/   Terminal backend (macOS, Windows, Linux): retained scene, terminal text measurement, focus and editing,
+                       scrolling, navigation, native animation, worker-rendered images and canvas through detected graphics
+                       protocols or half blocks;
+                       AppView embeds in a Ratatui region, run_app owns a standalone terminal; feature `dev`: hot reload;
+                       --script renders deterministic UTF-8 snapshots in memory (docs/dev/tui.md)
+  nsh-tui-host/        Development host in a terminal (`nsh run --target tui`): connects to a dev server or runs a bundle
+  nsh-tui-app/         Release runner in a terminal (`nsh package --target tui`)
   gpui/                The GPUI backend: a workspace of its own (`crates/gpui/Cargo.toml`, its own `Cargo.lock` and GPUI's dependencies),
                        excluded from the main one, so the main workspace's builds, tests and CI never build GPUI:
   gpui/nsh-platform-gpui/ GPUI backend (macOS, Windows, Linux): the Windows backend's retained `NshView` tree, input,
@@ -115,7 +123,7 @@ examples/             Example apps (gallery: a demo index, one module per demo; 
 ```
 
 Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ←
-`nsh-ios-host` / `nsh-ios-app` / `nsh-linux-host` / `nsh-linux-app` / `nsh-macos-host` / `nsh-macos-app` / `nsh-windows-host` / `nsh-windows-app` / `nsh-gpui-host` / `nsh-gpui-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`; `nsh-ui-mobile` depends
+`nsh-ios-host` / `nsh-ios-app` / `nsh-linux-host` / `nsh-linux-app` / `nsh-macos-host` / `nsh-macos-app` / `nsh-windows-host` / `nsh-windows-app` / `nsh-gpui-host` / `nsh-gpui-app` / `nsh-tui-host` / `nsh-tui-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`; `nsh-ui-mobile` depends
 on `nsh-core` only and is used by the bundler (declarations), the platforms and the CLI (registry). `nsh-core` must not depend
 on any platform or JS crate.
 
@@ -138,6 +146,7 @@ on any platform or JS crate.
 | the macOS backend (`nsh-platform-macos`, AppKit) | `docs/dev/macos.md` |
 | the Windows backend (`nsh-platform-windows`, Win32 / Direct2D) | `docs/dev/windows.md` |
 | the GPUI backend (`nsh-platform-gpui`, macOS / Windows / Linux) | `docs/dev/gpui.md` |
+| the terminal backend (`nsh-platform-tui`, Ratatui) | `docs/dev/tui.md` |
 | a hot path | `docs/dev/performance.md` (baselines) |
 | anything platform-specific | `docs/dev/pitfalls.md` (verified constraints, by area) |
 | components (`nsh/ui/mobile`) | `docs/dev/components.md`, `crates/nsh-ui-mobile/README.md` |
@@ -175,6 +184,9 @@ cargo build --manifest-path crates/gpui/Cargo.toml --target-dir target -p nsh-gp
 ./target/debug/nsh-windows-host --bundle build/bundle.nshc --script "wait 800; shot a.png; quit"   # Windows host, scripted (connects to `nsh dev` without --bundle)
 ./target/debug/nsh run examples/gallery --target gpui                      # in a GPUI window (macOS, Windows, Linux)
 ./target/debug/nsh package examples/gallery --target gpui                  # packaged as this OS's apps are, with the GPUI runner
+./target/debug/nsh run examples/terminal-workbench --target tui            # in this terminal, with hot reload
+./target/debug/nsh package examples/terminal-workbench --target tui        # console executable and resources, archived for this OS
+./target/debug/nsh-tui-host --bundle build/bundle.nshc --size 120x40 --script "wait 300; shot screen.txt; quit"   # headless text snapshot
 ./target/debug/nsh run examples/gallery --target web                       # in the browser (the dev server serves the page)
 ./target/debug/nsh package examples/gallery --target web --run             # a static site (files named by content), served on this machine
 ./target/debug/nsh package examples/gallery --target ios-simulator --run   # installable app (.app / .ipa / .apk)
@@ -200,6 +212,8 @@ cargo clippy -p nsh-platform-web --target wasm32-unknown-unknown --features comp
 cargo clippy -p nsh-platform-linux -p nsh-linux-host -p nsh-linux-app --all-targets      # the Linux backend (on Linux; empty elsewhere)
 cargo clippy -p nsh-platform-macos -p nsh-macos-host -p nsh-macos-app --all-targets --features nsh-platform-macos/dev   # the macOS backend (on macOS)
 cargo clippy -p nsh-platform-windows -p nsh-windows-host -p nsh-windows-app --all-targets   # the Windows backend (on Windows; empty elsewhere)
+cargo clippy -p nsh-platform-tui -p nsh-tui-host -p nsh-tui-app --all-targets   # the terminal backend (macOS / Windows / Linux)
+cargo test -p nsh-platform-tui -p nsh-tui-host -p nsh-tui-app                  # tests and in-memory terminal rendering, no display needed
 cargo test -p nsh-platform-windows -p nsh-windows-host -p nsh-windows-app               # its tests (on Windows; they open no window)
 (cd crates/gpui && cargo clippy --all-targets --features nsh-platform-gpui/dev)        # the GPUI backend, its own workspace (empty off the desktops)
 (cd crates/gpui && cargo test && cargo +nightly fmt --all)                              # its tests (they open no window) and formatting
@@ -220,6 +234,12 @@ Wayland / xkbcommon / fontconfig packages plus GTK 3, WebKitGTK 4.1 (feature `we
 1.20+ with its base plug-ins (feature `video`, the host's and the runner's) (`docs/dev/gpui.md`). It builds into the
 repository's `target/`; dependencies only it uses are declared in `crates/gpui/Cargo.toml`, not the root. `.cargo/config.toml` sets
 `IPHONEOS_DEPLOYMENT_TARGET = 15.0` for Rust and C alike.
+
+The terminal backend is in the main workspace and builds on macOS, Windows and Linux using Rust libraries and the
+OS console facilities. It needs the common C compiler / libclang setup for QuickJS when building with `js`, and
+supports Rust-root embedding with `--no-default-features`. Layout stays in virtual points (one cell is 8×16 points
+by default); only terminal IO, rendering, script input and embedding regions use cells. Keep those units explicit
+when changing text measurement, clipping, pointer input or scripts (`docs/dev/tui.md`).
 
 ## Rules
 
@@ -330,6 +350,8 @@ Details and examples: "Commits and pull requests" in `CONTRIBUTING.md`.
    simulates input (taps, drags, wheels, typing, keys, dark / light), without touching the screen (`docs/dev/linux.md`).
    Windows: `nsh-windows-host --script "…"` does the same (also `touch` drags, precision touchpad `pad` scrolls,
    `resize`); web views are child windows and missing from its screenshots (`docs/dev/windows.md`).
+   Terminal: `nsh-tui-host --bundle … --size 120x40 --script "wait 300; shot screen.txt; key Tab; type 你好; quit"`
+   renders in memory and saves UTF-8 text; coordinates and resize dimensions use cells (`docs/dev/tui.md`).
    GPUI on Linux: `nsh-gpui-host --bundle … --script "…"` (the same steps) on a rootful Xwayland display of its own
    started with `-shm` (`DISPLAY=:N WAYLAND_DISPLAY=`, `WEBKIT_DISABLE_DMABUF_RENDERER=1` for web views); shots are read
    from the X server (`docs/dev/gpui.md`).

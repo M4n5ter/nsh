@@ -16,6 +16,7 @@
 //! runtime/windows/nsh-windows-app.exe        release runner (Windows)
 //! runtime/gpui/nsh-gpui-host[.exe]           development host (GPUI, this OS)
 //! runtime/gpui/nsh-gpui-app[.exe]            release runner (GPUI, this OS)
+//! runtime/tui/{nsh-tui-host,nsh-tui-app}[.exe] terminal host and release runner
 //! runtime/android/release/             classes.dex + lib/<abi>/libnsh.so
 //! runtime/android/dev/                 the same with development support
 //! runtime/web/nsh.wasm                 the web runtime (`nsh-platform-web`)
@@ -23,7 +24,7 @@
 //! ```
 //!
 //! In a cargo checkout, the same files come from `target/<triple>/<profile>`
-//! (with the profile of this CLI; Linux's, macOS's, Windows' and GPUI's
+//! (with the profile of this CLI; Linux's, macOS's, Windows', GPUI's and TUI's
 //! from `target/<profile>`, as they are built for this machine), and are
 //! built with cargo first, so a run never uses a missing or stale host.
 //! The web runtime is always built with the `web` profile (a debug build is
@@ -59,6 +60,8 @@ pub(crate) enum Platform {
     Windows,
     /// GPUI, on this machine (macOS, Windows or Linux).
     Gpui,
+    /// A terminal on this machine.
+    Tui,
 }
 
 impl Platform {
@@ -71,6 +74,7 @@ impl Platform {
             Platform::MacOs => "macos",
             Platform::Windows => "windows",
             Platform::Gpui => "gpui",
+            Platform::Tui => "tui",
         }
     }
 
@@ -80,7 +84,11 @@ impl Platform {
             Platform::IphoneOs => Some("aarch64-apple-ios"),
             Platform::IphoneSimulator => Some("aarch64-apple-ios-sim"),
             Platform::MacCatalyst => Some("aarch64-apple-ios-macabi"),
-            Platform::Linux | Platform::MacOs | Platform::Windows | Platform::Gpui => None,
+            Platform::Linux
+            | Platform::MacOs
+            | Platform::Windows
+            | Platform::Gpui
+            | Platform::Tui => None,
         }
     }
 
@@ -96,6 +104,8 @@ impl Platform {
             (Platform::Windows, true) => "nsh-windows-app",
             (Platform::Gpui, false) => "nsh-gpui-host",
             (Platform::Gpui, true) => "nsh-gpui-app",
+            (Platform::Tui, false) => "nsh-tui-host",
+            (Platform::Tui, true) => "nsh-tui-app",
             (_, false) => "nsh-ios-host",
             (_, true) => "nsh-ios-app",
         }
@@ -128,6 +138,7 @@ impl Platform {
             Platform::MacOs => "macOS",
             Platform::Windows => "Windows",
             Platform::Gpui => "GPUI",
+            Platform::Tui => "the terminal",
         };
         format!("the {what} for {platform}")
     }
@@ -422,6 +433,22 @@ fn existing(path: PathBuf, platform: Platform, name: &str) -> anyhow::Result<Pat
 #[cfg(test)]
 mod tests {
     use super::Platform;
+
+    #[test]
+    fn tui_runtimes_are_console_programs_for_this_machine() {
+        assert_eq!(Platform::Tui.dir(), "tui");
+        assert_eq!(Platform::Tui.triple(), None);
+        assert_eq!(Platform::Tui.binary(false), "nsh-tui-host");
+        assert_eq!(Platform::Tui.binary(true), "nsh-tui-app");
+        assert_eq!(
+            Platform::Tui.file_name(true),
+            format!("nsh-tui-app{}", std::env::consts::EXE_SUFFIX)
+        );
+        assert_eq!(
+            Platform::Tui.host(false),
+            "the development host for the terminal"
+        );
+    }
 
     #[test]
     fn gpui_runtimes_are_built_for_this_machine() {

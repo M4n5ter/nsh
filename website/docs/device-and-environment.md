@@ -161,11 +161,13 @@ On Android, a view embedded below a toolbar gets only the parts of the system ba
 | Member | Description |
 |---|---|
 | `Platform.OS` | `"ios"`, `"android"`, `"macos"`, `"windows"`, `"linux"` or `"web"`. Mac Catalyst reports `"ios"`. |
+| `Platform.renderer` | `"native"` (platform views / desktop graphics), `"web"` (browser HTML) or `"terminal"` (terminal cells). |
+| `Platform.isTerminal` | The surface renders in terminal cells; `Platform.OS` remains the host OS. |
 | `Platform.Version` | iOS and desktops: the version string (`"17.5"`); Android: the API level (a number). |
 | `Platform.isPad` | An iPad (or the iPad idiom). |
 | `Platform.isTV` | A TV. |
 | `Platform.isMacCatalyst` | Mac Catalyst in the Mac idiom. |
-| `Platform.isDesktop` | macOS, Windows or Linux, or a desktop browser (the `"desktop"` idiom on the web). |
+| `Platform.isDesktop` | A graphical macOS, Windows or Linux backend, or a desktop browser (the `"desktop"` idiom on the web). |
 | `Platform.constants` | `{ osVersion, interfaceIdiom }`, the idiom being `"phone"`, `"pad"`, `"mac"`, `"tv"` or `"desktop"`. |
 | `Platform.select(spec)` | The value for this platform; see [Platform-specific code](./platform-specific.md#platformselect). |
 
