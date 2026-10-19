@@ -98,10 +98,11 @@ fn os(ctx: *mut JsContext) -> Os {
     unsafe { &(*crate::state::state(ctx)).dom }.os()
 }
 
-/// Native window and menu commands apply to graphical desktop surfaces.
+/// Desktop surfaces and terminals both provide titles and local menus.
 fn available(ctx: *mut JsContext) -> bool {
     let environment = crate::env::current(ctx);
-    environment.os.is_desktop() && environment.desktop()
+    environment.renderer == nsh_core::platform::Renderer::Terminal
+        || (environment.os.is_desktop() && environment.desktop())
 }
 
 fn throw(ctx: *mut JsContext, message: &str) -> JsValue {
@@ -463,7 +464,7 @@ pub(crate) const EXPORTS: &[Item] = &[
             }
         }),
         Ts::value(
-            "True on graphical desktops (macOS, Windows, Linux).",
+            "True on graphical desktops and terminal surfaces (titles and menus).",
             "boolean",
         ),
     ),

@@ -592,7 +592,7 @@ mod tests {
         let state = Images::default();
         let config = ImageProtocol::new(ProtocolType::Iterm2, 8, 16).unwrap();
         state.configure(Some(config));
-        let graphics = Graphics::new();
+        let graphics = Graphics::new(crate::fonts::FontCatalog::default());
         let request = request(ProtocolType::Iterm2);
         let mut buffer = Buffer::empty(request.region);
         assert!(!state.paint(2, request.clone(), &graphics, &mut buffer));
@@ -639,7 +639,7 @@ mod tests {
         ));
         let initial_cleanup = state.cleanup();
         assert_eq!(initial_cleanup.matches("a=d,d=I").count(), MAX_ENTRIES);
-        let graphics = Graphics::new();
+        let graphics = Graphics::new(crate::fonts::FontCatalog::default());
         let request = request(ProtocolType::Kitty);
         let mut buffer = Buffer::empty(request.region);
         state.paint(2, request.clone(), &graphics, &mut buffer);

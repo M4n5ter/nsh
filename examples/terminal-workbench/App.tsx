@@ -5,12 +5,14 @@ import { List } from "nsh/list";
 import { Modal } from "nsh/ui/mobile";
 import { initialActivity, sections, services, type Activity, type Filter, type Section } from "./data";
 import { Action, Label, Metric, palette as p, Progress, Sparkline } from "./ui";
+import { EffectsInspector, RunbookInspector } from "./inspectors";
 
 function Workbench() {
   const section = signal<Section>("services");
   const query = signal("");
   const filter = signal<Filter>("all");
   const selected = signal(2);
+  const inspectorTab = signal<"details" | "effects" | "guide">("details");
   const queued = signal<number[]>([]);
   const activity = signal<Activity[]>(initialActivity);
   const deployOpen = signal(false);
@@ -194,37 +196,47 @@ function Workbench() {
 
         <If when={inspector()}>
           <View style={{ width: 240, minHeight: 0, paddingHorizontal: 8, paddingVertical: 16, overflow: "hidden", backgroundColor: p.sidebar }}>
-            <Label color={p.faint}>Inspector</Label>
-            <Label strong color={p.ink}>{current().name}</Label>
-            <Label color={queued().includes(current().id) ? p.blue : current().health === "degraded" ? p.amber : p.mint}>{queued().includes(current().id) ? "↗ Deployment queued" : current().health === "degraded" ? "! Elevated latency" : "● All checks passing"}</Label>
-            <View style={{ height: 16 }} />
-            <View style={{ height: 16, flexDirection: "row", justifyContent: "space-between" }}><Label>Region</Label><Label color={p.ink}>{regionName(current().region)}</Label></View>
-            <View style={{ height: 16, flexDirection: "row", justifyContent: "space-between" }}><Label>Replicas</Label><Label color={p.ink}>{`${current().replicas} / ${current().replicas} ready`}</Label></View>
-            <View style={{ height: 16, flexDirection: "row", justifyContent: "space-between" }}><Label>Version</Label><Label color={p.blue}>{queued().includes(current().id) ? "v2.19.0 queued" : current().version}</Label></View>
-            <View style={{ height: 16, flexDirection: "row", justifyContent: "space-between" }}><Label>Updated</Label><Label color={p.ink}>{queued().includes(current().id) ? "just now" : current().updated}</Label></View>
-            <View style={{ height: 16 }} />
-            <Label color={p.faint}>On-call owner</Label>
-            <Label color={p.ink}>{current().owner}</Label>
-            <View style={{ height: 16 }} />
-            <Progress label="CPU" value={current().cpu} color={current().cpu > 75 ? p.amber : p.mint} />
-            <Progress label="Memory" value={current().memory} color={p.blue} />
-            <View style={{ height: 16 }} />
-            <Action label="Deploy this service" testID="deploy-selected" onPress={() => deployOpen.set(true)} />
-            <If when={windowSize().height >= 640}>
-              <View style={{ height: 16 }} />
-              <Label strong color={p.ink}>Activity timeline</Label>
-              <View style={{ height: 16 }} />
-              <Each of={activity()}>
-                {(event) => (
-                  <View style={{ height: 48 }}>
-                    <View style={{ height: 16, flexDirection: "row", gap: 8 }}><Label color={p[event().tone]}>{event().time}</Label><View style={{ flex: 1 }}><Label color={p.ink}>{event().title}</Label></View></View>
-                    <Label color={p.faint}>{event().detail}</Label>
-                  </View>
-                )}
-              </Each>
+            <View style={{ height: 16, flexDirection: "row", gap: 8 }}>
+              <Action label="Details" testID="inspector-details" active={inspectorTab() === "details"} onPress={() => inspectorTab.set("details")} />
+              <Action label="Effects" testID="inspector-effects" active={inspectorTab() === "effects"} onPress={() => inspectorTab.set("effects")} />
+              <Action label="Guide" testID="inspector-guide" active={inspectorTab() === "guide"} onPress={() => inspectorTab.set("guide")} />
+            </View>
+            <If when={inspectorTab() === "details"}>
+              <View style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+                <Label strong color={p.ink}>{current().name}</Label>
+                <Label color={queued().includes(current().id) ? p.blue : current().health === "degraded" ? p.amber : p.mint}>{queued().includes(current().id) ? "↗ Deployment queued" : current().health === "degraded" ? "! Elevated latency" : "● All checks passing"}</Label>
+                <View style={{ height: 16 }} />
+                <View style={{ height: 16, flexDirection: "row", justifyContent: "space-between" }}><Label>Region</Label><Label color={p.ink}>{regionName(current().region)}</Label></View>
+                <View style={{ height: 16, flexDirection: "row", justifyContent: "space-between" }}><Label>Replicas</Label><Label color={p.ink}>{`${current().replicas} / ${current().replicas} ready`}</Label></View>
+                <View style={{ height: 16, flexDirection: "row", justifyContent: "space-between" }}><Label>Version</Label><Label color={p.blue}>{queued().includes(current().id) ? "v2.19.0 queued" : current().version}</Label></View>
+                <View style={{ height: 16, flexDirection: "row", justifyContent: "space-between" }}><Label>Updated</Label><Label color={p.ink}>{queued().includes(current().id) ? "just now" : current().updated}</Label></View>
+                <View style={{ height: 16 }} />
+                <Label color={p.faint}>On-call owner</Label>
+                <Label color={p.ink}>{current().owner}</Label>
+                <View style={{ height: 16 }} />
+                <Progress label="CPU" value={current().cpu} color={current().cpu > 75 ? p.amber : p.mint} />
+                <Progress label="Memory" value={current().memory} color={p.blue} />
+                <View style={{ height: 16 }} />
+                <Action label="Deploy this service" testID="deploy-selected" onPress={() => deployOpen.set(true)} />
+                <If when={windowSize().height >= 640}>
+                  <View style={{ height: 16 }} />
+                  <Label strong color={p.ink}>Activity timeline</Label>
+                  <View style={{ height: 16 }} />
+                  <Each of={activity()}>
+                    {(event) => (
+                      <View style={{ height: 48 }}>
+                        <View style={{ height: 16, flexDirection: "row", gap: 8 }}><Label color={p[event().tone]}>{event().time}</Label><View style={{ flex: 1 }}><Label color={p.ink}>{event().title}</Label></View></View>
+                        <Label color={p.faint}>{event().detail}</Label>
+                      </View>
+                    )}
+                  </Each>
+                </If>
+                <View style={{ flex: 1 }} />
+                <Label color={p.faint}>Production / 5 regions</Label>
+              </View>
             </If>
-            <View style={{ flex: 1 }} />
-            <Label color={p.faint}>Production / 5 regions</Label>
+            <If when={inspectorTab() === "effects"}><EffectsInspector /></If>
+            <If when={inspectorTab() === "guide"}><RunbookInspector name={current().name} region={current().region} /></If>
           </View>
         </If>
       </View>

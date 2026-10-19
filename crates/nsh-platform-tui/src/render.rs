@@ -22,6 +22,11 @@ use crate::{
 
 const FOCUS: Color = Color(0x388b_fdff);
 
+struct CompositePlan {
+    id: NodeId,
+    bounds: Rect,
+}
+
 impl Surface {
     /// Paints the surface inside `area`, leaving cells outside it intact.
     ///
@@ -40,6 +45,9 @@ impl Surface {
         if area.is_empty() {
             return;
         }
+        // Occlusion and clipping revisit the same ancestors for each image.
+        // Reuse transforms for this immutable pass, never across animation ticks.
+        let _geometry = crate::geometry::GeometryCache::begin(&self.geometry);
         let background = if self.dark {
             Color(0x181b_22ff)
         } else {
@@ -59,11 +67,17 @@ impl Surface {
             }
         }
 
+        let use_protocols = use_protocols && !self.service_overlay_open();
         let ids = self.paint_ids();
+        let plans = self.composite_plans(&ids, area);
+        self.composites
+            .borrow_mut()
+            .retain(&plans.iter().map(|plan| plan.id).collect::<Vec<_>>());
         if use_protocols {
             self.protocol.retain(&ids);
         }
         let mut overlays = Vec::new();
+        let mut composed = None;
         for &id in &ids {
             while overlays
                 .last()
@@ -73,6 +87,10 @@ impl Surface {
                     self.paint_node_overlay(node, area, buffer);
                 }
             }
+            if composed.is_some_and(|root| self.is_paint_descendant(id, root)) {
+                continue;
+            }
+            composed = None;
             let (Some(node), Some(frame)) = (self.node(id), self.global_frame(id)) else {
                 continue;
             };
@@ -82,7 +100,7 @@ impl Surface {
                 continue;
             }
             let clip = self.clip_rect(id);
-            if node.kind == ViewKind::Modal {
+            if node.kind == ViewKind::Modal && !node.modal.transparent {
                 // A modal dims its presenter before painting its own
                 // background. Transparent modals retain their content's
                 // explicitly mounted fills.
@@ -91,21 +109,49 @@ impl Surface {
                     area,
                     area,
                     Color(0x0000_0066),
-                    1.0,
+                    opacity * self.navigation_scrim_opacity(id),
                     BlendMode::Normal,
                     false,
                 );
-                if !node.modal.transparent && style.background_color.is_transparent() {
-                    fill(
+            }
+            if let Some(plan) = plans.iter().find(|plan| plan.id == id)
+                && let Some(scene) = self.composite_scene(plan, &ids, area, buffer)
+                && let Some(frame) = self
+                    .composites
+                    .borrow_mut()
+                    .request(id, scene, &self.graphics)
+            {
+                let protocol = use_protocols
+                    && self.try_composite_protocol(id, &frame, area, buffer, &ids, &plans);
+                if !protocol {
+                    crate::image::paint(
+                        &frame.raster,
+                        frame.bounds,
+                        clip,
+                        ResizeMode::Stretch,
+                        None,
+                        1.0,
+                        self.metrics,
+                        area,
                         buffer,
-                        cells(frame, self.metrics, area),
-                        cells(clip, self.metrics, area),
-                        background,
-                        opacity,
-                        BlendMode::Normal,
-                        true,
                     );
                 }
+                composed = Some(id);
+                continue;
+            }
+            if node.kind == ViewKind::Modal
+                && !node.modal.transparent
+                && style.background_color.is_transparent()
+            {
+                fill(
+                    buffer,
+                    cells(frame, self.metrics, area),
+                    cells(clip, self.metrics, area),
+                    background,
+                    opacity,
+                    BlendMode::Normal,
+                    true,
+                );
             }
             self.paint_decor(frame, clip, &style, opacity, area, buffer);
             let foreground = node.bindings.iter().find_map(|(property, value)| {
@@ -130,9 +176,24 @@ impl Surface {
                     buffer,
                 ),
                 ViewKind::Image => {
-                    if let Some(raster) = &node.image_raster {
-                        let (image_frame, image_clip, mode) = image_geometry(node, frame, clip);
+                    let presentation = node.image.presentation(self.now);
+                    let both = presentation.placeholder.is_some() && presentation.main.is_some();
+                    for layer in presentation
+                        .placeholder
+                        .into_iter()
+                        .chain(presentation.main)
+                    {
+                        let raster = layer.raster;
+                        let (image_frame, image_clip, mode) = image_geometry(
+                            layer.source,
+                            node.image.mode(),
+                            nsh_core::Size::new(node.frame.width, node.frame.height),
+                            frame,
+                            clip,
+                        );
+                        let opacity = opacity * layer.opacity;
                         let protocol = use_protocols
+                            && !both
                             && self.try_image_protocol(
                                 id,
                                 raster,
@@ -144,6 +205,7 @@ impl Surface {
                                 area,
                                 buffer,
                                 &ids,
+                                &plans,
                             );
                         if !protocol {
                             crate::image::paint(
@@ -174,6 +236,7 @@ impl Surface {
                                 area,
                                 buffer,
                                 &ids,
+                                &plans,
                             );
                         if !protocol {
                             crate::image::paint(
@@ -198,21 +261,43 @@ impl Surface {
                 }
                 ViewKind::WebView | ViewKind::Video => {
                     let rect = cells(frame, self.metrics, area);
-                    let label = if node.kind == ViewKind::WebView {
-                        "Web view: use a terminal host component"
-                    } else {
-                        "Video: use a terminal host component"
-                    };
-                    write_text(
-                        buffer,
-                        rect.x,
-                        rect.y,
-                        rect.width,
-                        label,
+                    if let Some(media) = &node.media
+                        && let Some(raster) = media.raster()
+                    {
+                        let protocol = use_protocols
+                            && self.try_image_protocol(
+                                id,
+                                raster,
+                                frame,
+                                clip,
+                                media.resize_mode(),
+                                None,
+                                opacity,
+                                area,
+                                buffer,
+                                &ids,
+                                &plans,
+                            );
+                        if !protocol {
+                            crate::image::paint(
+                                raster,
+                                frame,
+                                clip,
+                                media.resize_mode(),
+                                None,
+                                opacity,
+                                self.metrics,
+                                area,
+                                buffer,
+                            );
+                        }
+                    }
+                    self.paint_media_text(
+                        id,
+                        rect,
                         cells(clip, self.metrics, area).intersection(area),
-                        Color(0x8080_80ff),
                         opacity,
-                        Modifier::ITALIC,
+                        buffer,
                     );
                 }
                 _ => {}
@@ -276,7 +361,10 @@ impl Surface {
                     );
                 }
             }
-            if (node.kind == ViewKind::Scroll && node.scroll.shows_indicator)
+            if (node.kind == ViewKind::Scroll
+                && (node.scroll.shows_indicator
+                    || node.scroll.physics.refreshing
+                    || node.scroll.physics.refresh_progress() > 0.0))
                 || style.borders.is_visible()
                 || style.outline.is_visible()
             {
@@ -328,6 +416,7 @@ impl Surface {
                 }
             }
         }
+        self.render_service_overlay(area, buffer);
         if let Some((message, until)) = &self.toast
             && *until > self.now
         {
@@ -335,6 +424,513 @@ impl Surface {
         }
         if let Some(dialog) = &self.dialog {
             paint_dialog(dialog, self.dialog_selection, self.dark, area, buffer);
+        }
+    }
+
+    pub(crate) fn composite_ancestor(&self, id: NodeId) -> bool {
+        let mut current = Some(id);
+        while let Some(id) = current {
+            if self.composite_required(id) {
+                return true;
+            }
+            let Some(node) = self.node(id) else { break };
+            if node.kind == ViewKind::Modal {
+                break;
+            }
+            current = node.parent;
+        }
+        false
+    }
+
+    fn composite_required(&self, id: NodeId) -> bool {
+        let Some(node) = self.node(id) else {
+            return false;
+        };
+        let style = self.animated_style(id);
+        let radii = style.radii();
+        let rounded = [
+            radii.top_left,
+            radii.top_right,
+            radii.bottom_right,
+            radii.bottom_left,
+        ]
+        .iter()
+        .any(|r| *r > 0.0);
+        let effects = style.effects.as_ref().is_some_and(|effects| {
+            !effects.filters.is_empty() || !effects.backdrop_filters.is_empty()
+        });
+        let opacity = style.opacity
+            * if self.pressed == Some(id) {
+                node.props.active_opacity.unwrap_or(1.0)
+            } else {
+                1.0
+            };
+        let grouped_alpha = opacity < 0.999
+            && opacity > 0.0
+            && (!node.children.is_empty()
+                || (!style.background_color.is_transparent()
+                    && matches!(
+                        node.kind,
+                        ViewKind::Image | ViewKind::Text | ViewKind::Input | ViewKind::Canvas
+                    )));
+        let transformed = self
+            .local_to_surface(id)
+            .is_some_and(|matrix| !translation_only(&matrix));
+        let image = node.image.presentation(self.now);
+        let image_fade = image.main.is_some_and(|image| image.opacity < 0.999)
+            || (image.main.is_some() && image.placeholder.is_some());
+        effects
+            || grouped_alpha
+            || transformed
+            || style.blend_mode != BlendMode::Normal
+            || ((style.overflow_hidden
+                || matches!(
+                    node.kind,
+                    ViewKind::Image | ViewKind::Scroll | ViewKind::Stack | ViewKind::Input
+                ))
+                && rounded)
+            || (matches!(node.kind, ViewKind::Image | ViewKind::Canvas) && rounded)
+            || image_fade
+            || (node.kind == ViewKind::Scroll
+                && (self.scroll_content_transform(id).0 - 1.0).abs() > 0.001)
+    }
+
+    fn composite_plans(&self, ids: &[NodeId], area: CellRect) -> Vec<CompositePlan> {
+        let mut plans: Vec<CompositePlan> = Vec::new();
+        for &id in ids {
+            if plans
+                .iter()
+                .any(|plan| self.is_paint_descendant(id, plan.id))
+                || !self.composite_required(id)
+            {
+                continue;
+            }
+            let Some(mut bounds) = self.global_frame(id) else {
+                continue;
+            };
+            for &child in ids
+                .iter()
+                .filter(|&&child| self.is_paint_descendant(child, id))
+            {
+                let Some(frame) = self.global_frame(child) else {
+                    continue;
+                };
+                let style = self.animated_style(child);
+                let mut spread = if style.shadow.is_visible() {
+                    style.shadow.radius.max(0.0) * 3.0
+                        + style.shadow.offset_x.abs().max(style.shadow.offset_y.abs())
+                } else {
+                    0.0
+                };
+                if style.outline.is_visible() {
+                    spread = spread.max((style.outline.offset + style.outline.width).max(0.0));
+                }
+                if let Some(effects) = &style.effects {
+                    for filter in effects.filters.iter().chain(&effects.backdrop_filters) {
+                        spread = spread.max(match *filter {
+                            nsh_core::Filter::Blur(radius) => radius.max(0.0) * 3.0,
+                            nsh_core::Filter::DropShadow {
+                                offset_x,
+                                offset_y,
+                                blur,
+                                ..
+                            } => offset_x.abs().max(offset_y.abs()) + blur.max(0.0) * 2.0,
+                            _ => 0.0,
+                        });
+                    }
+                    for shadow in &effects.box_shadows {
+                        spread = spread.max(
+                            shadow.spread.max(0.0)
+                                + shadow.blur.max(0.0) * 2.0
+                                + shadow.offset_x.abs().max(shadow.offset_y.abs()),
+                        );
+                    }
+                }
+                let frame = Rect {
+                    x: frame.x - spread,
+                    y: frame.y - spread,
+                    width: frame.width + spread * 2.0,
+                    height: frame.height + spread * 2.0,
+                };
+                bounds = union(bounds, frame);
+            }
+            bounds = crate::surface::intersect(bounds, self.clip_rect(id));
+            let rect = cells(bounds, self.metrics, area);
+            if rect.is_empty() {
+                continue;
+            }
+            let bounds = Rect {
+                x: f32::from(rect.x - area.x) * self.metrics.width(),
+                y: f32::from(rect.y - area.y) * self.metrics.height(),
+                width: f32::from(rect.width) * self.metrics.width(),
+                height: f32::from(rect.height) * self.metrics.height(),
+            };
+            plans.push(CompositePlan { id, bounds });
+        }
+        plans
+    }
+
+    fn composite_scene(
+        &self,
+        plan: &CompositePlan,
+        ids: &[NodeId],
+        area: CellRect,
+        buffer: &Buffer,
+    ) -> Option<crate::composite::Scene> {
+        let rect = cells(plan.bounds, self.metrics, area);
+        let mut backdrop = Buffer::empty(rect);
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                backdrop[(x, y)] = buffer[(x, y)].clone();
+            }
+        }
+        let root = self.composite_layer(plan.id, ids, 0)?;
+        let opacity = root.style.opacity;
+        let inherited_opacity = if opacity > 0.0 {
+            self.paint_opacity(plan.id) / opacity
+        } else {
+            0.0
+        };
+        Some(crate::composite::Scene {
+            bounds: plan.bounds,
+            root,
+            backdrop,
+            metrics: self.metrics,
+            font_revision: self.fonts.revision(),
+            inherited_opacity,
+        })
+    }
+
+    fn composite_layer(
+        &self,
+        id: NodeId,
+        ids: &[NodeId],
+        depth: usize,
+    ) -> Option<crate::composite::Layer> {
+        if depth >= 32 {
+            return None;
+        }
+        let node = self.node(id)?;
+        let frame = self.presentation_frame(id)?;
+        let size = nsh_core::Size::new(frame.width, frame.height);
+        let local = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: frame.width,
+            height: frame.height,
+        };
+        if !finite_rect(local) {
+            return None;
+        }
+        let mut style = self.animated_style(id);
+        if self.pressed == Some(id) {
+            style.opacity *= node.props.active_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+        }
+        if matches!(
+            node.kind,
+            ViewKind::Scroll | ViewKind::Image | ViewKind::Stack | ViewKind::Input
+        ) {
+            style.overflow_hidden = true;
+        }
+        if node.kind == ViewKind::Modal
+            && !node.modal.transparent
+            && style.background_color.is_transparent()
+        {
+            style.background_color = if self.dark {
+                Color(0x181b_22ff)
+            } else {
+                Color(0xffff_ffff)
+            };
+        }
+        let foreground = node.bindings.iter().find_map(|(property, value)| {
+            (*property == nsh_animation::AnimationProp::Color).then(|| {
+                match self.animation.eval(*value) {
+                    nsh_animation::AnimationValue::Color(color) => Color(color),
+                    value => Color(value.number() as u32),
+                }
+            })
+        });
+        let focus_text = self.focus.is_some_and(|focus| {
+            self.is_paint_descendant(id, focus)
+                && self
+                    .node(focus)
+                    .zip(self.global_frame(focus))
+                    .is_some_and(|(node, frame)| {
+                        focus_uses_text_indicator(
+                            node,
+                            cells(
+                                frame,
+                                self.metrics,
+                                CellRect::new(0, 0, self.columns, self.rows),
+                            ),
+                        )
+                    })
+        });
+        let mut layer = crate::composite::Layer {
+            id,
+            size,
+            transform: self.local_to_surface(id)?,
+            clip: self.clip_rect(id),
+            style,
+            images: Vec::new(),
+            text: None,
+            cells: None,
+            overlay: None,
+            children: Vec::new(),
+        };
+        if node.kind == ViewKind::Image {
+            let images = node.image.presentation(self.now);
+            for image in images.placeholder.into_iter().chain(images.main) {
+                let (frame, _, mode) =
+                    image_geometry(image.source, node.image.mode(), size, local, local);
+                layer.images.push(crate::composite::Image {
+                    raster: image.raster.clone(),
+                    frame,
+                    mode,
+                    tint: layer.style.tint_color,
+                    opacity: image.opacity,
+                });
+            }
+        }
+        if let Some(raster) = &node.canvas_raster {
+            layer.images.push(crate::composite::Image {
+                raster: raster.clone(),
+                frame: local,
+                mode: ResizeMode::Stretch,
+                tint: None,
+                opacity: 1.0,
+            });
+        }
+        if let Some(media) = &node.media
+            && let Some(raster) = media.raster()
+        {
+            layer.images.push(crate::composite::Image {
+                raster: raster.clone(),
+                frame: local,
+                mode: media.resize_mode(),
+                tint: None,
+                opacity: 1.0,
+            });
+        }
+        if let Some((text, layout, content)) = &node.text {
+            let content = relative_frame(local, node.frame, *content);
+            let mut selection = Vec::new();
+            let range = node.editor.selection();
+            if self.focus == Some(id)
+                && text.is_selectable()
+                && range.0 < range.1
+                && let Some(terminal) = layout.0.downcast_ref::<crate::text::TerminalLayout>()
+            {
+                for run in terminal
+                    .runs
+                    .iter()
+                    .filter(|run| run.start < range.1 && run.end > range.0)
+                {
+                    selection.push((
+                        Rect {
+                            x: content.x + run.x,
+                            y: content.y + run.y,
+                            width: f32::from(run.width) * self.metrics.width(),
+                            height: self.metrics.height(),
+                        },
+                        text.selection_color.unwrap_or(Color(0x388b_fd66)),
+                    ));
+                }
+            }
+            layer.text = Some(crate::composite::Text {
+                layout: layout.clone(),
+                content,
+                foreground,
+                selection,
+                focus: focus_text,
+            });
+        }
+        if matches!(
+            node.kind,
+            ViewKind::Input
+                | ViewKind::Screen
+                | ViewKind::Native
+                | ViewKind::WebView
+                | ViewKind::Video
+        ) {
+            let columns = (size.width / self.metrics.width())
+                .ceil()
+                .clamp(1.0, 1024.0) as u16;
+            let rows = (size.height / self.metrics.height())
+                .ceil()
+                .clamp(1.0, 512.0) as u16;
+            if u32::from(columns) * u32::from(rows) > 65536 {
+                return None;
+            }
+            let area = CellRect::new(0, 0, columns, rows);
+            let mut buffer = Buffer::empty(area);
+            match node.kind {
+                ViewKind::Input => paint_input(
+                    node,
+                    self.focus == Some(id),
+                    local,
+                    local,
+                    1.0,
+                    foreground,
+                    self.metrics,
+                    area,
+                    &mut buffer,
+                ),
+                ViewKind::Screen => self.paint_header(id, local, local, 1.0, area, &mut buffer),
+                ViewKind::Native => {
+                    if let Some(component) = &node.native {
+                        component.render(
+                            &crate::native::ComponentContext {
+                                frame: local,
+                                clip: local,
+                                area,
+                                clip_area: area,
+                                metrics: self.metrics,
+                                focused: self.focus == Some(id),
+                            },
+                            &mut buffer,
+                        );
+                    }
+                }
+                ViewKind::WebView | ViewKind::Video => {
+                    self.paint_media_text(id, area, area, 1.0, &mut buffer)
+                }
+                _ => {}
+            }
+            if focus_text {
+                for cell in &mut buffer.content {
+                    if focus_text_cell(cell) {
+                        cell.set_style(Style::new().add_modifier(Modifier::UNDERLINED));
+                    }
+                }
+            }
+            layer.cells = Some(buffer);
+        }
+        if node.kind == ViewKind::Scroll
+            && (node.scroll.shows_indicator
+                || node.scroll.physics.refreshing
+                || node.scroll.physics.refresh_progress() > 0.0)
+        {
+            let columns = (size.width / self.metrics.width())
+                .ceil()
+                .clamp(1.0, 1024.0) as u16;
+            let rows = (size.height / self.metrics.height())
+                .ceil()
+                .clamp(1.0, 512.0) as u16;
+            if u32::from(columns) * u32::from(rows) > 65536 {
+                return None;
+            }
+            let area = CellRect::new(0, 0, columns, rows);
+            let mut buffer = Buffer::empty(area);
+            paint_scrollbars(
+                node,
+                local,
+                local,
+                1.0,
+                self.metrics,
+                area,
+                self.now,
+                &mut buffer,
+            );
+            layer.overlay = Some(buffer);
+        }
+        let mut children = node
+            .children
+            .iter()
+            .copied()
+            .filter(|child| ids.contains(child))
+            .collect::<Vec<_>>();
+        children.sort_by_key(|child| ids.iter().position(|id| id == child));
+        for child in children {
+            if !ids.contains(&child)
+                || self
+                    .node(child)
+                    .is_some_and(|child| child.kind == ViewKind::Modal)
+            {
+                continue;
+            }
+            layer
+                .children
+                .push(self.composite_layer(child, ids, depth + 1)?);
+        }
+        Some(layer)
+    }
+
+    fn try_composite_protocol(
+        &self,
+        id: NodeId,
+        frame: &crate::composite::Frame,
+        area: CellRect,
+        buffer: &mut Buffer,
+        ids: &[NodeId],
+        plans: &[CompositePlan],
+    ) -> bool {
+        let Some(config) = self.protocol.config() else {
+            return false;
+        };
+        let capture = Buffer::empty(area);
+        let Some(request) = crate::protocol::Request::capture(
+            frame.raster.clone(),
+            config,
+            frame.bounds,
+            self.clip_rect(id),
+            ResizeMode::Stretch,
+            None,
+            1.0,
+            self.metrics,
+            area,
+            &capture,
+        ) else {
+            return false;
+        };
+        if !self.image_protocol_unobscured_group(id, request.region(), area, ids, Some(id), plans) {
+            return false;
+        }
+        self.paint_image_protocol(id, request, buffer)
+    }
+
+    fn paint_media_text(
+        &self,
+        id: NodeId,
+        area: CellRect,
+        clip: CellRect,
+        opacity: f32,
+        buffer: &mut Buffer,
+    ) {
+        let Some(node) = self.node(id) else { return };
+        let lines = node
+            .media
+            .as_ref()
+            .map(|media| media.lines(area.width, area.height))
+            .unwrap_or_else(|| {
+                vec![if node.kind == ViewKind::WebView {
+                    "Loading web content…".to_owned()
+                } else {
+                    "Loading video…".to_owned()
+                }]
+            });
+        let start = if node.kind == ViewKind::Video {
+            area.bottom()
+                .saturating_sub(lines.len().min(usize::from(area.height)) as u16)
+        } else {
+            area.y
+        };
+        for (row, line) in lines.iter().take(usize::from(area.height)).enumerate() {
+            write_text(
+                buffer,
+                area.x,
+                start + row as u16,
+                area.width,
+                line,
+                clip,
+                if self.dark {
+                    Color(0xe6e9_efff)
+                } else {
+                    Color::BLACK
+                },
+                opacity,
+                Modifier::empty(),
+            );
         }
     }
 
@@ -351,6 +947,7 @@ impl Surface {
         area: CellRect,
         buffer: &mut Buffer,
         ids: &[NodeId],
+        plans: &[CompositePlan],
     ) -> bool {
         let Some(config) = self.protocol.config() else {
             return false;
@@ -369,7 +966,7 @@ impl Surface {
         ) else {
             return false;
         };
-        if !self.image_protocol_unobscured(id, request.region(), area, ids) {
+        if !self.image_protocol_unobscured(id, request.region(), area, ids, plans) {
             return false;
         }
         self.paint_image_protocol(id, request, buffer)
@@ -384,6 +981,19 @@ impl Surface {
         region: CellRect,
         area: CellRect,
         ids: &[NodeId],
+        plans: &[CompositePlan],
+    ) -> bool {
+        self.image_protocol_unobscured_group(id, region, area, ids, None, plans)
+    }
+
+    fn image_protocol_unobscured_group(
+        &self,
+        id: NodeId,
+        region: CellRect,
+        area: CellRect,
+        ids: &[NodeId],
+        group: Option<NodeId>,
+        plans: &[CompositePlan],
     ) -> bool {
         if self.dialog.is_some()
             || self
@@ -393,8 +1003,27 @@ impl Surface {
         {
             return false;
         }
+        let position = ids.iter().position(|&other| other == id).unwrap_or(0);
+        if plans.iter().any(|plan| {
+            Some(plan.id) != group
+                && ids
+                    .iter()
+                    .position(|&other| other == plan.id)
+                    .is_some_and(|other| other > position)
+                && !cells(plan.bounds, self.metrics, area)
+                    .intersection(region)
+                    .is_empty()
+        }) {
+            return false;
+        }
         let mut after = false;
         for &other in ids {
+            if group.is_some_and(|group| self.is_paint_descendant(other, group)) {
+                if other == id {
+                    after = true;
+                }
+                continue;
+            }
             let Some(node) = self.node(other) else {
                 continue;
             };
@@ -448,8 +1077,16 @@ impl Surface {
             }
             // Never layer two independently managed image protocols or mix
             // another raster over their reserved cells.
-            if matches!(node.kind, ViewKind::Image | ViewKind::Canvas)
-                && (node.image_raster.is_some() || node.canvas_raster.is_some())
+            if matches!(
+                node.kind,
+                ViewKind::Image | ViewKind::Canvas | ViewKind::Video
+            ) && (node.image.presentation(self.now).main.is_some()
+                || node.image.presentation(self.now).placeholder.is_some()
+                || node.canvas_raster.is_some()
+                || node
+                    .media
+                    .as_ref()
+                    .is_some_and(|media| media.raster().is_some()))
                 && hits(rect)
             {
                 return false;
@@ -480,7 +1117,7 @@ impl Surface {
                 && node.screen.header_shown
                 && hits(cells(
                     Rect {
-                        height: node.screen.header_height.min(frame.height),
+                        height: self.navigation_header(other).height.min(frame.height),
                         ..frame
                     },
                     self.metrics,
@@ -576,8 +1213,21 @@ impl Surface {
                     buffer[position] = cell;
                 }
             }
-            if node.kind == ViewKind::Scroll && node.scroll.shows_indicator {
-                paint_scrollbars(node, frame, clip, opacity, self.metrics, area, buffer);
+            if node.kind == ViewKind::Scroll
+                && (node.scroll.shows_indicator
+                    || node.scroll.physics.refreshing
+                    || node.scroll.physics.refresh_progress() > 0.0)
+            {
+                paint_scrollbars(
+                    node,
+                    frame,
+                    clip,
+                    opacity,
+                    self.metrics,
+                    area,
+                    self.now,
+                    buffer,
+                );
             }
         }
     }
@@ -784,12 +1434,13 @@ impl Surface {
     ) {
         let Some(node) = self.node(id) else { return };
         let config = &node.screen;
-        if !config.header_shown || config.header_height <= 0.0 {
+        let layout = self.navigation_header(id);
+        if !config.header_shown || layout.height <= 0.0 {
             return;
         }
         let header = cells(
             Rect {
-                height: config.header_height.min(frame.height),
+                height: layout.height.min(frame.height),
                 ..frame
             },
             self.metrics,
@@ -812,20 +1463,12 @@ impl Surface {
                 true,
             )
         }
-        let has_back = node
-            .parent
-            .and_then(|p| self.node(p))
-            .is_some_and(|parent| {
-                parent
-                    .children
-                    .iter()
-                    .filter(|&&id| self.node(id).is_some_and(|n| n.kind == ViewKind::Screen))
-                    .position(|&child| child == id)
-                    .is_some_and(|i| i > 0)
-            });
-        let row = header.y + header.height.saturating_sub(1) / 2;
+        let has_back = self.navigation_can_back(id);
+        let row =
+            header.y + (layout.bar_height / self.metrics.height()).floor().max(1.0) as u16 / 2;
         if has_back && config.back_visible && config.left.is_none() {
-            let label = format!("‹ {}", config.back_title.as_deref().unwrap_or("Back"));
+            let back_title = self.navigation_back_title(id);
+            let label = format!("‹ {}", back_title.as_deref().unwrap_or("Back"));
             write_text(
                 buffer,
                 header.x.saturating_add(1),
@@ -843,7 +1486,21 @@ impl Surface {
         {
             let width = UnicodeWidthStr::width(title.as_ref())
                 .min(header.width.saturating_sub(4) as usize) as u16;
-            let x = header.x + header.width.saturating_sub(width) / 2;
+            let x = if layout.large {
+                header.x.saturating_add(1)
+            } else {
+                header.x + header.width.saturating_sub(width) / 2
+            };
+            let row = if layout.large {
+                header.y
+                    + (layout.title_y / self.metrics.height())
+                        .ceil()
+                        .max(1.0)
+                        .min(f32::from(header.height.saturating_sub(1)))
+                        as u16
+            } else {
+                row
+            };
             write_text(
                 buffer,
                 x,
@@ -910,6 +1567,26 @@ fn border_symbol(symbol: &str) -> bool {
     )
 }
 
+fn translation_only(matrix: &nsh_core::Matrix) -> bool {
+    let m = matrix.0;
+    let w = m[15];
+    w.abs() > 1e-9
+        && (m[0] / w - 1.0).abs() < 1e-6
+        && (m[5] / w - 1.0).abs() < 1e-6
+        && [m[1], m[4], m[3], m[7]].iter().all(|v| v.abs() < 1e-6)
+}
+
+fn union(a: Rect, b: Rect) -> Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    Rect {
+        x,
+        y,
+        width: (a.x + a.width).max(b.x + b.width) - x,
+        height: (a.y + a.height).max(b.y + b.height) - y,
+    }
+}
+
 fn capture_border_text(
     buffer: &Buffer,
     rect: CellRect,
@@ -939,23 +1616,29 @@ fn capture_border_text(
     saved
 }
 
-fn image_geometry(node: &Node, frame: Rect, clip: Rect) -> (Rect, Rect, ResizeMode) {
-    if node.resize_mode == ResizeMode::Center
-        && let Some((width, height)) = node.image_source.as_ref().and_then(|source| source.size)
+fn image_geometry(
+    source: &nsh_core::ImageSource,
+    mode: ResizeMode,
+    size: nsh_core::Size,
+    frame: Rect,
+    clip: Rect,
+) -> (Rect, Rect, ResizeMode) {
+    if mode == ResizeMode::Center
+        && let Some((width, height)) = source.size
         && width.is_finite()
         && height.is_finite()
         && width > 0.0
         && height > 0.0
     {
         let width = width
-            * if node.frame.width > 0.0 {
-                frame.width / node.frame.width
+            * if size.width > 0.0 {
+                frame.width / size.width
             } else {
                 1.0
             };
         let height = height
-            * if node.frame.height > 0.0 {
-                frame.height / node.frame.height
+            * if size.height > 0.0 {
+                frame.height / size.height
             } else {
                 1.0
             };
@@ -971,7 +1654,7 @@ fn image_geometry(node: &Node, frame: Rect, clip: Rect) -> (Rect, Rect, ResizeMo
             ResizeMode::Stretch,
         )
     } else {
-        (frame, clip, node.resize_mode)
+        (frame, clip, mode)
     }
 }
 
@@ -1456,6 +2139,7 @@ fn paint_grapheme(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_scrollbars(
     node: &Node,
     frame: Rect,
@@ -1463,6 +2147,7 @@ fn paint_scrollbars(
     opacity: f32,
     metrics: CellMetrics,
     area: CellRect,
+    now: f64,
     buffer: &mut Buffer,
 ) {
     let rect = cells(frame, metrics, area);
@@ -1472,13 +2157,47 @@ fn paint_scrollbars(
     if rect.is_empty() || clip.is_empty() {
         return;
     }
+    let progress = node.scroll.physics.refresh_progress();
+    if !node.scroll.horizontal && (node.scroll.physics.refreshing || progress > 0.0) {
+        let label = if node.scroll.physics.refreshing {
+            format!(
+                "{} Refreshing",
+                ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                    [((now.max(0.0) * 10.0) as usize) % 10]
+            )
+        } else if progress >= 1.0 {
+            "↑ Release to refresh".to_owned()
+        } else {
+            "↓ Pull to refresh".to_owned()
+        };
+        let width = UnicodeWidthStr::width(label.as_str()).min(usize::from(rect.width)) as u16;
+        let rows = ((-node.scroll.y).max(metrics.height()) / metrics.height())
+            .ceil()
+            .min(f32::from(rect.height)) as u16;
+        write_text(
+            buffer,
+            rect.x + (rect.width - width) / 2,
+            rect.y + rows.saturating_sub(1) / 2,
+            width,
+            &label,
+            clip,
+            FOCUS,
+            opacity,
+            Modifier::empty(),
+        );
+    }
+    if !node.scroll.shows_indicator {
+        return;
+    }
+    let content_height = node.scroll.content.height * node.scroll.physics.zoom;
+    let content_width = node.scroll.content.width * node.scroll.physics.zoom;
     let color = Color(0x8080_80b0);
-    if node.scroll.content.height > frame.height + 0.5 {
+    if content_height > frame.height + 0.5 {
         let length = usize::from(rect.height);
-        let thumb = ((frame.height / node.scroll.content.height) * length as f32)
+        let thumb = ((frame.height / content_height) * length as f32)
             .ceil()
             .max(1.0) as usize;
-        let offset = (node.scroll.y / (node.scroll.content.height - frame.height)).clamp(0.0, 1.0);
+        let offset = (node.scroll.y / (content_height - frame.height)).clamp(0.0, 1.0);
         let start = (offset * length.saturating_sub(thumb) as f32).round() as usize;
         let x = rect.right() - 1;
         for i in start..start.saturating_add(thumb).min(length) {
@@ -1490,12 +2209,12 @@ fn paint_scrollbars(
             }
         }
     }
-    if node.scroll.content.width > frame.width + 0.5 {
+    if content_width > frame.width + 0.5 {
         let length = usize::from(rect.width);
-        let thumb = ((frame.width / node.scroll.content.width) * length as f32)
+        let thumb = ((frame.width / content_width) * length as f32)
             .ceil()
             .max(1.0) as usize;
-        let offset = (node.scroll.x / (node.scroll.content.width - frame.width)).clamp(0.0, 1.0);
+        let offset = (node.scroll.x / (content_width - frame.width)).clamp(0.0, 1.0);
         let offset = if node.scroll.mirrored {
             1.0 - offset
         } else {
@@ -1896,7 +2615,7 @@ fn paint_inset_shadow(
     }
 }
 
-fn gradient_color(
+pub(crate) fn gradient_color(
     gradient: &Gradient,
     stops: &[(Color, f32)],
     x: f32,
@@ -2140,15 +2859,25 @@ mod tests {
     use super::*;
 
     fn mount_node(id: NodeId, kind: ViewKind, parent: NodeId, frame: Rect) -> Vec<MountItem> {
-        vec![
+        let mut items = vec![
             MountItem::Create { id, kind },
             MountItem::Frame { id, frame },
-            MountItem::Insert {
-                parent,
-                child: id,
-                before: None,
-            },
-        ]
+        ];
+        if kind == ViewKind::Modal {
+            items.push(MountItem::ModalConfig {
+                id,
+                config: nsh_core::ModalConfig {
+                    animation: nsh_core::ModalAnimation::None,
+                    ..nsh_core::ModalConfig::default()
+                },
+            });
+        }
+        items.push(MountItem::Insert {
+            parent,
+            child: id,
+            before: None,
+        });
+        items
     }
 
     fn protocol_scene(kind: crate::ProtocolType) -> Surface {
@@ -2191,7 +2920,27 @@ mod tests {
             height: 1,
             rgba: vec![255, 0, 0, 128],
         });
-        surface.node_mut(4).unwrap().image_raster = Some(raster.clone());
+        let state = &mut surface.node_mut(4).unwrap().image;
+        let request = state
+            .update(
+                Some(nsh_core::ImageSource {
+                    uri: Arc::from("asset:/test.png"),
+                    size: None,
+                }),
+                ResizeMode::Stretch,
+                nsh_core::ImageOptions::default(),
+                0.0,
+            )
+            .remove(0);
+        state.install_cached(
+            &request,
+            Arc::new(crate::image::AnimatedRaster {
+                frames: vec![raster.clone()],
+                delays: vec![100],
+                plays: 1,
+            }),
+            0.0,
+        );
         surface.node_mut(6).unwrap().canvas_raster = Some(raster);
         surface.set_image_protocol(Some(crate::ImageProtocol::new(kind, 8, 16).unwrap()));
         surface
@@ -2294,6 +3043,89 @@ mod tests {
         });
         surface.render(area, &mut buffer);
         assert!(buffer[(1, 1)].symbol().contains("1337;File"));
+    }
+
+    #[test]
+    fn kitty_cells_restore_native_modal_text_after_a_fade() {
+        let mut surface = protocol_scene(crate::ProtocolType::Kitty);
+        let area = CellRect::new(0, 0, 20, 8);
+        let mut previous = Buffer::empty(area);
+        surface.render(area, &mut previous);
+        wait_protocol_encodings(&mut surface);
+        surface.render(area, &mut previous);
+        assert!(previous[(1, 1)].symbol().contains("a=T,U=1"));
+
+        let mut items = vec![
+            MountItem::Create {
+                id: 8,
+                kind: ViewKind::Modal,
+            },
+            MountItem::Frame {
+                id: 8,
+                frame: Rect {
+                    width: 160.0,
+                    height: 128.0,
+                    ..Rect::default()
+                },
+            },
+            MountItem::ModalConfig {
+                id: 8,
+                config: nsh_core::ModalConfig {
+                    transparent: true,
+                    animation: nsh_core::ModalAnimation::Fade,
+                    ..nsh_core::ModalConfig::default()
+                },
+            },
+            MountItem::Insert {
+                parent: ROOT_ID,
+                child: 8,
+                before: None,
+            },
+        ];
+        items.extend(mount_node(
+            10,
+            ViewKind::Text,
+            8,
+            Rect {
+                x: 8.0,
+                y: 16.0,
+                width: 112.0,
+                height: 16.0,
+            },
+        ));
+        let mut text = nsh_core::AttributedText::default();
+        text.push("Deploy service", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        items.push(MountItem::Text {
+            id: 10,
+            layout: engine.layout(&engine.prepare(&text), Size::new(112.0, 16.0)),
+            text: Arc::new(text),
+            content: Rect {
+                width: 112.0,
+                height: 16.0,
+                ..Rect::default()
+            },
+        });
+        surface.apply(MountBatch { items });
+        let mut current = Buffer::empty(area);
+        surface.tick(0.1);
+        surface.render(area, &mut current);
+        surface.tick(0.21);
+        surface.render(area, &mut current);
+        let title: String = (1..15).map(|x| current[(x, 1)].symbol()).collect();
+        assert_eq!(title, "Deploy service");
+        assert!(
+            current
+                .content
+                .iter()
+                .all(|cell| cell.diff_option == CellDiffOption::None)
+        );
+        let changed = previous.diff(&current);
+        assert!(
+            changed
+                .iter()
+                .any(|(x, y, cell)| *x == 1 && *y == 1 && cell.symbol() == "D")
+        );
     }
 
     #[test]
@@ -2425,6 +3257,462 @@ mod tests {
         }
         text.set_symbol("x").set_diff_option(CellDiffOption::Skip);
         assert!(!focus_text_cell(&text));
+    }
+
+    fn white_buffer(area: CellRect) -> Buffer {
+        let mut buffer = Buffer::empty(area);
+        for cell in &mut buffer.content {
+            cell.set_bg(CellColor::Rgb(255, 255, 255));
+        }
+        buffer
+    }
+
+    #[test]
+    fn raster_groups_apply_native_press_opacity_once_and_keep_scroll_indicators() {
+        let mut surface = Surface::new(8, 4, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::View,
+            ROOT_ID,
+            Rect {
+                width: 64.0,
+                height: 64.0,
+                ..Rect::default()
+            },
+        );
+        items.push(MountItem::ViewProps {
+            id: 2,
+            props: Box::new(nsh_core::ViewProps {
+                active_opacity: Some(0.5),
+                ..nsh_core::ViewProps::default()
+            }),
+        });
+        items.extend(mount_node(
+            4,
+            ViewKind::View,
+            2,
+            Rect {
+                width: 32.0,
+                height: 32.0,
+                ..Rect::default()
+            },
+        ));
+        items.push(MountItem::ViewStyle {
+            id: 4,
+            style: Box::new(ViewStyle {
+                background_color: Color(0x0000_ffff),
+                ..ViewStyle::default()
+            }),
+        });
+        surface.apply(MountBatch { items });
+        surface.pressed = Some(2);
+        let area = CellRect::new(0, 0, 8, 4);
+        let plans = surface.composite_plans(&surface.paint_ids(), area);
+        let scene = surface
+            .composite_scene(&plans[0], &surface.paint_ids(), area, &white_buffer(area))
+            .unwrap();
+        assert_eq!(scene.root.style.opacity, 0.5);
+        assert_eq!(scene.inherited_opacity, 1.0);
+        let raster = crate::composite::rasterize(&scene, &surface.fonts).unwrap();
+        assert_eq!(
+            &raster.rgba[(8 * raster.width as usize + 8) * 4..][..4],
+            &[128, 128, 255, 255]
+        );
+
+        let mut scroll = Surface::new(4, 4, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::Scroll,
+            ROOT_ID,
+            Rect {
+                width: 32.0,
+                height: 64.0,
+                ..Rect::default()
+            },
+        );
+        items.push(MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(32.0, 256.0),
+        });
+        items.push(MountItem::ViewStyle {
+            id: 2,
+            style: Box::new(ViewStyle {
+                border_radius: 8.0,
+                overflow_hidden: true,
+                ..ViewStyle::default()
+            }),
+        });
+        scroll.apply(MountBatch { items });
+        let area = CellRect::new(0, 0, 4, 4);
+        let ids = scroll.paint_ids();
+        let plans = scroll.composite_plans(&ids, area);
+        let scene = scroll
+            .composite_scene(&plans[0], &ids, area, &white_buffer(area))
+            .unwrap();
+        let raster = crate::composite::rasterize(&scene, &scroll.fonts).unwrap();
+        assert!(
+            (0..16)
+                .any(|y| (28..32).any(|x| raster.rgba[(y * raster.width as usize + x) * 4] < 250)),
+            "scroll indicators must survive subtree rasterization"
+        );
+    }
+
+    #[test]
+    fn rounded_images_clip_their_pixels_and_deep_groups_keep_the_plain_fallback() {
+        let mut surface = protocol_scene(crate::ProtocolType::Halfblocks);
+        surface.node_mut(4).unwrap().style.border_radius = 8.0;
+        let area = CellRect::new(0, 0, 20, 8);
+        let ids = surface.paint_ids();
+        let plans = surface.composite_plans(&ids, area);
+        let scene = surface
+            .composite_scene(
+                plans.iter().find(|p| p.id == 4).unwrap(),
+                &ids,
+                area,
+                &white_buffer(area),
+            )
+            .unwrap();
+        assert!(scene.root.style.overflow_hidden);
+        let raster = crate::composite::rasterize(&scene, &surface.fonts).unwrap();
+        assert_eq!(&raster.rgba[..4], &[255, 255, 255, 255]);
+        assert!(
+            raster
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[0] > pixel[1])
+        );
+
+        let mut deep = Surface::new(8, 2, CellMetrics::default());
+        let mut items = Vec::new();
+        for index in 0..34 {
+            let id = 2 + index * 2;
+            items.extend(mount_node(
+                id,
+                ViewKind::View,
+                if index == 0 { ROOT_ID } else { id - 2 },
+                Rect {
+                    width: 64.0,
+                    height: 32.0,
+                    ..Rect::default()
+                },
+            ));
+        }
+        items.push(MountItem::ViewStyle {
+            id: 2,
+            style: Box::new(ViewStyle {
+                opacity: 0.5,
+                ..ViewStyle::default()
+            }),
+        });
+        items.extend(mount_node(
+            72,
+            ViewKind::Text,
+            68,
+            Rect {
+                width: 32.0,
+                height: 16.0,
+                ..Rect::default()
+            },
+        ));
+        let mut text = nsh_core::AttributedText::default();
+        text.push("Deep", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        items.push(MountItem::Text {
+            id: 72,
+            layout: engine.layout(&engine.prepare(&text), Size::new(32.0, 16.0)),
+            text: Arc::new(text),
+            content: Rect {
+                width: 32.0,
+                height: 16.0,
+                ..Rect::default()
+            },
+        });
+        deep.apply(MountBatch { items });
+        deep.focus = None;
+        let area = CellRect::new(0, 0, 8, 2);
+        let ids = deep.paint_ids();
+        let plans = deep.composite_plans(&ids, area);
+        assert!(
+            deep.composite_scene(&plans[0], &ids, area, &white_buffer(area))
+                .is_none()
+        );
+        let mut buffer = Buffer::empty(area);
+        deep.render(area, &mut buffer);
+        assert_eq!(buffer[(0, 0)].symbol(), "D");
+    }
+
+    #[test]
+    fn backdrop_capture_includes_neighboring_pixels_outside_the_filtered_box() {
+        let mut surface = Surface::new(8, 4, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::View,
+            ROOT_ID,
+            Rect {
+                x: 24.0,
+                y: 16.0,
+                width: 16.0,
+                height: 16.0,
+            },
+        );
+        items.push(MountItem::ViewStyle {
+            id: 2,
+            style: Box::new(ViewStyle {
+                overflow_hidden: true,
+                border_radius: 4.0,
+                effects: Some(Arc::new(nsh_core::Effects {
+                    backdrop_filters: vec![nsh_core::Filter::Blur(8.0)],
+                    ..nsh_core::Effects::default()
+                })),
+                ..ViewStyle::default()
+            }),
+        });
+        surface.apply(MountBatch { items });
+        let area = CellRect::new(0, 0, 8, 4);
+        let ids = surface.paint_ids();
+        let plans = surface.composite_plans(&ids, area);
+        assert!(plans[0].bounds.x <= 16.0);
+        let mut background = Buffer::empty(area);
+        for cell in &mut background.content {
+            cell.set_bg(CellColor::Rgb(0, 0, 0));
+        }
+        for y in 0..4 {
+            background[(2, y)].set_bg(CellColor::Rgb(255, 255, 255));
+        }
+        let scene = surface
+            .composite_scene(&plans[0], &ids, area, &background)
+            .unwrap();
+        let raster = crate::composite::rasterize(&scene, &surface.fonts).unwrap();
+        let x = (24.0 - scene.bounds.x) as usize;
+        let y = (24.0 - scene.bounds.y) as usize;
+        assert!(
+            raster.rgba[(y * raster.width as usize + x) * 4] > 0,
+            "rounded clipped backdrops must include the bright strip outside the box"
+        );
+    }
+
+    #[test]
+    fn rounded_group_bounds_preserve_outer_shadow_and_outline_pixels() {
+        for outline in [false, true] {
+            let mut surface = Surface::new(8, 4, CellMetrics::default());
+            let mut items = mount_node(
+                2,
+                ViewKind::View,
+                ROOT_ID,
+                Rect {
+                    x: 24.0,
+                    y: 16.0,
+                    width: 16.0,
+                    height: 16.0,
+                },
+            );
+            let mut style = ViewStyle {
+                overflow_hidden: true,
+                border_radius: 4.0,
+                background_color: Color(0xff00_00ff),
+                ..ViewStyle::default()
+            };
+            let (x, expected) = if outline {
+                style.outline = nsh_core::Outline {
+                    width: 2.0,
+                    offset: 2.0,
+                    color: Color(0x0000_ffff),
+                    ..nsh_core::Outline::default()
+                };
+                (21.0, [0, 0, 255, 255])
+            } else {
+                style.shadow = nsh_core::Shadow {
+                    color: Color::BLACK,
+                    offset_x: 8.0,
+                    offset_y: 0.0,
+                    radius: 0.0,
+                    opacity: 1.0,
+                };
+                (45.0, [0, 0, 0, 255])
+            };
+            items.push(MountItem::ViewStyle {
+                id: 2,
+                style: Box::new(style),
+            });
+            surface.apply(MountBatch { items });
+            let area = CellRect::new(0, 0, 8, 4);
+            let ids = surface.paint_ids();
+            let plans = surface.composite_plans(&ids, area);
+            let scene = surface
+                .composite_scene(&plans[0], &ids, area, &white_buffer(area))
+                .unwrap();
+            assert!(x >= scene.bounds.x && x < scene.bounds.x + scene.bounds.width);
+            let raster = crate::composite::rasterize(&scene, &surface.fonts).unwrap();
+            let x = (x - scene.bounds.x) as usize;
+            let y = (24.0 - scene.bounds.y) as usize;
+            assert_eq!(
+                &raster.rgba[(y * raster.width as usize + x) * 4..][..4],
+                &expected
+            );
+        }
+    }
+
+    #[test]
+    fn short_composited_buttons_keep_a_visible_text_focus_indicator() {
+        let mut surface = Surface::new(10, 2, CellMetrics::default());
+        let mut items = mount_node(
+            2,
+            ViewKind::View,
+            ROOT_ID,
+            Rect {
+                width: 80.0,
+                height: 32.0,
+                ..Rect::default()
+            },
+        );
+        items.push(MountItem::ViewProps {
+            id: 2,
+            props: Box::new(nsh_core::ViewProps {
+                accessibility: nsh_core::Accessibility {
+                    role: AccessibilityRole::Button,
+                    ..nsh_core::Accessibility::default()
+                },
+                ..nsh_core::ViewProps::default()
+            }),
+        });
+        items.push(MountItem::ViewStyle {
+            id: 2,
+            style: Box::new(ViewStyle {
+                effects: Some(Arc::new(nsh_core::Effects {
+                    filters: vec![nsh_core::Filter::Brightness(1.0)],
+                    ..nsh_core::Effects::default()
+                })),
+                ..ViewStyle::default()
+            }),
+        });
+        items.extend(mount_node(
+            4,
+            ViewKind::Text,
+            2,
+            Rect {
+                width: 40.0,
+                height: 16.0,
+                ..Rect::default()
+            },
+        ));
+        let mut text = nsh_core::AttributedText::default();
+        text.push("Focus", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        items.push(MountItem::Text {
+            id: 4,
+            layout: engine.layout(&engine.prepare(&text), Size::new(40.0, 16.0)),
+            text: Arc::new(text),
+            content: Rect {
+                width: 40.0,
+                height: 16.0,
+                ..Rect::default()
+            },
+        });
+        surface.apply(MountBatch { items });
+        let area = CellRect::new(0, 0, 10, 2);
+        let ids = surface.paint_ids();
+        let plans = surface.composite_plans(&ids, area);
+        surface.focus = None;
+        let plain = surface
+            .composite_scene(&plans[0], &ids, area, &white_buffer(area))
+            .unwrap();
+        surface.focus = Some(2);
+        let focused = surface
+            .composite_scene(&plans[0], &ids, area, &white_buffer(area))
+            .unwrap();
+        let plain = crate::composite::rasterize(&plain, &surface.fonts).unwrap();
+        let focused = crate::composite::rasterize(&focused, &surface.fonts).unwrap();
+        let column = (0..40)
+            .find(|&x| plain.rgba[(15 * plain.width as usize + x) * 4..][..3] == [255; 3])
+            .expect("the plain label has a gap on its last pixel row");
+        let index = (15 * focused.width as usize + column) * 4;
+        assert_eq!(&focused.rgba[index..index + 3], &[0; 3]);
+    }
+
+    #[test]
+    fn large_headers_collapse_and_refresh_feedback_stays_visible_without_indicators() {
+        let mut surface = Surface::new(40, 6, CellMetrics::default());
+        let viewport = Rect {
+            width: 320.0,
+            height: 96.0,
+            ..Rect::default()
+        };
+        let mut items = mount_node(2, ViewKind::Stack, ROOT_ID, viewport);
+        for (id, title, large) in [(4, "Fleet", false), (6, "Billing", true)] {
+            items.extend([
+                MountItem::Create {
+                    id,
+                    kind: ViewKind::Screen,
+                },
+                MountItem::Frame {
+                    id,
+                    frame: viewport,
+                },
+                MountItem::ScreenConfig {
+                    id,
+                    config: Box::new(nsh_core::ScreenConfig {
+                        title: Some(Arc::from(title)),
+                        back_title: Some(Arc::from("Home")),
+                        large_title: large,
+                        header_height: if large { 32.0 } else { 16.0 },
+                        animation: nsh_core::ScreenAnimation::None,
+                        ..nsh_core::ScreenConfig::default()
+                    }),
+                },
+                MountItem::Insert {
+                    parent: 2,
+                    child: id,
+                    before: None,
+                },
+            ]);
+        }
+        items.extend(mount_node(
+            8,
+            ViewKind::Scroll,
+            6,
+            Rect {
+                x: 0.0,
+                y: 32.0,
+                width: 320.0,
+                height: 64.0,
+            },
+        ));
+        items.push(MountItem::ScrollContent {
+            id: 8,
+            size: Size::new(320.0, 512.0),
+        });
+        surface.apply(MountBatch { items });
+        surface.node_mut(8).unwrap().scroll.shows_indicator = false;
+        surface.focus = None;
+        let expanded = surface.snapshot();
+        assert!(expanded.lines().next().unwrap().contains("‹ Home"));
+        assert!(expanded.lines().nth(1).unwrap().contains("Billing"));
+        surface.scroll_to(8, 0.0, 16.0);
+        let compact = surface.snapshot();
+        assert!(compact.lines().next().unwrap().contains("Billing"));
+        assert!(!compact.lines().nth(1).unwrap().contains("Billing"));
+
+        let mut refresh = Surface::new(20, 6, CellMetrics::default());
+        refresh.apply(MountBatch {
+            items: mount_node(
+                2,
+                ViewKind::Scroll,
+                ROOT_ID,
+                Rect {
+                    width: 160.0,
+                    height: 96.0,
+                    ..Rect::default()
+                },
+            ),
+        });
+        let scroll = &mut refresh.node_mut(2).unwrap().scroll;
+        scroll.shows_indicator = false;
+        scroll.physics.refreshing = true;
+        scroll.y = -48.0;
+        refresh.focus = None;
+        assert!(refresh.snapshot().contains("Refreshing"));
     }
 
     #[test]
@@ -2830,12 +4118,10 @@ mod tests {
                 },
             ),
         });
-        let node = surface.node_mut(2).unwrap();
-        node.resize_mode = ResizeMode::Center;
-        node.image_source = Some(nsh_core::ImageSource {
+        let source = nsh_core::ImageSource {
             uri: Arc::from("asset:/photo@2x.png"),
             size: Some((16.0, 32.0)),
-        });
+        };
         let frame = Rect {
             x: 8.0,
             y: 0.0,
@@ -2843,7 +4129,9 @@ mod tests {
             height: 64.0,
         };
         let (image, clip, mode) = image_geometry(
-            node,
+            &source,
+            ResizeMode::Center,
+            nsh_core::Size::new(64.0, 64.0),
             frame,
             Rect {
                 x: 0.0,

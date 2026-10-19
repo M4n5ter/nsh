@@ -1,12 +1,12 @@
 ---
 title: nsh/desktop
-description: "Desktop-only APIs: the window (title, title bar, maximize, full screen), a title bar of the app's own with draggable regions, the application menu, context menus and keyboard shortcuts."
+description: "Desktop window APIs, application and context menus, keyboard shortcuts, and terminal titles and menus."
 order: 12.5
 ---
 
 # nsh/desktop
 
-`nsh/desktop` provides graphical desktop windows and title bars, the application menu and context menus on macOS, Windows and Linux. The module can be imported on every platform, so one bundle runs everywhere. `isAvailable` tells you whether the surface has these graphical desktop APIs.
+`nsh/desktop` provides graphical desktop windows and title bars, the application menu and context menus on macOS, Windows and Linux. Terminal surfaces expose titles and menus through the same module. The module can be imported on every platform, so one bundle runs everywhere. `isAvailable` identifies surfaces with these title and menu APIs.
 
 ```ts
 import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
@@ -18,7 +18,8 @@ import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
 const isAvailable: boolean;
 ```
 
-`true` on graphical macOS, Windows and Linux backends.
+`true` on graphical macOS, Windows and Linux backends and on terminal surfaces. `Platform.isDesktop` identifies a
+graphical desktop; `Platform.isTerminal` identifies the terminal renderer. See [Terminal](../docs/tui.md).
 
 ## Window
 
@@ -53,6 +54,9 @@ const Window: {
 | `close()` | Closes the window; the app ends with it. |
 
 Window sizing is supported on macOS, Windows and Linux; positioning and levels on macOS and Windows. Linux's window manager controls placement and stacking. GPUI's host configures window bounds and level when opening the window.
+
+Terminal surfaces send `setTitle` through the host's title transport, and `close` closes the app. Their menus use
+terminal overlays: F10 opens the application menu, arrows navigate, Enter or Space selects, and Escape closes it.
 
 When sizing a window from content measured with `onLayout`, allow room for window decorations on macOS and Windows. `width` and `height` accept positive finite numbers; `x` and `y` accept finite numbers. Invalid fields keep their previous values.
 

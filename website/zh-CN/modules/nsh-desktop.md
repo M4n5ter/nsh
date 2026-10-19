@@ -1,12 +1,12 @@
 ---
 title: nsh/desktop
-description: 桌面专有 API：窗口（标题、标题栏、最大化、全屏）、带可拖动区域的自定义标题栏、应用菜单、右键菜单和快捷键。
+description: 桌面窗口 API、应用菜单、右键菜单、快捷键，以及终端标题和菜单。
 order: 12.5
 ---
 
 # nsh/desktop
 
-`nsh/desktop` 在 macOS、Windows 和 Linux 上提供图形桌面窗口、标题栏、应用菜单和右键菜单。这个模块在所有平台上都可以导入，因此同一个 bundle 可以在所有平台运行。`isAvailable` 告诉你当前界面是否具备这些图形桌面 API。
+`nsh/desktop` 在 macOS、Windows 和 Linux 上提供图形桌面窗口、标题栏、应用菜单和右键菜单。终端界面通过同一个模块提供标题和菜单。这个模块在所有平台上都可以导入，因此同一个 bundle 可以在所有平台运行。`isAvailable` 标识提供这些标题和菜单 API 的界面。
 
 ```ts
 import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
@@ -18,7 +18,8 @@ import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
 const isAvailable: boolean;
 ```
 
-在 macOS、Windows 和 Linux 图形后端上为 `true`。
+在 macOS、Windows 和 Linux 图形后端及终端界面上为 `true`。`Platform.isDesktop` 标识图形桌面，
+`Platform.isTerminal` 标识终端渲染器。参见[终端](../docs/tui.md)。
 
 ## Window
 
@@ -53,6 +54,9 @@ const Window: {
 | `close()` | 关闭窗口，应用随之结束。 |
 
 窗口尺寸调整适用于 macOS、Windows 和 Linux；窗口定位和层级控制适用于 macOS 和 Windows。Linux 的窗口位置和层级由窗口管理器决定。GPUI 窗口的尺寸、位置和层级由宿主在创建窗口时配置。
+
+终端界面通过宿主的标题通道处理 `setTitle`，`close` 关闭应用。菜单以终端浮层呈现：F10 打开应用菜单，方向键
+导航，Enter 或 Space 选择，Escape 关闭。
 
 使用 `onLayout` 测量内容后调整窗口大小时，在 macOS 和 Windows 上应为窗口装饰预留空间。`width` 和 `height` 接受正有限数值；`x` 和 `y` 接受有限数值。无效字段保留原值。
 

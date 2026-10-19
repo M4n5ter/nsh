@@ -1,13 +1,13 @@
 //! Canvas raster replay in virtual points, reduced to terminal half blocks by
 //! the image painter. Geometry, compositing, gradients and shadows follow the
 //! same tiny-skia replay model as the GPUI backend. Font outlines are shaped
-//! with rustybuzz from the system's font files, on the graphics worker.
+//! with rustybuzz from the surface's registered and system font catalog.
 
 use std::{
     collections::HashMap,
     f64::consts::{PI, TAU},
     rc::Rc,
-    sync::{Arc, Mutex, OnceLock},
+    sync::Arc,
 };
 
 use nsh_animation::AnimationValue;
@@ -21,13 +21,15 @@ use nsh_core::{
 };
 use tiny_skia as sk;
 
-use crate::image::Raster;
+use crate::{
+    fonts::{FontCatalog, GlyphPaint, tint_bitmap},
+    image::Raster,
+};
 
 const GRADIENT_STEPS: usize = 1024;
 const MAX_SIGMA: f64 = 256.0;
 const MAX_SIDE: u32 = 8192;
 const MAX_PIXELS: u64 = 8 << 20;
-const FONT_CACHE_BYTES: usize = 32 << 20;
 
 /// Replays one canvas into straight RGBA pixels. Call on a worker, caching the
 /// result until drawing, native slots, size or image dependencies change.
@@ -37,6 +39,7 @@ pub(crate) fn rasterize(
     width: f32,
     height: f32,
     images: &HashMap<Arc<str>, Arc<Raster>>,
+    fonts: &FontCatalog,
 ) -> Result<Raster, String> {
     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
         return Err("canvas has no finite positive size".into());
@@ -60,6 +63,7 @@ pub(crate) fn rasterize(
     let mut replay = Replay {
         args,
         images: &used_images,
+        fonts,
         size: (w, h),
         base,
         state: State::new(base),
@@ -189,6 +193,7 @@ enum Source {
 }
 
 struct Replay<'a> {
+    fonts: &'a FontCatalog,
     args: &'a [(u16, AnimationValue)],
     images: &'a HashMap<Arc<str>, Arc<sk::Pixmap>>,
     size: (u32, u32),
@@ -776,61 +781,12 @@ impl<'a> Replay<'a> {
         if text.is_empty() || self.state.singular {
             return;
         }
-        let mut fonts = fonts().lock().unwrap_or_else(|e| e.into_inner());
-        let Some(primary) = fonts.resolve(&self.state.font) else {
-            log::warn!("canvas: no system font available for text");
-            return;
-        };
-        let size = self.state.font.size.max(0.1) as f64;
-        let mut runs: Vec<(fontdb::ID, String)> = Vec::new();
-        // Keep shaping within one face, using a fallback only when its
-        // predecessor cannot represent the character.
-        for character in text.chars() {
-            let id = fonts.for_character(primary, character).unwrap_or(primary);
-            if let Some((previous, run)) = runs.last_mut()
-                && *previous == id
-            {
-                run.push(character);
-            } else {
-                runs.push((id, character.to_string()));
-            }
-        }
-        let mut outlines = sk::PathBuilder::new();
-        let (mut width, mut ascent, mut descent) = (0.0f64, 0.0f64, 0.0f64);
-        let features = font_features(self.state.font.variant);
-        for (id, run) in runs {
-            let Some(file) = fonts.file(id) else {
-                continue;
-            };
-            let Some(face) = rustybuzz::Face::from_slice(&file.data, file.index) else {
-                continue;
-            };
-            let mut buffer = rustybuzz::UnicodeBuffer::new();
-            buffer.push_str(&run);
-            buffer.guess_segment_properties();
-            let glyphs = rustybuzz::shape(&face, &features, buffer);
-            let k = size / face.units_per_em() as f64;
-            ascent = ascent.max(face.ascender() as f64 * k);
-            descent = descent.max(-(face.descender() as f64) * k);
-            let mut baseline = 0.0;
-            for (info, position) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
-                let gx = width + position.x_offset as f64 * k;
-                let gy = baseline + position.y_offset as f64 * k;
-                let to = Affine::translate(gx, -gy).then(&Affine::scale(k, -k));
-                if !file.push_glyph(info.glyph_id as u16, &to, &mut outlines)
-                    && let Some(replacement) = face.glyph_index('\u{fffd}')
-                {
-                    file.push_glyph(replacement.0, &to, &mut outlines);
-                    log::debug!("canvas: glyph without an outline replaced by U+FFFD");
-                }
-                width += position.x_advance as f64 * k;
-                baseline += position.y_advance as f64 * k;
-            }
-        }
-        drop(fonts);
-        let Some(path) = outlines.finish() else {
-            return;
-        };
+        let shaped = self.fonts.shape(&self.state.font, text);
+        let (width, ascent, descent) = (
+            shaped.width as f64,
+            shaped.ascent as f64,
+            shaped.descent as f64,
+        );
         let dx = match self.state.align {
             CanvasTextAlign::Start | CanvasTextAlign::Left => 0.0,
             CanvasTextAlign::Center => -width / 2.0,
@@ -853,8 +809,72 @@ impl<'a> Replay<'a> {
                 .then(&Affine::scale(squeeze, 1.0))
                 .then(&Affine::translate(dx, 0.0)),
         );
-        if let Some(path) = path.transform(place.skia()) {
-            self.paint_path(path, mode);
+        for paint in shaped.paints() {
+            match paint {
+                GlyphPaint::Path(path, color) => {
+                    if let Some(path) = path.transform(place.skia()) {
+                        let previous = self.state.fill.clone();
+                        if let Some(mut color) = color
+                            && matches!(mode, Mode::Fill(_))
+                        {
+                            if let Some(foreground) = self.color(&previous) {
+                                color.0 = (color.0 & !255)
+                                    | ((color.0 & 255) * (foreground.0 & 255) / 255);
+                            }
+                            self.state.fill = Paint::Color(color);
+                        }
+                        self.paint_path(path, mode);
+                        self.state.fill = previous;
+                    }
+                }
+                GlyphPaint::Image {
+                    image,
+                    transform,
+                    tint,
+                } => {
+                    let foreground = self.color(self.paint(mode)).unwrap_or(Color::BLACK);
+                    let image = if tint {
+                        Arc::new(tint_bitmap(&image, foreground))
+                    } else {
+                        image
+                    };
+                    let glyph = Affine {
+                        a: transform.sx as f64,
+                        b: transform.ky as f64,
+                        c: transform.kx as f64,
+                        d: transform.sy as f64,
+                        e: transform.tx as f64,
+                        f: transform.ty as f64,
+                    };
+                    let transform = place.then(&glyph).skia();
+                    let Some(rect) =
+                        sk::Rect::from_xywh(0.0, 0.0, image.width() as f32, image.height() as f32)
+                    else {
+                        continue;
+                    };
+                    let Some(path) = sk::PathBuilder::from_rect(rect).transform(transform) else {
+                        continue;
+                    };
+                    let alpha = self.state.alpha as f32
+                        * if tint {
+                            1.0
+                        } else {
+                            (foreground.0 & 255) as f32 / 255.0
+                        };
+                    let source = Source::Image(image, transform, alpha);
+                    self.emit(path.bounds(), &|pixmap, to, mask, blend| {
+                        fill(
+                            pixmap,
+                            &path,
+                            sk::FillRule::Winding,
+                            &source,
+                            to,
+                            blend,
+                            mask,
+                        )
+                    });
+                }
+            }
         }
     }
 
@@ -965,218 +985,6 @@ impl<'a> Replay<'a> {
 /// What paints a shape: on a pixmap, through a transform from pixmap
 /// coordinates, inside a mask, with a blend mode.
 type Draw<'a> = &'a dyn Fn(&mut sk::Pixmap, sk::Transform, Option<&sk::Mask>, sk::BlendMode);
-
-fn fonts() -> &'static Mutex<Fonts> {
-    static FONTS: OnceLock<Mutex<Fonts>> = OnceLock::new();
-    FONTS.get_or_init(|| {
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
-        // fontdb's generic default is Arial, which may not be installed.
-        for family in [
-            "Arial",
-            "Helvetica",
-            "DejaVu Sans",
-            "Noto Sans",
-            "Liberation Sans",
-        ] {
-            if db
-                .query(&fontdb::Query {
-                    families: &[fontdb::Family::Name(family)],
-                    ..Default::default()
-                })
-                .is_some()
-            {
-                db.set_sans_serif_family(family);
-                break;
-            }
-        }
-        Mutex::new(Fonts {
-            db,
-            files: HashMap::new(),
-            choices: HashMap::new(),
-            fallback: HashMap::new(),
-        })
-    })
-}
-
-struct Fonts {
-    db: fontdb::Database,
-    files: HashMap<fontdb::ID, Arc<FontFile>>,
-    choices: HashMap<String, fontdb::ID>,
-    fallback: HashMap<(fontdb::ID, char), Option<fontdb::ID>>,
-}
-
-impl Fonts {
-    fn resolve(&mut self, font: &CanvasFont) -> Option<fontdb::ID> {
-        let key = format!(
-            "{}:{}:{}",
-            font.family.as_deref().unwrap_or("sans-serif"),
-            font.weight,
-            font.italic
-        );
-        if let Some(id) = self.choices.get(&key) {
-            return Some(*id);
-        }
-        let family = font
-            .family
-            .as_deref()
-            .map_or(fontdb::Family::SansSerif, fontdb::Family::Name);
-        let id = self
-            .db
-            .query(&fontdb::Query {
-                families: &[family, fontdb::Family::SansSerif],
-                weight: fontdb::Weight(font.weight),
-                style: if font.italic {
-                    fontdb::Style::Italic
-                } else {
-                    fontdb::Style::Normal
-                },
-                ..Default::default()
-            })
-            .or_else(|| self.db.faces().next().map(|face| face.id))?;
-        if key.len() <= 256 {
-            if self.choices.len() >= 256 {
-                self.choices.clear();
-            }
-            self.choices.insert(key, id);
-        }
-        Some(id)
-    }
-
-    fn file(&mut self, id: fontdb::ID) -> Option<Arc<FontFile>> {
-        if let Some(file) = self.files.get(&id) {
-            return Some(file.clone());
-        }
-        let file = self.db.with_face_data(id, |data, index| FontFile {
-            data: Arc::from(data),
-            index,
-            glyphs: Mutex::new(HashMap::new()),
-        })?;
-        let file = Arc::new(file);
-        if self.files.len() >= 64
-            || self
-                .files
-                .values()
-                .map(|font| font.data.len())
-                .sum::<usize>()
-                .saturating_add(file.data.len())
-                > FONT_CACHE_BYTES
-        {
-            self.files.clear();
-        }
-        self.files.insert(id, file.clone());
-        Some(file)
-    }
-
-    fn for_character(&mut self, primary: fontdb::ID, character: char) -> Option<fontdb::ID> {
-        if let Some(id) = self.fallback.get(&(primary, character)) {
-            return *id;
-        }
-        let has = |db: &fontdb::Database, id| {
-            db.with_face_data(id, |data, index| {
-                ttf_parser::Face::parse(data, index)
-                    .ok()
-                    .and_then(|face| face.glyph_index(character))
-                    .is_some()
-            })
-            .unwrap_or(false)
-        };
-        let id = if has(&self.db, primary) {
-            Some(primary)
-        } else {
-            self.db
-                .faces()
-                .find(|face| has(&self.db, face.id))
-                .map(|face| face.id)
-        };
-        if self.fallback.len() >= 4096 {
-            self.fallback.clear();
-        }
-        self.fallback.insert((primary, character), id);
-        id
-    }
-}
-
-struct FontFile {
-    data: Arc<[u8]>,
-    index: u32,
-    glyphs: Mutex<HashMap<u16, Option<sk::Path>>>,
-}
-
-impl FontFile {
-    fn push_glyph(&self, glyph: u16, to: &Affine, path: &mut sk::PathBuilder) -> bool {
-        let mut glyphs = self.glyphs.lock().unwrap_or_else(|e| e.into_inner());
-        if glyphs.len() >= 4096 {
-            glyphs.clear();
-        }
-        let outline = glyphs.entry(glyph).or_insert_with(|| {
-            let face = ttf_parser::Face::parse(&self.data, self.index).ok()?;
-            let mut sink = Outline(sk::PathBuilder::new());
-            if face
-                .outline_glyph(ttf_parser::GlyphId(glyph), &mut sink)
-                .is_some()
-            {
-                sink.0.finish()
-            } else if face
-                .glyph_raster_image(ttf_parser::GlyphId(glyph), u16::MAX)
-                .is_none()
-                && !face.is_color_glyph(ttf_parser::GlyphId(glyph))
-            {
-                // Empty glyphs such as spaces require no paint.
-                Some(sk::PathBuilder::from_rect(sk::Rect::from_xywh(
-                    0.0, 0.0, 0.0, 0.0,
-                )?))
-            } else {
-                None
-            }
-        });
-        let Some(outline) = outline else {
-            return false;
-        };
-        if outline.bounds().width() == 0.0 && outline.bounds().height() == 0.0 {
-            return true;
-        }
-        if let Some(placed) = outline.clone().transform(to.skia()) {
-            path.push_path(&placed);
-        }
-        true
-    }
-}
-
-struct Outline(sk::PathBuilder);
-
-impl ttf_parser::OutlineBuilder for Outline {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.0.move_to(x, y);
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.0.line_to(x, y);
-    }
-    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.0.quad_to(x1, y1, x, y);
-    }
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.0.cubic_to(x1, y1, x2, y2, x, y);
-    }
-    fn close(&mut self) {
-        self.0.close();
-    }
-}
-
-fn font_features(variant: nsh_core::FontVariant) -> Vec<rustybuzz::Feature> {
-    use nsh_core::FontVariant as F;
-    [
-        (F::SMALL_CAPS, "smcp"),
-        (F::TABULAR_NUMS, "tnum"),
-        (F::PROPORTIONAL_NUMS, "pnum"),
-        (F::OLDSTYLE_NUMS, "onum"),
-        (F::LINING_NUMS, "lnum"),
-    ]
-    .into_iter()
-    .filter(|(bit, _)| variant.0 & bit != 0)
-    .filter_map(|(_, feature)| feature.parse().ok())
-    .collect()
-}
 
 fn fill(
     pixmap: &mut sk::Pixmap,
@@ -1389,7 +1197,7 @@ fn box_sizes(sigma: f64) -> [usize; 3] {
 }
 
 /// Blurs `alpha` (`w` × `h`) with three box blurs each way.
-fn blur(alpha: &mut [u8], w: usize, h: usize, sigma: f64) {
+pub(crate) fn blur(alpha: &mut [u8], w: usize, h: usize, sigma: f64) {
     let mut tmp = vec![0u8; alpha.len()];
     for size in box_sizes(sigma) {
         let r = size / 2;
@@ -1897,6 +1705,7 @@ mod tests {
             32.0,
             32.0,
             &HashMap::new(),
+            &FontCatalog::default(),
         )
         .unwrap()
     }
@@ -1945,6 +1754,7 @@ mod tests {
             32.0,
             32.0,
             &HashMap::new(),
+            &FontCatalog::default(),
         )
         .unwrap();
         assert_eq!(at(&image, 1, 1), [0, 0, 0, 0]);
@@ -2042,6 +1852,7 @@ mod tests {
             32.0,
             32.0,
             &HashMap::from([(uri, Arc::new(source))]),
+            &FontCatalog::default(),
         )
         .unwrap();
         assert_eq!(at(&image, 1, 1), [0, 0, 0, 0]);
@@ -2071,6 +1882,7 @@ mod tests {
             32.0,
             32.0,
             &HashMap::from([(uri, Arc::new(source))]),
+            &FontCatalog::default(),
         )
         .unwrap();
         assert_eq!(at(&image, 1, 4), [0, 0, 0, 0]);
@@ -2087,8 +1899,65 @@ mod tests {
             (8193.0, 10.0),
             (4000.0, 4000.0),
         ] {
-            assert!(rasterize(&Drawing::default(), &[], w, h, &HashMap::new()).is_err());
+            assert!(
+                rasterize(
+                    &Drawing::default(),
+                    &[],
+                    w,
+                    h,
+                    &HashMap::new(),
+                    &FontCatalog::default()
+                )
+                .is_err()
+            );
         }
+    }
+
+    #[test]
+    fn registered_canvas_measurement_matches_alignment_of_drawn_glyphs() {
+        let fonts = FontCatalog::default();
+        fonts
+            .register(include_bytes!(
+                "../../../examples/gallery/fonts/Pacifico-Regular.ttf"
+            ))
+            .unwrap();
+        let engine =
+            crate::TerminalTextEngine::with_fonts(crate::CellMetrics::default(), fonts.clone());
+        let font = CanvasFont::parse("24px Pacifico").unwrap();
+        let text: Arc<str> = "AV office".into();
+        let advance = nsh_core::canvas::measure_line(&engine, &font, &text);
+        let draw = |alignment, x| {
+            rasterize(
+                &Drawing {
+                    ops: vec![
+                        CanvasOp::Font(font.clone()),
+                        CanvasOp::TextAlign(alignment),
+                        CanvasOp::FillText {
+                            text: text.clone(),
+                            x: c(x),
+                            y: c(48.0),
+                            max_width: None,
+                        },
+                    ],
+                    slots: Vec::new(),
+                },
+                &[],
+                192.0,
+                64.0,
+                &HashMap::new(),
+                &fonts,
+            )
+            .unwrap()
+        };
+        let left = draw(CanvasTextAlign::Left, 20.0);
+        let right = draw(CanvasTextAlign::Right, 160.0);
+        let first_ink = |r: &Raster| {
+            (0..r.width)
+                .find(|&x| (0..r.height).any(|y| r.rgba[((y * r.width + x) * 4 + 3) as usize] > 0))
+                .unwrap() as f32
+        };
+        assert!(((first_ink(&right) - first_ink(&left)) - (140.0 - advance)).abs() <= 1.1);
+        assert_eq!(advance, fonts.shape(&font, &text).width);
     }
     #[test]
     fn transforms_compose_like_canvas() {

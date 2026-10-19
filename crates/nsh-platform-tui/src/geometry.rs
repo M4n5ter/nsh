@@ -1,0 +1,391 @@
+//! Compose transforms before bounding them, so nested rotations preserve
+//! their shape and use the same coordinates for drawing and interaction.
+
+use std::cell::RefCell;
+
+use nsh_core::{Matrix, NodeId, Rect, TransformKind, ViewKind};
+
+use crate::surface::Surface;
+
+#[derive(Default)]
+pub(crate) struct GeometryCache {
+    active: bool,
+    transforms: Vec<Option<Matrix>>,
+}
+
+pub(crate) struct GeometryPass<'a>(&'a RefCell<GeometryCache>);
+
+impl GeometryCache {
+    pub(crate) fn begin(cache: &RefCell<Self>) -> GeometryPass<'_> {
+        let mut state = cache.borrow_mut();
+        debug_assert!(!state.active);
+        state.transforms.fill(None);
+        state.active = true;
+        GeometryPass(cache)
+    }
+}
+
+impl Drop for GeometryPass<'_> {
+    fn drop(&mut self) {
+        self.0.borrow_mut().active = false;
+    }
+}
+
+fn translate(x: f32, y: f32) -> Matrix {
+    let mut matrix = Matrix::IDENTITY;
+    matrix.0[12] = x as f64;
+    matrix.0[13] = y as f64;
+    matrix
+}
+
+pub(crate) fn project(matrix: &Matrix, x: f32, y: f32) -> Option<(f32, f32)> {
+    let m = matrix.0;
+    let (x, y) = (x as f64, y as f64);
+    let w = x * m[3] + y * m[7] + m[15];
+    if !w.is_finite() || w.abs() < 1e-9 {
+        return None;
+    }
+    let point = (
+        ((x * m[0] + y * m[4] + m[12]) / w) as f32,
+        ((x * m[1] + y * m[5] + m[13]) / w) as f32,
+    );
+    (point.0.is_finite() && point.1.is_finite()).then_some(point)
+}
+
+/// Invert the projected z=0 plane, including perspective.
+fn unproject(matrix: &Matrix, x: f32, y: f32) -> Option<(f32, f32)> {
+    let m = matrix.0;
+    let (x, y) = (x as f64, y as f64);
+    let (a, b, c, d) = (
+        m[0] - x * m[3],
+        m[4] - x * m[7],
+        m[1] - y * m[3],
+        m[5] - y * m[7],
+    );
+    let (e, f) = (x * m[15] - m[12], y * m[15] - m[13]);
+    let determinant = a * d - b * c;
+    if !determinant.is_finite() || determinant.abs() < 1e-9 {
+        return None;
+    }
+    let point = (
+        ((e * d - b * f) / determinant) as f32,
+        ((a * f - e * c) / determinant) as f32,
+    );
+    (point.0.is_finite() && point.1.is_finite()).then_some(point)
+}
+
+impl Surface {
+    /// Maps an untransformed local point to surface points. No intermediate
+    /// axis-aligned bounds enter the matrix composition.
+    pub(crate) fn local_to_surface(&self, id: NodeId) -> Option<Matrix> {
+        {
+            let cache = self.geometry.borrow();
+            if cache.active
+                && let Some(Some(matrix)) = cache.transforms.get(id as usize)
+            {
+                return Some(*matrix);
+            }
+        }
+        let matrix = self.compute_local_to_surface(id)?;
+        let mut cache = self.geometry.borrow_mut();
+        if cache.active {
+            let index = id as usize;
+            if index >= cache.transforms.len() {
+                cache.transforms.resize(index + 1, None);
+            }
+            cache.transforms[index] = Some(matrix);
+        }
+        Some(matrix)
+    }
+
+    fn compute_local_to_surface(&self, id: NodeId) -> Option<Matrix> {
+        let mut result = Matrix::IDENTITY;
+        let mut current = id;
+        loop {
+            let node = self.node(current)?;
+            let frame = self.presentation_frame(current)?;
+            let style = self.animated_style(current);
+            let origin = (
+                style.transform_origin.x.resolve(frame.width),
+                style.transform_origin.y.resolve(frame.height),
+            );
+            let mut transform = style.transform.matrix(|_| None);
+            if let Some(motion) = &node.motion {
+                let extra = motion.appearance(self.now).1;
+                if extra.shift_y_fraction != 0.0 {
+                    transform =
+                        transform.mul(&translate(0.0, extra.shift_y_fraction * frame.height));
+                }
+                if extra.rotate_degrees != 0.0 {
+                    transform = transform.mul(&Matrix::of(
+                        TransformKind::Rotate,
+                        extra.rotate_degrees as f64,
+                    ));
+                }
+                if extra.scale != 1.0 {
+                    transform =
+                        transform.mul(&Matrix::of(TransformKind::Scale, extra.scale as f64));
+                }
+            }
+            let step = translate(-origin.0, -origin.1)
+                .mul(&transform)
+                .mul(&translate(origin.0 + frame.x, origin.1 + frame.y));
+            result = result.mul(&step);
+            if node.kind == ViewKind::Modal {
+                break;
+            }
+            let Some(parent_id) = node.parent else { break };
+            let parent = self.node(parent_id)?;
+            let parent_frame = self.presentation_frame(parent_id)?;
+            let (zoom, center_x, center_y) = self.scroll_content_transform(parent_id);
+            let sticky = parent
+                .scroll
+                .sticky
+                .iter()
+                .find(|sticky| sticky.cell == current)
+                .map(|sticky| {
+                    let offset = if parent.scroll.horizontal {
+                        parent.scroll.x
+                    } else {
+                        parent.scroll.y
+                    };
+                    (offset - sticky.start * zoom)
+                        .clamp(0.0, ((sticky.end - sticky.start) * zoom).max(0.0))
+                })
+                .unwrap_or(0.0);
+            if zoom != 1.0 {
+                result = result.mul(&Matrix::of(TransformKind::Scale, zoom as f64));
+            }
+            let mirror = if parent.scroll.mirrored {
+                parent_frame.width - 2.0 * frame.x * zoom - frame.width * zoom
+                    + 2.0 * parent.scroll.x
+            } else {
+                0.0
+            };
+            result = result.mul(&translate(
+                center_x - parent.scroll.x
+                    + mirror
+                    + if parent.scroll.horizontal {
+                        sticky
+                    } else {
+                        0.0
+                    },
+                center_y - parent.scroll.y
+                    + if parent.scroll.horizontal {
+                        0.0
+                    } else {
+                        sticky
+                    },
+            ));
+            current = parent_id;
+        }
+        Some(result)
+    }
+
+    pub(crate) fn global_frame(&self, id: NodeId) -> Option<Rect> {
+        let frame = self.presentation_frame(id)?;
+        let transform = self.local_to_surface(id)?;
+        let points = [
+            (0.0, 0.0),
+            (frame.width, 0.0),
+            (0.0, frame.height),
+            (frame.width, frame.height),
+        ];
+        let mut bounds = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
+        for (x, y) in points {
+            let (x, y) = project(&transform, x, y)?;
+            bounds = (
+                bounds.0.min(x),
+                bounds.1.min(y),
+                bounds.2.max(x),
+                bounds.3.max(y),
+            );
+        }
+        Some(Rect {
+            x: bounds.0,
+            y: bounds.1,
+            width: bounds.2 - bounds.0,
+            height: bounds.3 - bounds.1,
+        })
+    }
+
+    pub(crate) fn surface_to_local(&self, id: NodeId, x: f32, y: f32) -> Option<(f32, f32)> {
+        unproject(&self.local_to_surface(id)?, x, y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nsh_core::{MountBatch, MountItem, ROOT_ID, ViewStyle};
+
+    use super::*;
+    use crate::CellMetrics;
+
+    #[test]
+    fn render_cache_never_reuses_geometry_after_a_mount_or_outside_rendering() {
+        let mut surface = Surface::new(40, 20, CellMetrics::default());
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Create {
+                    id: 2,
+                    kind: ViewKind::View,
+                },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+                MountItem::Frame {
+                    id: 2,
+                    frame: Rect {
+                        x: 8.0,
+                        y: 0.0,
+                        width: 16.0,
+                        height: 16.0,
+                    },
+                },
+            ],
+        });
+        {
+            let _pass = GeometryCache::begin(&surface.geometry);
+            assert_eq!(surface.global_frame(2).unwrap().x, 8.0);
+        }
+        surface.apply(MountBatch {
+            items: vec![MountItem::Frame {
+                id: 2,
+                frame: Rect {
+                    x: 24.0,
+                    y: 0.0,
+                    width: 16.0,
+                    height: 16.0,
+                },
+            }],
+        });
+        assert_eq!(surface.global_frame(2).unwrap().x, 24.0);
+        let _pass = GeometryCache::begin(&surface.geometry);
+        assert_eq!(surface.global_frame(2).unwrap().x, 24.0);
+    }
+
+    #[test]
+    fn inverse_includes_rotation_and_perspective() {
+        let mut matrix = Matrix::of(TransformKind::Rotate, 33.0).mul(&translate(20.0, 8.0));
+        matrix.0[3] = 0.001;
+        matrix.0[7] = 0.002;
+        let point = project(&matrix, 13.0, 27.0).unwrap();
+        let restored = unproject(&matrix, point.0, point.1).unwrap();
+        assert!((restored.0 - 13.0).abs() < 0.001 && (restored.1 - 27.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn opposing_nested_rotations_are_bounded_after_composition() {
+        let mut parent = ViewStyle::default();
+        parent.transform.push(TransformKind::Rotate, 45.0);
+        let mut child = ViewStyle::default();
+        child.transform.push(TransformKind::Rotate, -45.0);
+        let mut surface = Surface::new(40, 20, CellMetrics::default());
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Create {
+                    id: 2,
+                    kind: ViewKind::View,
+                },
+                MountItem::Create {
+                    id: 4,
+                    kind: ViewKind::View,
+                },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+                MountItem::Insert {
+                    parent: 2,
+                    child: 4,
+                    before: None,
+                },
+                MountItem::Frame {
+                    id: 2,
+                    frame: Rect {
+                        x: 40.0,
+                        y: 40.0,
+                        width: 100.0,
+                        height: 100.0,
+                    },
+                },
+                MountItem::Frame {
+                    id: 4,
+                    frame: Rect {
+                        x: 20.0,
+                        y: 20.0,
+                        width: 20.0,
+                        height: 10.0,
+                    },
+                },
+                MountItem::ViewStyle {
+                    id: 2,
+                    style: Box::new(parent),
+                },
+                MountItem::ViewStyle {
+                    id: 4,
+                    style: Box::new(child),
+                },
+            ],
+        });
+        let frame = surface.global_frame(4).unwrap();
+        assert!((frame.width - 20.0).abs() < 0.001);
+        assert!((frame.height - 10.0).abs() < 0.001);
+        let center = project(&surface.local_to_surface(4).unwrap(), 10.0, 5.0).unwrap();
+        assert_eq!(surface.hit_test(center.0, center.1), Some(4));
+    }
+
+    #[test]
+    fn rounded_ancestor_mask_excludes_child_pointer_hits() {
+        let style = ViewStyle {
+            overflow_hidden: true,
+            border_radius: 32.0,
+            ..ViewStyle::default()
+        };
+        let mut surface = Surface::new(10, 5, CellMetrics::default());
+        let frame = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+        };
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Create {
+                    id: 2,
+                    kind: ViewKind::View,
+                },
+                MountItem::Create {
+                    id: 4,
+                    kind: ViewKind::View,
+                },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+                MountItem::Insert {
+                    parent: 2,
+                    child: 4,
+                    before: None,
+                },
+                MountItem::Frame { id: 2, frame },
+                MountItem::Frame { id: 4, frame },
+                MountItem::ViewStyle {
+                    id: 2,
+                    style: Box::new(style),
+                },
+            ],
+        });
+        assert_ne!(surface.hit_test(1.0, 1.0), Some(4));
+        assert_eq!(surface.hit_test(32.0, 32.0), Some(4));
+    }
+}

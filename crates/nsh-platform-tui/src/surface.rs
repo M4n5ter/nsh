@@ -1,15 +1,14 @@
 //! A retained terminal scene. One surface owns its nodes, input, animation
 //! graph and graphics work; embedding several surfaces shares no app state.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use nsh_animation::{AnimationProp, AnimationValue, Graph};
 use nsh_core::{
     AttributedText, Color, Command, Dialog, EventKind, EventMask, EventPayload, GestureValues,
-    ImageSource, InputConfig, ModalConfig, MountBatch, MountItem, NodeId, PayloadValue,
-    PointerEvents, ROOT_ID, Rect, ResizeMode, ScreenConfig, ScrollBehavior, Size, StickyCell,
-    TextLayout, Transform, TransformKind, ViewKind, ViewProps, ViewStyle, access::Access,
-    keymap::Keymap,
+    InputConfig, ModalConfig, MountBatch, MountItem, NodeId, PayloadValue, PointerEvents, ROOT_ID,
+    Rect, ScreenConfig, ScrollBehavior, Size, StickyCell, TextLayout, Transform, ViewKind,
+    ViewProps, ViewStyle, access::Access, keymap::Keymap,
 };
 use ratatui::{buffer::Buffer, layout::Rect as CellRect};
 
@@ -32,6 +31,14 @@ pub enum SurfaceEvent {
     AnimationsFinished(Vec<nsh_animation::Finished>),
     /// A hosted terminal component reported its natural size in points.
     ComponentSize(NodeId, Size),
+    /// A terminal host operation, dispatched asynchronously by the embedding host.
+    Service(crate::services::ServiceRequest),
+    /// A scroll content scale, reported before its adjusted offset.
+    Zoom(NodeId, f32),
+    /// The independently laid out size and insets of a screen or modal.
+    RootSize(NodeId, Size, nsh_core::EdgeInsets),
+    /// The actual terminal height of a navigation header.
+    ScreenHeader(NodeId, Option<f32>),
 }
 
 pub(crate) struct ScrollState {
@@ -46,6 +53,7 @@ pub(crate) struct ScrollState {
     pub(crate) sticky: Vec<StickyCell>,
     pub(crate) scroll_value: Option<nsh_animation::NodeId>,
     pub(crate) mirrored: bool,
+    pub(crate) physics: crate::scroll::Physics,
 }
 
 impl Default for ScrollState {
@@ -62,11 +70,13 @@ impl Default for ScrollState {
             sticky: Vec::new(),
             scroll_value: None,
             mirrored: false,
+            physics: crate::scroll::Physics::default(),
         }
     }
 }
 
 pub(crate) struct Node {
+    generation: u64,
     pub(crate) kind: ViewKind,
     pub(crate) parent: Option<NodeId>,
     pub(crate) children: Vec<NodeId>,
@@ -84,24 +94,22 @@ pub(crate) struct Node {
     pub(crate) modal: ModalConfig,
     pub(crate) popped: bool,
     pub(crate) drawing: Option<Arc<nsh_core::canvas::Drawing>>,
-    pub(crate) image_source: Option<ImageSource>,
-    pub(crate) resize_mode: ResizeMode,
-    pub(crate) image_raster: Option<Arc<Raster>>,
-    pub(crate) image_animation: Option<Arc<AnimatedRaster>>,
-    pub(crate) image_started: f64,
+    pub(crate) image: crate::image_state::ImageState,
     pub(crate) canvas_raster: Option<Arc<Raster>>,
     pub(crate) bindings: Vec<(AnimationProp, nsh_animation::NodeId)>,
     pub(crate) gestures: GestureValues,
     pub(crate) canvas_args: Vec<(u16, AnimationValue)>,
     pub(crate) native: Option<Box<dyn crate::native::NativeComponent>>,
+    pub(crate) media: Option<Box<crate::media::MediaState>>,
     native_size: Option<Size>,
-    motion: Option<Box<crate::motion::NodeMotion>>,
-    delete_pending: bool,
+    pub(crate) motion: Option<Box<crate::motion::NodeMotion>>,
+    pub(crate) delete_pending: bool,
 }
 
 impl Node {
     fn new(kind: ViewKind) -> Self {
         Self {
+            generation: 0,
             kind,
             parent: None,
             children: Vec::new(),
@@ -119,16 +127,13 @@ impl Node {
             modal: ModalConfig::default(),
             popped: false,
             drawing: None,
-            image_source: None,
-            resize_mode: ResizeMode::Cover,
-            image_raster: None,
-            image_animation: None,
-            image_started: 0.0,
+            image: crate::image_state::ImageState::default(),
             canvas_raster: None,
             bindings: Vec::new(),
             gestures: GestureValues::default(),
             canvas_args: Vec::new(),
             native: None,
+            media: None,
             native_size: None,
             motion: None,
             delete_pending: false,
@@ -166,13 +171,24 @@ pub struct Surface {
     pub(crate) now: f64,
     pub(crate) access: Access,
     pub(crate) components: crate::native::Components,
-    graphics: crate::worker::Graphics,
+    pub(crate) graphics: crate::worker::Graphics,
+    pub(crate) fonts: crate::fonts::FontCatalog,
+    fonts_revision: u64,
+    pub(crate) composites: RefCell<crate::composite::Cache>,
+    pub(crate) geometry: RefCell<crate::geometry::GeometryCache>,
+    pub(crate) navigation: crate::navigation::Navigation,
+    pub(crate) reduce_motion: bool,
+    pub(crate) services: crate::services::SurfaceServices,
+    pub(crate) media_runtime: crate::media::MediaRuntime,
     pub(crate) protocol: crate::protocol::Images,
     assets: Option<Arc<dyn nsh_engine::Assets>>,
     canvas_dirty: Vec<NodeId>,
     canvas_pending: Vec<NodeId>,
+    canvas_epoch: u64,
+    node_generation: u64,
     image_cache: HashMap<String, CachedImage>,
     pending_images: HashMap<String, PendingImage>,
+    pending_blurs: Vec<(NodeId, crate::image_state::ImageRequest)>,
 }
 
 struct CachedImage {
@@ -183,13 +199,14 @@ struct CachedImage {
 
 #[derive(Default)]
 struct PendingImage {
-    views: Vec<NodeId>,
+    views: Vec<(NodeId, crate::image_state::ImageRequest)>,
     requests: Vec<u32>,
 }
 
 impl Surface {
     /// An empty scene, with its dimensions in terminal columns and rows.
     pub fn new(columns: u16, rows: u16, metrics: CellMetrics) -> Self {
+        let fonts = crate::fonts::FontCatalog::default();
         let mut surface = Self {
             nodes: vec![None, Some(Node::new(ViewKind::View))],
             metrics,
@@ -215,13 +232,24 @@ impl Surface {
             now: 0.0,
             access: Access::all(),
             components: crate::native::Components::default(),
-            graphics: crate::worker::Graphics::new(),
+            graphics: crate::worker::Graphics::new(fonts.clone()),
+            fonts,
+            fonts_revision: 0,
+            composites: RefCell::default(),
+            geometry: RefCell::default(),
+            navigation: crate::navigation::Navigation::default(),
+            reduce_motion: false,
+            services: crate::services::SurfaceServices::default(),
+            media_runtime: crate::media::MediaRuntime::default(),
             protocol: crate::protocol::Images::default(),
             assets: None,
             canvas_dirty: Vec::new(),
             canvas_pending: Vec::new(),
+            canvas_epoch: 0,
+            node_generation: 0,
             image_cache: HashMap::new(),
             pending_images: HashMap::new(),
+            pending_blurs: Vec::new(),
         };
         surface.resize(columns, rows);
         surface
@@ -249,6 +277,7 @@ impl Surface {
     pub(crate) fn inherit_image_protocol(&mut self, previous: &mut Self) {
         self.protocol = std::mem::take(&mut previous.protocol);
         self.protocol.reset_entries();
+        self.media_runtime = previous.media_runtime.clone();
     }
 
     pub(crate) fn paint_image_protocol(
@@ -287,7 +316,48 @@ impl Surface {
 
     /// Sets the verified bundle's media and clipboard permissions.
     pub fn set_access(&mut self, access: Access) {
+        self.canvas_epoch = self.canvas_epoch.wrapping_add(1);
+        for node in self.nodes.iter_mut().flatten() {
+            if let Some(media) = &mut node.media {
+                media.set_access(access.clone());
+            }
+            node.image.revoke(&access);
+            if node.drawing.is_some() {
+                node.canvas_raster = None;
+            }
+        }
+        self.image_cache.retain(|uri, _| access.allows_media(uri));
+        self.composites.borrow_mut().retain(&[]);
+        self.protocol.reset_entries();
         self.access = access;
+        let requests: Vec<_> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .flat_map(|(id, node)| {
+                node.as_ref()
+                    .map(|node| node.image.requests())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |request| (id as NodeId, request))
+            })
+            .collect();
+        for (id, request) in requests {
+            self.request_view_image(id, request);
+        }
+        let ids: Vec<_> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(id, node)| {
+                node.as_ref()
+                    .filter(|node| node.drawing.is_some())
+                    .map(|_| id as NodeId)
+            })
+            .collect();
+        for id in ids {
+            self.dirty_canvas(id);
+        }
     }
 
     /// Chooses the fallback colors of native terminal overlays.
@@ -298,6 +368,11 @@ impl Surface {
     /// Registers the factories this surface may instantiate through `nsh/native`.
     pub fn set_components(&mut self, components: crate::native::Components) {
         self.components = components;
+    }
+
+    /// Selects reduced navigation motion for this surface.
+    pub fn set_reduce_motion(&mut self, reduce_motion: bool) {
+        self.reduce_motion = reduce_motion;
     }
 
     /// Whether the app requested that its host close.
@@ -421,7 +496,72 @@ impl Surface {
         handled
     }
 
-    fn detach(&mut self, id: NodeId) {
+    fn set_media(&mut self, id: NodeId, props: nsh_core::NativeProps) {
+        let (assets, access, now) = (self.assets.clone(), self.access.clone(), self.now);
+        let runtime = self.media_runtime.clone();
+        if let Some(node) = self.node_mut(id) {
+            if let Some(media) = &mut node.media {
+                media.set_props(props, assets, access, now, runtime);
+            } else {
+                node.media = Some(Box::new(crate::media::MediaState::new(
+                    props, assets, access, now, runtime,
+                )));
+            }
+        }
+        self.drain_media_events(id);
+    }
+
+    fn drain_media_events(&mut self, id: NodeId) {
+        let events = self
+            .node_mut(id)
+            .and_then(|node| node.media.as_mut())
+            .map(|media| media.drain_events())
+            .unwrap_or_default();
+        for (kind, payload) in events {
+            self.emit(id, kind, payload);
+        }
+    }
+
+    fn tick_media(&mut self) -> bool {
+        let mut changed = false;
+        let mut events = Vec::new();
+        for (id, node) in self.nodes.iter_mut().enumerate() {
+            if let Some(media) = node.as_mut().and_then(|node| node.media.as_mut()) {
+                changed |= media.tick(self.now);
+                events.extend(
+                    media
+                        .drain_events()
+                        .into_iter()
+                        .map(|(kind, payload)| (id as NodeId, kind, payload)),
+                );
+            }
+        }
+        for (id, kind, payload) in events {
+            self.emit(id, kind, payload);
+        }
+        changed
+    }
+
+    pub(crate) fn media_key(&mut self, id: NodeId, key: crossterm::event::KeyEvent) -> bool {
+        let now = self.now;
+        let handled = self
+            .node_mut(id)
+            .and_then(|node| node.media.as_mut())
+            .is_some_and(|media| media.key(key, now));
+        self.drain_media_events(id);
+        handled
+    }
+
+    pub(crate) fn media_scroll(&mut self, id: NodeId, lines: i32) -> bool {
+        let handled = self
+            .node_mut(id)
+            .and_then(|node| node.media.as_mut())
+            .is_some_and(|media| media.scroll(lines));
+        self.drain_media_events(id);
+        handled
+    }
+
+    pub(crate) fn detach(&mut self, id: NodeId) {
         if let Some(parent) = self.node(id).and_then(|n| n.parent)
             && let Some(parent) = self.node_mut(parent)
         {
@@ -434,6 +574,7 @@ impl Surface {
 
     /// Applies one core commit in order, then reconciles native interaction.
     pub fn apply(&mut self, batch: MountBatch) {
+        self.navigation_prepare(&batch);
         let mut finished = Vec::new();
         let mut tracked = Vec::new();
         let mut layout = None::<nsh_core::LayoutAnimation>;
@@ -442,133 +583,340 @@ impl Surface {
             match item {
                 MountItem::LayoutAnimation(animation) => layout = Some(animation),
                 MountItem::Create { id, kind } => {
-                    self.nodes.resize_with(self.nodes.len().max(id as usize + 1), || None);
-                    self.nodes[id as usize] = Some(Node::new(kind));
+                    self.composites.borrow_mut().invalidate(id);
+                    self.canvas_pending.retain(|pending| *pending != id);
+                    self.canvas_dirty.retain(|dirty| *dirty != id);
+                    self.node_generation = self.node_generation.wrapping_add(1);
+                    self.nodes
+                        .resize_with(self.nodes.len().max(id as usize + 1), || None);
+                    let mut node = Node::new(kind);
+                    node.generation = self.node_generation;
+                    self.nodes[id as usize] = Some(node);
                 }
-                MountItem::Insert { parent, child, before } => {
-                    let shown = self.node(child).is_some_and(|n| n.kind == ViewKind::Modal && n.parent.is_none());
+                MountItem::Insert {
+                    parent,
+                    child,
+                    before,
+                } => {
+                    self.navigation_reinserted(child);
                     let now = self.now;
                     if let Some(node) = self.node_mut(child) {
-                        let create = (node.frame == Rect::default()).then(|| layout.as_ref().and_then(|a| a.create.as_ref())).flatten();
-                        if create.is_some() || node.motion.is_some() { node.motion.get_or_insert_with(Box::default).inserted(create, now); }
+                        let create = (!matches!(
+                            node.kind,
+                            ViewKind::Screen
+                                | ViewKind::Modal
+                                | ViewKind::Stack
+                                | ViewKind::HeaderItem
+                        ) && node.frame == Rect::default())
+                        .then(|| layout.as_ref().and_then(|a| a.create.as_ref()))
+                        .flatten();
+                        if create.is_some() || node.motion.is_some() {
+                            node.motion
+                                .get_or_insert_with(Box::default)
+                                .inserted(create, now);
+                        }
                         node.delete_pending = false;
                     }
                     self.detach(child);
-                    if let Some(node) = self.node_mut(child) { node.parent = Some(parent); node.popped = false; }
+                    if let Some(node) = self.node_mut(child) {
+                        node.parent = Some(parent);
+                        node.popped = false;
+                    }
                     if let Some(node) = self.node_mut(parent) {
-                        let index = before.and_then(|id| node.children.iter().position(|&c| c == id)).unwrap_or(node.children.len());
+                        let index = before
+                            .and_then(|id| node.children.iter().position(|&c| c == id))
+                            .unwrap_or(node.children.len());
                         node.children.insert(index, child);
                     }
-                    if shown { self.emit(child, EventKind::Show, EventPayload::None); }
                 }
                 MountItem::Remove { id } => {
-                    let modal = self.node(id).is_some_and(|n| n.kind == ViewKind::Modal && !n.popped);
+                    if self.navigation_removing(id) {
+                        continue;
+                    }
                     let now = self.now;
                     let retained = self.node_mut(id).is_some_and(|node| {
-                        let transition = layout.as_ref().and_then(|a| a.delete.as_ref());
-                        (transition.is_some() || node.motion.is_some()) && node.motion.get_or_insert_with(Box::default).removing(transition, now)
+                        let transition = (!matches!(
+                            node.kind,
+                            ViewKind::Screen
+                                | ViewKind::Modal
+                                | ViewKind::Stack
+                                | ViewKind::HeaderItem
+                        ))
+                        .then(|| layout.as_ref().and_then(|a| a.delete.as_ref()))
+                        .flatten();
+                        (transition.is_some() || node.motion.is_some())
+                            && node
+                                .motion
+                                .get_or_insert_with(Box::default)
+                                .removing(transition, now)
                     });
-                    if !retained { self.detach(id); }
-                    if modal { self.emit(id, EventKind::Dismiss, EventPayload::None); }
+                    if !retained {
+                        self.detach(id);
+                    }
                 }
                 MountItem::Delete { id } => {
+                    if self.navigation_removing(id) {
+                        if let Some(node) = self.node_mut(id) {
+                            node.delete_pending = true;
+                        }
+                        continue;
+                    }
                     let now = self.now;
                     if !self.is_dying(id)
-                        && let Some(transition) = layout.as_ref().and_then(|animation| animation.delete.as_ref())
-                        && let Some(node) = self.node_mut(id) {
-                        node.motion.get_or_insert_with(Box::default).removing(Some(transition), now);
+                        && self.node(id).is_some_and(|node| {
+                            !matches!(
+                                node.kind,
+                                ViewKind::Screen
+                                    | ViewKind::Modal
+                                    | ViewKind::Stack
+                                    | ViewKind::HeaderItem
+                            )
+                        })
+                        && let Some(transition) = layout
+                            .as_ref()
+                            .and_then(|animation| animation.delete.as_ref())
+                        && let Some(node) = self.node_mut(id)
+                    {
+                        node.motion
+                            .get_or_insert_with(Box::default)
+                            .removing(Some(transition), now);
                     }
                     if self.is_dying(id) {
-                        if let Some(node) = self.node_mut(id) { node.delete_pending = true; }
+                        if let Some(node) = self.node_mut(id) {
+                            node.delete_pending = true;
+                        }
                         continue;
                     }
                     self.detach(id);
-                    if let Some(node) = self.nodes.get_mut(id as usize) { *node = None; }
+                    self.composites.borrow_mut().invalidate(id);
+                    self.canvas_pending.retain(|pending| *pending != id);
+                    if let Some(node) = self.nodes.get_mut(id as usize) {
+                        *node = None;
+                    }
                     self.autofocus_seen.retain(|&seen| seen != id);
                     self.canvas_dirty.retain(|&dirty| dirty != id);
                 }
                 MountItem::Frame { id, frame } => {
                     let now = self.now;
                     if let Some(node) = self.node_mut(id) {
-                        let transition = layout.as_ref().and_then(|a| a.update.as_ref());
+                        let transition = (!matches!(
+                            node.kind,
+                            ViewKind::Screen
+                                | ViewKind::Modal
+                                | ViewKind::Stack
+                                | ViewKind::HeaderItem
+                        ))
+                        .then(|| layout.as_ref().and_then(|a| a.update.as_ref()))
+                        .flatten();
                         if transition.is_some() || node.motion.is_some() {
-                            let from = node.motion.as_ref().map_or(node.frame, |motion| motion.frame(node.frame, now));
-                            node.motion.get_or_insert_with(Box::default).frame_changed(from, transition, now);
+                            let from = node
+                                .motion
+                                .as_ref()
+                                .map_or(node.frame, |motion| motion.frame(node.frame, now));
+                            node.motion
+                                .get_or_insert_with(Box::default)
+                                .frame_changed(from, transition, now);
                         }
                         node.frame = frame;
-                        if node.kind == ViewKind::Scroll { scrolls.push(id); }
+                        if node.kind == ViewKind::Scroll {
+                            scrolls.push(id);
+                        }
+                    }
+                    let requests = self
+                        .node_mut(id)
+                        .map(|node| {
+                            node.image.resize(Size {
+                                width: frame.width,
+                                height: frame.height,
+                            })
+                        })
+                        .unwrap_or_default();
+                    for request in requests {
+                        self.request_view_image(id, request);
                     }
                     self.dirty_canvas(id);
                 }
                 MountItem::ViewStyle { id, style } => {
                     let now = self.now;
                     if let Some(node) = self.node_mut(id) {
-                        if style.transition.is_some() || style.animation.is_some() || node.motion.is_some() {
-                            let from = node.motion.as_ref().map_or_else(|| (*node.style).clone(), |motion| motion.sample(node.frame, &node.style, now).style.into_owned());
-                            node.motion.get_or_insert_with(Box::default).style_changed(&from, &style, now);
+                        if style.transition.is_some()
+                            || style.animation.is_some()
+                            || node.motion.is_some()
+                        {
+                            let from = node.motion.as_ref().map_or_else(
+                                || (*node.style).clone(),
+                                |motion| {
+                                    motion
+                                        .sample(node.frame, &node.style, now)
+                                        .style
+                                        .into_owned()
+                                },
+                            );
+                            node.motion
+                                .get_or_insert_with(Box::default)
+                                .style_changed(&from, &style, now);
                         }
                         node.style = style;
                     }
                 }
-                MountItem::ViewProps { id, props } => if let Some(node) = self.node_mut(id) { node.props = props; },
-                MountItem::AccessibilityLabel { id, label } => if let Some(node) = self.node_mut(id) { node.props.accessibility.label = label; },
-                MountItem::TrackStates { id, states } => if let Some(node) = self.node_mut(id) { node.tracked = states; tracked.push(id); },
-                MountItem::Events { id, events } => if let Some(node) = self.node_mut(id) { node.events = events; },
-                MountItem::Text { id, text, layout, content } => if let Some(node) = self.node_mut(id) {
-                    node.editor.label_text(&text.text);
-                    node.text = Some((text, layout, content));
-                },
-                MountItem::Input { id, config } => if let Some(node) = self.node_mut(id) { node.input = *config; },
-                MountItem::InputValue { id, text, count } => self.input_value(id, text, count),
-                MountItem::InputContent { id, content } => if let Some(node) = self.node_mut(id) { node.input_content = content; },
-                MountItem::ScrollConfig { id, horizontal, shows_indicator, scroll_value, mirrored, .. } => if let Some(node) = self.node_mut(id) {
-                    node.scroll.horizontal = horizontal; node.scroll.shows_indicator = shows_indicator;
-                    node.scroll.scroll_value = scroll_value; node.scroll.mirrored = mirrored;
-                },
-                MountItem::ScrollContent { id, size } => if let Some(node) = self.node_mut(id) { node.scroll.content = size; scrolls.push(id); },
-                MountItem::ScrollBehavior { id, behavior } => if let Some(node) = self.node_mut(id) {
-                    node.scroll.enabled = behavior.enabled; node.scroll.behavior = behavior; scrolls.push(id);
-                },
-                MountItem::ScrollBy { id, dx, dy } => {
+                MountItem::ViewProps { id, props } => {
                     if let Some(node) = self.node_mut(id) {
-                        node.scroll.count = node.scroll.count.wrapping_add(1);
-                        let (x, y) = (node.scroll.x + dx, node.scroll.y + dy);
-                        self.scroll_to(id, x, y);
+                        node.props = props;
                     }
                 }
-                MountItem::StickyCells { id, cells } => if let Some(node) = self.node_mut(id) { node.scroll.sticky = cells; },
+                MountItem::AccessibilityLabel { id, label } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.props.accessibility.label = label;
+                    }
+                }
+                MountItem::TrackStates { id, states } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.tracked = states;
+                        tracked.push(id);
+                    }
+                }
+                MountItem::Events { id, events } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.events = events;
+                    }
+                }
+                MountItem::Text {
+                    id,
+                    text,
+                    layout,
+                    content,
+                } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.editor.label_text(&text.text);
+                        node.text = Some((text, layout, content));
+                    }
+                }
+                MountItem::Input { id, config } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.input = *config;
+                    }
+                }
+                MountItem::InputValue { id, text, count } => self.input_value(id, text, count),
+                MountItem::InputContent { id, content } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.input_content = content;
+                    }
+                }
+                MountItem::ScrollConfig {
+                    id,
+                    horizontal,
+                    shows_indicator,
+                    scroll_value,
+                    mirrored,
+                    keyboard_dismiss,
+                } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.scroll.horizontal = horizontal;
+                        node.scroll.shows_indicator = shows_indicator;
+                        node.scroll.scroll_value = scroll_value;
+                        node.scroll.mirrored = mirrored;
+                    }
+                    self.set_scroll_keyboard_dismiss(id, keyboard_dismiss);
+                }
+                MountItem::ScrollContent { id, size } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.scroll.content = size;
+                        scrolls.push(id);
+                    }
+                }
+                MountItem::ScrollBehavior { id, behavior } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.scroll.enabled = behavior.enabled;
+                        node.scroll.behavior = behavior;
+                        scrolls.push(id);
+                    }
+                }
+                MountItem::ScrollBy { id, dx, dy } => self.adjust_scroll(id, dx, dy),
+                MountItem::StickyCells { id, cells } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.scroll.sticky = cells;
+                    }
+                }
                 MountItem::Keymap(keymap) => self.keymap = keymap,
-                MountItem::ScreenConfig { id, config } => if let Some(node) = self.node_mut(id) { node.screen = *config; },
-                MountItem::ModalConfig { id, config } => if let Some(node) = self.node_mut(id) { node.modal = config; },
-                MountItem::Appearance { appearance } => self.dark = appearance.resolve(if self.dark { nsh_core::platform::ColorScheme::Dark } else { nsh_core::platform::ColorScheme::Light }) == nsh_core::platform::ColorScheme::Dark,
+                MountItem::ScreenConfig { id, config } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.screen = *config;
+                    }
+                }
+                MountItem::ModalConfig { id, config } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.modal = config;
+                    }
+                }
+                MountItem::Appearance { appearance } => {
+                    self.dark = appearance.resolve(if self.dark {
+                        nsh_core::platform::ColorScheme::Dark
+                    } else {
+                        nsh_core::platform::ColorScheme::Light
+                    }) == nsh_core::platform::ColorScheme::Dark
+                }
                 MountItem::Animation(op) => self.animation.apply(op, &mut finished),
-                MountItem::AnimationBindings { id, bindings } => if let Some(node) = self.node_mut(id) { node.bindings = bindings; },
-                MountItem::Gestures { id, values } => if let Some(node) = self.node_mut(id) { node.gestures = values; },
+                MountItem::AnimationBindings { id, bindings } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.bindings = bindings;
+                    }
+                }
+                MountItem::Gestures { id, values } => {
+                    if let Some(node) = self.node_mut(id) {
+                        node.gestures = values;
+                    }
+                }
                 MountItem::Canvas { id, drawing } => {
-                    let images: Vec<_> = drawing.images().map(|image| image.uri.to_string()).collect();
-                    if let Some(node) = self.node_mut(id) { node.drawing = Some(drawing); }
-                    for uri in images { self.request_image(uri, None, None); }
+                    let images: Vec<_> = drawing
+                        .images()
+                        .map(|image| image.uri.to_string())
+                        .collect();
+                    if let Some(node) = self.node_mut(id) {
+                        node.drawing = Some(drawing);
+                    }
+                    for uri in images {
+                        self.request_image(uri, None);
+                    }
                     self.dirty_canvas(id);
                 }
-                MountItem::Image { id, source, resize_mode, .. } => {
-                    if let Some(node) = self.node_mut(id) { node.image_source = source.clone(); node.resize_mode = resize_mode; node.image_raster = None; node.image_animation = None; }
-                    if let Some(source) = source { self.request_image(source.uri.to_string(), Some(id), None); }
+                MountItem::Image {
+                    id,
+                    source,
+                    resize_mode,
+                    options,
+                } => {
+                    let now = self.now;
+                    let requests = self
+                        .node_mut(id)
+                        .map(|node| node.image.update(source, resize_mode, options, now))
+                        .unwrap_or_default();
+                    for request in requests {
+                        self.request_view_image(id, request);
+                    }
                 }
                 MountItem::Component { id, name } => {
                     let native = self.components.create(&name);
-                    if let Some(node) = self.node_mut(id) { node.native = native; }
+                    if let Some(node) = self.node_mut(id) {
+                        node.native = native;
+                    }
                     self.component_size(id);
                 }
                 MountItem::ComponentProps { id, props } => {
                     for (name, value) in props {
-                        let response = self.node_mut(id).and_then(|node| node.native.as_mut()).map(|component| component.set_prop(&name, value.as_ref()));
-                        if let Some(response) = response { self.component_response(id, response); }
+                        let response = self
+                            .node_mut(id)
+                            .and_then(|node| node.native.as_mut())
+                            .map(|component| component.set_prop(&name, value.as_ref()));
+                        if let Some(response) = response {
+                            self.component_response(id, response);
+                        }
                     }
                     self.component_size(id);
                 }
                 MountItem::Command { id, command } => self.command(id, command),
-                MountItem::NativeProps { id, .. } => self.emit(id, EventKind::Error, EventPayload::Error { message: "This terminal surface presents web and video content through host components".to_owned() }),
-                MountItem::Overflow { .. } | MountItem::LayoutDirection { .. } | MountItem::Refreshing { .. } => {}
+                MountItem::NativeProps { id, props } => self.set_media(id, props),
+                MountItem::Refreshing { id, refreshing } => self.set_refreshing(id, refreshing),
+                MountItem::Overflow { .. } | MountItem::LayoutDirection { .. } => {}
             }
         }
         if !finished.is_empty() {
@@ -579,6 +927,7 @@ impl Surface {
         for id in scrolls {
             self.clamp_scroll(id);
         }
+        self.navigation_reconcile();
         self.reconcile_focus();
         for id in tracked {
             self.refresh_input_states(id);
@@ -588,14 +937,33 @@ impl Surface {
     }
 
     fn command(&mut self, id: NodeId, command: Command) {
+        let now = self.now;
+        if self
+            .node_mut(id)
+            .and_then(|node| node.media.as_mut())
+            .is_some_and(|media| media.command(&command, now))
+        {
+            self.drain_media_events(id);
+            return;
+        }
         match command {
             Command::Focus | Command::AccessibilityFocus => self.set_focus(Some(id)),
             Command::Blur => self.set_focus(None),
             Command::SetSelection { start, end } => self.selection(id, start, end),
-            Command::ScrollTo { x, y, .. } => self.scroll_to(id, x, y),
-            Command::ScrollToEnd { .. } => {
+            Command::ScrollTo { x, y, animated } => self.scroll_command(id, x, y, animated),
+            Command::ZoomTo {
+                scale,
+                center,
+                animated,
+            } => self.zoom_scroll(id, scale, center, animated),
+            Command::ScrollToEnd { animated } => {
                 if let Some(node) = self.node(id) {
-                    self.scroll_to(id, node.scroll.content.width, node.scroll.content.height);
+                    self.scroll_command(
+                        id,
+                        node.scroll.content.width * node.scroll.physics.zoom,
+                        node.scroll.content.height * node.scroll.physics.zoom,
+                        animated,
+                    );
                 }
             }
             Command::Back => self.back(),
@@ -607,34 +975,10 @@ impl Surface {
             Command::Toast { text, long } => {
                 self.toast = Some((text, self.now + if long { 5.0 } else { 2.5 }))
             }
-            Command::Announce(text) => self.toast = Some((text, self.now + 5.0)),
-            Command::SetClipboard(text) => {
-                if self.access.allows_clipboard() {
-                    self.clipboard = text;
-                }
-            }
-            Command::ReadClipboard { id, has_only } => {
-                let allowed = self.access.allows_clipboard();
-                let mut fields = vec![
-                    ("id", PayloadValue::Number(id as f64)),
-                    (
-                        "has",
-                        PayloadValue::Bool(allowed && !self.clipboard.is_empty()),
-                    ),
-                ];
-                if !has_only {
-                    fields.push((
-                        "text",
-                        PayloadValue::Str(if allowed {
-                            self.clipboard.clone()
-                        } else {
-                            String::new()
-                        }),
-                    ));
-                }
-                self.emit(ROOT_ID, EventKind::Clipboard, EventPayload::Map(fields));
-            }
-            Command::ImageInfo { id, uri } => self.request_image(uri, None, Some(id)),
+            Command::Announce(text) => self.announce(text),
+            Command::SetClipboard(text) => self.write_clipboard(text),
+            Command::ReadClipboard { id, has_only } => self.read_clipboard(id, has_only),
+            Command::ImageInfo { id, uri } => self.request_image(uri, Some(id)),
             Command::Native { name, args } => {
                 let response = self
                     .node_mut(id)
@@ -645,11 +989,7 @@ impl Surface {
                 }
                 self.component_size(id);
             }
-            Command::Desktop(command) => {
-                if *command == nsh_core::desktop::DesktopCommand::Close {
-                    self.quit = true;
-                }
-            }
+            Command::Desktop(command) => self.desktop_command(*command),
             Command::StatusBar(_)
             | Command::SetStatusBar(_)
             | Command::LayoutAnimation(_)
@@ -660,99 +1000,15 @@ impl Surface {
     }
 
     pub(crate) fn scroll_to(&mut self, id: NodeId, x: f32, y: f32) {
-        let Some(node) = self.node_mut(id) else {
-            return;
-        };
-        let inset = node.scroll.behavior.content_inset;
-        let x = x.clamp(
-            -inset.left,
-            (node.scroll.content.width - node.frame.width + inset.right).max(-inset.left),
-        );
-        let y = y.clamp(
-            -inset.top,
-            (node.scroll.content.height - node.frame.height + inset.bottom).max(-inset.top),
-        );
-        node.scroll.x = x;
-        node.scroll.y = y;
-        let (count, value, horizontal) = (
-            node.scroll.count,
-            node.scroll.scroll_value,
-            node.scroll.horizontal,
-        );
-        if let Some(value) = value {
-            let mut finished = Vec::new();
-            self.animation
-                .set(value, if horizontal { x } else { y }, &mut finished);
-            if !finished.is_empty() {
-                self.events.push(SurfaceEvent::AnimationsFinished(finished));
-            }
-        }
-        self.events.push(SurfaceEvent::Scroll(id, x, y, count));
+        self.scroll_jump(id, x, y);
     }
 
     fn clamp_scroll(&mut self, id: NodeId) {
-        let Some(node) = self.node(id) else {
-            return;
-        };
-        let inset = node.scroll.behavior.content_inset;
-        let x = node.scroll.x.clamp(
-            -inset.left,
-            (node.scroll.content.width - node.frame.width + inset.right).max(-inset.left),
-        );
-        let y = node.scroll.y.clamp(
-            -inset.top,
-            (node.scroll.content.height - node.frame.height + inset.bottom).max(-inset.top),
-        );
-        if (x, y) != (node.scroll.x, node.scroll.y) {
-            self.scroll_to(id, x, y);
-        }
+        self.clamp_scroll_state(id);
     }
 
     pub(crate) fn back(&mut self) {
-        let ids = self.visible_ids();
-        for id in ids.iter().rev().copied() {
-            if let Some(node) = self.node(id)
-                && node.kind == ViewKind::Stack
-            {
-                let screens: Vec<_> = node
-                    .children
-                    .iter()
-                    .copied()
-                    .filter(|&c| {
-                        self.node(c)
-                            .is_some_and(|n| n.kind == ViewKind::Screen && !n.popped)
-                    })
-                    .collect();
-                if screens.len() > 1 {
-                    let top = *screens.last().expect("nonempty screens");
-                    if self.node(top).is_some_and(|n| n.screen.prevent_back) {
-                        self.emit(top, EventKind::BackRequest, EventPayload::None);
-                    } else {
-                        if let Some(node) = self.node_mut(top) {
-                            node.popped = true;
-                        }
-                        self.emit(top, EventKind::Dismiss, EventPayload::None);
-                    }
-                    self.reconcile_focus();
-                    return;
-                }
-            }
-        }
-        if let Some(id) = ids
-            .into_iter()
-            .rev()
-            .find(|&id| self.node(id).is_some_and(|n| n.kind == ViewKind::Modal))
-        {
-            let dismissible = self.node(id).is_some_and(|n| n.modal.dismissible);
-            self.emit(id, EventKind::RequestClose, EventPayload::None);
-            if dismissible {
-                if let Some(node) = self.node_mut(id) {
-                    node.popped = true;
-                }
-                self.emit(id, EventKind::Dismiss, EventPayload::None);
-                self.reconcile_focus();
-            }
-        }
+        self.navigation_back();
     }
 
     /// Advances native animations and polls completed image/canvas jobs.
@@ -761,7 +1017,9 @@ impl Surface {
         self.now = now;
         let mut finished = Vec::new();
         let mut changed = self.animation.tick(now, &mut finished);
+        changed |= self.navigation_tick();
         changed |= self.tick_motion();
+        changed |= self.tick_scroll(now);
         changed |= self.input_tick();
         if !finished.is_empty() {
             self.events.push(SurfaceEvent::AnimationsFinished(finished));
@@ -770,7 +1028,26 @@ impl Surface {
             self.toast = None;
             changed = true;
         }
+        changed |= self.tick_media();
         changed |= self.poll_graphics();
+        let revision = self.fonts.revision();
+        if revision != self.fonts_revision {
+            self.fonts_revision = revision;
+            let ids: Vec<_> = self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(id, n)| {
+                    n.as_ref()
+                        .filter(|n| n.drawing.is_some())
+                        .map(|_| id as NodeId)
+                })
+                .collect();
+            for id in ids {
+                self.dirty_canvas(id);
+            }
+            changed = true;
+        }
         changed |= self.tick_images();
         self.update_canvas_args();
         self.schedule_graphics();
@@ -780,16 +1057,19 @@ impl Surface {
     /// Whether an animation or a temporary overlay needs another frame.
     pub fn animating(&self) -> bool {
         self.animation.is_animating()
+            || self.navigation_animating()
+            || self.scroll_animating()
+            || self.composites.borrow().pending()
             || self.input_pending()
             || self.toast.is_some()
             || !self.canvas_pending.is_empty()
             || !self.pending_images.is_empty()
+            || !self.pending_blurs.is_empty()
             || self.protocol.pending()
             || self.nodes.iter().flatten().any(|n| {
-                n.motion.as_ref().is_some_and(|m| m.active())
-                    || n.image_animation.as_ref().is_some_and(|a| {
-                        !a.finished(((self.now - n.image_started).max(0.0) * 1000.0) as u64)
-                    })
+                n.media.as_ref().is_some_and(|media| media.active())
+                    || n.motion.as_ref().is_some_and(|m| m.active())
+                    || n.image.animating(self.now)
                     || n.drawing.as_ref().is_some_and(|drawing| {
                         drawing.images().any(|image| {
                             self.image_cache
@@ -805,6 +1085,9 @@ impl Surface {
     }
 
     fn is_dying(&self, id: NodeId) -> bool {
+        if self.navigation_retains(id) {
+            return true;
+        }
         let mut current = Some(id);
         while let Some(id) = current {
             let Some(node) = self.node(id) else {
@@ -838,27 +1121,35 @@ impl Surface {
             }
         }
         for id in due {
-            self.detach(id);
-            let mut descendants = vec![id];
-            let mut index = 0;
-            while index < descendants.len() {
-                if let Some(node) = self.node(descendants[index]) {
-                    descendants.extend(node.children.iter().copied());
-                }
-                index += 1;
-            }
-            for id in descendants.into_iter().rev() {
-                if self.node(id).is_some_and(|node| node.delete_pending) {
-                    self.nodes[id as usize] = None;
-                } else if let Some(node) = self.node_mut(id) {
-                    node.motion = None;
-                }
-            }
+            self.finish_retained_removal(id);
         }
         if changed {
             self.reconcile_focus();
         }
         changed
+    }
+
+    pub(crate) fn finish_retained_removal(&mut self, id: NodeId) {
+        self.detach(id);
+        let mut descendants = vec![id];
+        let mut index = 0;
+        while index < descendants.len() {
+            if let Some(node) = self.node(descendants[index]) {
+                descendants.extend(node.children.iter().copied());
+            }
+            index += 1;
+        }
+        for id in descendants.into_iter().rev() {
+            if self.node(id).is_some_and(|node| node.delete_pending) {
+                self.nodes[id as usize] = None;
+                self.composites.borrow_mut().invalidate(id);
+                self.canvas_pending.retain(|pending| *pending != id);
+                self.autofocus_seen.retain(|seen| *seen != id);
+                self.canvas_dirty.retain(|dirty| *dirty != id);
+            } else if let Some(node) = self.node_mut(id) {
+                node.motion = None;
+            }
+        }
     }
 
     pub(crate) fn animated_style(&self, id: NodeId) -> ViewStyle {
@@ -906,6 +1197,7 @@ impl Surface {
         if let Some(motion) = &node.motion {
             style.opacity *= motion.appearance(self.now).0;
         }
+        style.opacity *= self.navigation_values(id).2;
         style
     }
 
@@ -916,6 +1208,7 @@ impl Surface {
         self.collect_layer(ROOT_ID, &mut result, &mut modals, true);
         let mut index = 0;
         while index < modals.len() {
+            self.navigation_order_modals(&mut modals[index..]);
             self.collect_layer(modals[index], &mut result, &mut modals, true);
             index += 1;
         }
@@ -932,7 +1225,9 @@ impl Surface {
         let Some(node) = self.node(id) else {
             return;
         };
-        if node.popped || node.style.hidden {
+        if (node.popped && !self.navigation_draws_screen(node.parent.unwrap_or(ROOT_ID), id))
+            || node.style.hidden
+        {
             return;
         }
         if node.kind == ViewKind::Modal && !layer_root {
@@ -952,7 +1247,9 @@ impl Surface {
         let mut headers = Vec::new();
         for &child in &node.children {
             if top.is_some_and(|top| {
-                top != child && self.node(child).is_some_and(|n| n.kind == ViewKind::Screen)
+                top != child
+                    && self.node(child).is_some_and(|n| n.kind == ViewKind::Screen)
+                    && !self.navigation_draws_screen(id, child)
             }) {
                 continue;
             }
@@ -975,7 +1272,7 @@ impl Surface {
         let Some(node) = self.node(id) else {
             return;
         };
-        if node.popped || node.style.hidden || self.is_dying(id) {
+        if node.popped || node.style.hidden || self.is_dying(id) || !self.navigation_accepts(id) {
             return;
         }
         result.push(id);
@@ -1010,11 +1307,13 @@ impl Surface {
             self.collect_visible(modal, &mut active);
             active
         } else {
-            ids.into_iter().filter(|&id| !self.is_dying(id)).collect()
+            ids.into_iter()
+                .filter(|&id| !self.is_dying(id) && self.navigation_accepts(id))
+                .collect()
         }
     }
 
-    fn presentation_frame(&self, id: NodeId) -> Option<Rect> {
+    pub(crate) fn presentation_frame(&self, id: NodeId) -> Option<Rect> {
         let node = self.node(id)?;
         let mut frame = node.motion.as_ref().map_or(node.frame, |motion| {
             motion.sample(node.frame, &node.style, self.now).frame
@@ -1025,7 +1324,10 @@ impl Surface {
                 .and_then(|id| self.node(id))
                 .filter(|node| node.kind == ViewKind::Screen)
         {
-            let height = screen.screen.header_height.max(self.metrics.height());
+            let height = self
+                .navigation_header(node.parent?)
+                .bar_height
+                .max(self.metrics.height());
             frame.y = ((height - frame.height) / 2.0).max(0.0);
             let edge = self.metrics.width();
             frame.x = if screen.screen.right == Some(id) {
@@ -1036,110 +1338,12 @@ impl Surface {
                 edge
             };
         }
-        Some(frame)
-    }
-
-    pub(crate) fn global_frame(&self, id: NodeId) -> Option<Rect> {
-        let mut frame = self.presentation_frame(id)?;
-        let mut current = id;
-        loop {
-            let node = self.node(current)?;
-            let target_frame = self.presentation_frame(current)?;
-            let style = self.animated_style(current);
-            let mut m = style.transform.matrix(|_| None);
-            if let Some(motion) = &node.motion {
-                let extra = motion.appearance(self.now).1;
-                m = m.mul(&nsh_core::Matrix::of(
-                    TransformKind::TranslateY,
-                    (extra.shift_y_fraction * target_frame.height) as f64,
-                ));
-                m = m.mul(&nsh_core::Matrix::of(
-                    TransformKind::Rotate,
-                    extra.rotate_degrees as f64,
-                ));
-                m = m.mul(&nsh_core::Matrix::of(
-                    TransformKind::Scale,
-                    extra.scale as f64,
-                ));
-            }
-            let origin = (
-                style.transform_origin.x.resolve(target_frame.width),
-                style.transform_origin.y.resolve(target_frame.height),
-            );
-            let points = [
-                (frame.x, frame.y),
-                (frame.x + frame.width, frame.y),
-                (frame.x, frame.y + frame.height),
-                (frame.x + frame.width, frame.y + frame.height),
-            ];
-            let mut bounds = (
-                f32::INFINITY,
-                f32::INFINITY,
-                f32::NEG_INFINITY,
-                f32::NEG_INFINITY,
-            );
-            for (x, y) in points {
-                let x0 = (x - target_frame.x - origin.0) as f64;
-                let y0 = (y - target_frame.y - origin.1) as f64;
-                let w = x0 * m.0[3] + y0 * m.0[7] + m.0[15];
-                let w = if w.abs() < f64::EPSILON { 1.0 } else { w };
-                let x =
-                    ((x0 * m.0[0] + y0 * m.0[4] + m.0[12]) / w) as f32 + target_frame.x + origin.0;
-                let y =
-                    ((x0 * m.0[1] + y0 * m.0[5] + m.0[13]) / w) as f32 + target_frame.y + origin.1;
-                bounds.0 = bounds.0.min(x);
-                bounds.1 = bounds.1.min(y);
-                bounds.2 = bounds.2.max(x);
-                bounds.3 = bounds.3.max(y);
-            }
-            frame = Rect {
-                x: bounds.0,
-                y: bounds.1,
-                width: bounds.2 - bounds.0,
-                height: bounds.3 - bounds.1,
-            };
-            if node.kind == ViewKind::Modal {
-                break;
-            }
-            let Some(parent) = node.parent else {
-                break;
-            };
-            let parent_node = self.node(parent)?;
-            let sticky = parent_node
-                .scroll
-                .sticky
-                .iter()
-                .find(|sticky| sticky.cell == current)
-                .map(|sticky| {
-                    let offset = if parent_node.scroll.horizontal {
-                        parent_node.scroll.x
-                    } else {
-                        parent_node.scroll.y
-                    };
-                    (offset - sticky.start).clamp(0.0, (sticky.end - sticky.start).max(0.0))
-                })
-                .unwrap_or(0.0);
-            let parent_frame = self.presentation_frame(parent)?;
-            let offset_x = target_frame.x - parent_node.scroll.x
-                + if parent_node.scroll.horizontal {
-                    sticky
-                } else {
-                    0.0
-                };
-            let child_x = if parent_node.scroll.mirrored {
-                parent_frame.width - offset_x - target_frame.width
-            } else {
-                offset_x
-            };
-            frame.x += parent_frame.x + child_x - target_frame.x;
-            frame.y += parent_frame.y - parent_node.scroll.y
-                + if parent_node.scroll.horizontal {
-                    0.0
-                } else {
-                    sticky
-                };
-            current = parent;
+        if node.kind == ViewKind::Modal {
+            frame = self.modal_frame(id, frame);
         }
+        let (x, y, _) = self.navigation_values(id);
+        frame.x += x;
+        frame.y += y;
         Some(frame)
     }
 
@@ -1162,7 +1366,11 @@ impl Surface {
             let Some(node) = self.node(id) else {
                 break;
             };
-            if (node.kind == ViewKind::Scroll || node.style.overflow_hidden)
+            if (matches!(node.kind, ViewKind::Scroll | ViewKind::Stack)
+                || (node.kind == ViewKind::Modal
+                    && !node.modal.transparent
+                    && node.modal.presentation != nsh_core::ModalPresentation::FullScreen)
+                || node.style.overflow_hidden)
                 && let Some(frame) = self.global_frame(id)
             {
                 clip = intersect(clip, frame);
@@ -1197,19 +1405,43 @@ impl Surface {
                 ) {
                     return false;
                 }
+                if (matches!(ancestor.kind, ViewKind::Scroll | ViewKind::Stack)
+                    || (ancestor.kind == ViewKind::Modal
+                        && !ancestor.modal.transparent
+                        && ancestor.modal.presentation != nsh_core::ModalPresentation::FullScreen)
+                    || ancestor.style.overflow_hidden)
+                    && !self.surface_to_local(id, x, y).is_some_and(|(x, y)| {
+                        self.presentation_frame(id).is_some_and(|frame| {
+                            crate::composite::rounded_contains(
+                                Size {
+                                    width: frame.width,
+                                    height: frame.height,
+                                },
+                                self.animated_style(id).radii(),
+                                x,
+                                y,
+                            )
+                        })
+                    })
+                {
+                    return false;
+                }
                 if ancestor.kind == ViewKind::Modal {
                     break;
                 }
                 parent = ancestor.parent;
             }
-            let Some(mut frame) = self.global_frame(id) else {
+            let Some(mut frame) = self.presentation_frame(id) else {
                 return false;
             };
-            frame.x -= node.props.hit_slop.left;
-            frame.y -= node.props.hit_slop.top;
+            let Some((local_x, local_y)) = self.surface_to_local(id, x, y) else {
+                return false;
+            };
+            frame.x = -node.props.hit_slop.left;
+            frame.y = -node.props.hit_slop.top;
             frame.width += node.props.hit_slop.left + node.props.hit_slop.right;
             frame.height += node.props.hit_slop.top + node.props.hit_slop.bottom;
-            contains(intersect(frame, self.clip_rect(id)), x, y)
+            contains(frame, local_x, local_y) && contains(self.clip_rect(id), x, y)
         })
     }
 
@@ -1273,42 +1505,89 @@ impl Surface {
                     })
                 })
                 .collect();
-            self.graphics.canvas(
+            self.graphics.canvas(crate::worker::CanvasRequest {
                 id,
+                generation: node.generation,
+                epoch: self.canvas_epoch,
                 drawing,
-                node.canvas_args.clone(),
-                node.frame.width,
-                node.frame.height,
+                args: node.canvas_args.clone(),
+                size: Size {
+                    width: node.frame.width,
+                    height: node.frame.height,
+                },
                 images,
-            );
+            });
             self.canvas_pending.push(id);
         }
         self.canvas_dirty = remaining;
     }
 
-    fn request_image(&mut self, uri: String, node: Option<NodeId>, request: Option<u32>) {
-        if let Some(raster) = self
+    fn request_image(&mut self, uri: String, request: Option<u32>) {
+        if !self.access.allows_media(&uri) {
+            if let Some(id) = request {
+                self.image_answer(id, Err("Image access was denied"));
+            }
+            return;
+        }
+        if let Some(animation) = self
             .image_cache
             .get(&uri)
             .map(|cached| cached.animation.clone())
         {
-            if let Some(id) = node {
-                self.install_image(id, &uri, raster.clone());
-            }
             if let Some(id) = request {
-                self.image_answer(id, Ok(&raster.frames[0]));
+                self.image_answer(id, Ok(&animation.frames[0]));
+            }
+            return;
+        }
+        if !self.pending_images.contains_key(&uri) && self.pending_images.len() >= 128 {
+            if let Some(id) = request {
+                self.image_answer(id, Err("Too many pending terminal images"));
             }
             return;
         }
         let loading = self.pending_images.contains_key(&uri);
         let pending = self.pending_images.entry(uri.clone()).or_default();
-        if let Some(id) = node {
-            pending.views.push(id);
-        }
         if let Some(id) = request {
             pending.requests.push(id);
         }
-        if let Some(id) = node {
+        if !loading {
+            self.graphics
+                .image(uri, self.assets.clone(), self.access.clone());
+        }
+    }
+
+    fn request_view_image(&mut self, id: NodeId, request: crate::image_state::ImageRequest) {
+        if !self
+            .node(id)
+            .is_some_and(|node| node.image.accepts(&request))
+        {
+            return;
+        }
+        let uri = request.source.uri.to_string();
+        if !self.access.allows_media(&uri) {
+            self.fail_view_image(id, &request, "Image access was denied".to_owned());
+            return;
+        }
+        if let Some(animation) = self
+            .image_cache
+            .get(&uri)
+            .map(|cached| cached.animation.clone())
+        {
+            self.prepare_view_image(id, request, animation, true);
+            return;
+        }
+        if !self.pending_images.contains_key(&uri) && self.pending_images.len() >= 128 {
+            self.fail_view_image(id, &request, "Too many pending terminal images".to_owned());
+            return;
+        }
+        let loading = self.pending_images.contains_key(&uri);
+        let pending = self.pending_images.entry(uri.clone()).or_default();
+        pending
+            .views
+            .retain(|(node, old)| *node != id || old.role != request.role);
+        let main = request.role == crate::image_state::ImageRole::Main;
+        pending.views.push((id, request));
+        if main {
             self.emit(id, EventKind::LoadStart, EventPayload::None);
         }
         if !loading {
@@ -1317,23 +1596,80 @@ impl Surface {
         }
     }
 
-    fn install_image(&mut self, id: NodeId, uri: &str, animation: Arc<AnimatedRaster>) {
-        let now = self.now;
-        if let Some(node) = self.node_mut(id)
-            && node
-                .image_source
-                .as_ref()
-                .is_some_and(|source| source.uri.as_ref() == uri)
+    fn prepare_view_image(
+        &mut self,
+        id: NodeId,
+        request: crate::image_state::ImageRequest,
+        animation: Arc<AnimatedRaster>,
+        cached: bool,
+    ) {
+        if !self
+            .node(id)
+            .is_some_and(|node| node.image.accepts(&request))
         {
-            let raster = animation.frames[0].clone();
-            let payload = EventPayload::Image {
-                width: raster.width as f32,
-                height: raster.height as f32,
-            };
-            node.image_raster = Some(raster);
-            node.image_animation = Some(animation);
-            node.image_started = now;
-            self.emit(id, EventKind::Load, payload);
+            return;
+        }
+        if request.blur_radius > 0.0 {
+            if !self
+                .pending_blurs
+                .iter()
+                .any(|(node, old)| *node == id && old.role == request.role)
+            {
+                self.pending_blurs.push((id, request.clone()));
+                self.graphics.blur(id, request, animation);
+            }
+        } else {
+            self.install_image(id, &request, animation, cached);
+        }
+    }
+
+    fn install_image(
+        &mut self,
+        id: NodeId,
+        request: &crate::image_state::ImageRequest,
+        animation: Arc<AnimatedRaster>,
+        cached: bool,
+    ) {
+        if !self.access.allows_media(&request.source.uri) {
+            return;
+        }
+        let now = self.now;
+        let dimensions = (animation.frames[0].width, animation.frames[0].height);
+        let first = self
+            .node(id)
+            .is_some_and(|node| node.image.presentation(now).main.is_none());
+        let installed = self.node_mut(id).is_some_and(|node| {
+            if cached {
+                node.image.install_cached(request, animation, now)
+            } else {
+                node.image.install(request, animation, now)
+            }
+        });
+        if installed && first && request.role == crate::image_state::ImageRole::Main {
+            self.emit(
+                id,
+                EventKind::Load,
+                EventPayload::Image {
+                    width: dimensions.0 as f32,
+                    height: dimensions.1 as f32,
+                },
+            );
+            self.emit(id, EventKind::LoadEnd, EventPayload::None);
+        }
+    }
+
+    fn fail_view_image(
+        &mut self,
+        id: NodeId,
+        request: &crate::image_state::ImageRequest,
+        message: String,
+    ) {
+        if self
+            .node_mut(id)
+            .is_some_and(|node| node.image.fail(request))
+            && request.role == crate::image_state::ImageRole::Main
+        {
+            self.emit(id, EventKind::Error, EventPayload::Error { message });
             self.emit(id, EventKind::LoadEnd, EventPayload::None);
         }
     }
@@ -1355,6 +1691,54 @@ impl Surface {
         while let Some(result) = self.graphics.poll() {
             changed = true;
             match result {
+                crate::worker::GraphicsResult::Composite(id, sequence, result) => {
+                    self.composites.borrow_mut().complete(id, sequence, result);
+                }
+                crate::worker::GraphicsResult::Progress(uri, loaded, total) => {
+                    let ids: Vec<_> = self
+                        .pending_images
+                        .get(&uri)
+                        .map(|pending| {
+                            pending
+                                .views
+                                .iter()
+                                .filter_map(|(id, request)| {
+                                    (request.role == crate::image_state::ImageRole::Main
+                                        && self.node(*id).is_some_and(|node| {
+                                            node.image.accepts(request)
+                                                && node.image.accepts_progress(&uri)
+                                        }))
+                                    .then_some(*id)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for id in ids {
+                        self.emit(
+                            id,
+                            EventKind::Progress,
+                            EventPayload::Map(vec![
+                                ("loaded", PayloadValue::Number(loaded as f64)),
+                                ("total", PayloadValue::Number(total as f64)),
+                            ]),
+                        );
+                    }
+                }
+                crate::worker::GraphicsResult::Blur(id, request, result) => {
+                    self.pending_blurs
+                        .retain(|(node, pending)| *node != id || pending != &request);
+                    match result {
+                        Ok(animation) => self.install_image(id, &request, animation, false),
+                        Err(message) => self.fail_view_image(id, &request, message),
+                    }
+                    let requests = self
+                        .node(id)
+                        .map(|node| node.image.requests())
+                        .unwrap_or_default();
+                    for request in requests {
+                        self.request_view_image(id, request);
+                    }
+                }
                 crate::worker::GraphicsResult::Protocol(id, sequence, result) => {
                     self.protocol.complete(id, sequence, result)
                 }
@@ -1363,6 +1747,11 @@ impl Surface {
                         views: waiters,
                         requests,
                     } = self.pending_images.remove(&uri).unwrap_or_default();
+                    let result = if self.access.allows_media(&uri) {
+                        result
+                    } else {
+                        Err("Image access was denied".to_owned())
+                    };
                     match result {
                         Ok(raster) => {
                             let raster = Arc::new(raster);
@@ -1383,8 +1772,8 @@ impl Surface {
                                     frame: 0,
                                 },
                             );
-                            for id in waiters {
-                                self.install_image(id, &uri, raster.clone());
+                            for (id, request) in waiters {
+                                self.prepare_view_image(id, request, raster.clone(), false);
                             }
                             for id in requests {
                                 self.image_answer(id, Ok(&raster.frames[0]));
@@ -1404,21 +1793,8 @@ impl Surface {
                             }
                         }
                         Err(error) => {
-                            for id in waiters {
-                                if self.node(id).is_some_and(|node| {
-                                    node.image_source
-                                        .as_ref()
-                                        .is_some_and(|source| source.uri.as_ref() == uri)
-                                }) {
-                                    self.emit(
-                                        id,
-                                        EventKind::Error,
-                                        EventPayload::Error {
-                                            message: error.clone(),
-                                        },
-                                    );
-                                    self.emit(id, EventKind::LoadEnd, EventPayload::None);
-                                }
+                            for (id, request) in waiters {
+                                self.fail_view_image(id, &request, error.clone());
                             }
                             for id in requests {
                                 self.image_answer(id, Err(&error));
@@ -1426,8 +1802,17 @@ impl Surface {
                         }
                     }
                 }
-                crate::worker::GraphicsResult::Canvas(id, result) => {
+                crate::worker::GraphicsResult::Canvas(id, generation, epoch, result) => {
+                    if !self
+                        .node(id)
+                        .is_some_and(|node| node.generation == generation)
+                    {
+                        continue;
+                    }
                     self.canvas_pending.retain(|&pending| pending != id);
+                    if epoch != self.canvas_epoch {
+                        continue;
+                    }
                     match result {
                         Ok(raster) => {
                             if let Some(node) = self.node_mut(id) {
@@ -1447,19 +1832,7 @@ impl Surface {
     fn tick_images(&mut self) -> bool {
         let mut changed = false;
         for node in self.nodes.iter_mut().flatten() {
-            let Some(animation) = &node.image_animation else {
-                continue;
-            };
-            let frame = &animation.frames
-                [animation.frame_index(((self.now - node.image_started).max(0.0) * 1000.0) as u64)];
-            if node
-                .image_raster
-                .as_ref()
-                .is_none_or(|current| !Arc::ptr_eq(current, frame))
-            {
-                node.image_raster = Some(frame.clone());
-                changed = true;
-            }
+            changed |= node.image.advance(self.now);
         }
         let mut canvas_changed = false;
         for cached in self.image_cache.values_mut() {
@@ -1577,7 +1950,15 @@ mod tests {
             slots: Vec::new(),
         }));
         assert!(surface.pending_images.is_empty() && surface.canvas_pending.is_empty());
-        assert!(surface.node(2).unwrap().image_animation.is_none());
+        assert!(
+            surface
+                .node(2)
+                .unwrap()
+                .image
+                .presentation(surface.now)
+                .main
+                .is_none()
+        );
         surface.now = 1.0;
         assert!(surface.animating());
         surface.now = 1.2;
@@ -1804,6 +2185,8 @@ mod tests {
 mod image_ownership_tests {
     use std::time::{Duration, Instant};
 
+    use nsh_core::{ImageSource, ResizeMode};
+
     use super::*;
 
     struct Assets {
@@ -1819,6 +2202,138 @@ mod image_ownership_tests {
                 Ok(self.png.clone())
             }
         }
+    }
+
+    #[test]
+    fn placeholder_paints_while_main_read_waits_then_main_reports_progress_and_fades() {
+        use ::image::ImageEncoder as _;
+        struct DelayedAssets {
+            release: crossbeam_channel::Receiver<()>,
+            main: Vec<u8>,
+            placeholder: Vec<u8>,
+        }
+        impl nsh_engine::Assets for DelayedAssets {
+            fn read(&self, uri: &str) -> Result<Vec<u8>, String> {
+                if uri == "asset:/main" {
+                    self.release
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|e| e.to_string())?;
+                    Ok(self.main.clone())
+                } else {
+                    Ok(self.placeholder.clone())
+                }
+            }
+        }
+        let png = |pixel: [u8; 4]| {
+            let mut bytes = Vec::new();
+            ::image::codecs::png::PngEncoder::new(&mut bytes)
+                .write_image(&pixel, 1, 1, ::image::ExtendedColorType::Rgba8)
+                .unwrap();
+            bytes
+        };
+        let (release, wait) = crossbeam_channel::bounded(1);
+        let mut surface = Surface::new(10, 5, CellMetrics::default());
+        surface.set_assets(Some(Arc::new(DelayedAssets {
+            release: wait,
+            main: png([255, 0, 0, 255]),
+            placeholder: png([0, 0, 255, 255]),
+        })));
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Create {
+                    id: 2,
+                    kind: ViewKind::Image,
+                },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+                MountItem::Frame {
+                    id: 2,
+                    frame: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 32.0,
+                        height: 32.0,
+                    },
+                },
+                MountItem::Image {
+                    id: 2,
+                    source: Some(ImageSource {
+                        uri: Arc::from("asset:/main"),
+                        size: None,
+                    }),
+                    resize_mode: ResizeMode::Contain,
+                    options: nsh_core::ImageOptions {
+                        placeholder: Some(ImageSource {
+                            uri: Arc::from("asset:/placeholder"),
+                            size: None,
+                        }),
+                        fade_ms: Some(500.0),
+                        ..Default::default()
+                    },
+                },
+            ],
+        });
+        let end = Instant::now() + Duration::from_secs(3);
+        while surface
+            .node(2)
+            .unwrap()
+            .image
+            .presentation(0.0)
+            .placeholder
+            .is_none()
+        {
+            assert!(
+                Instant::now() < end,
+                "placeholder was blocked by the main image read"
+            );
+            surface.tick(0.0);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            surface
+                .node(2)
+                .unwrap()
+                .image
+                .presentation(0.0)
+                .main
+                .is_none()
+        );
+        release.send(()).unwrap();
+        while surface
+            .node(2)
+            .unwrap()
+            .image
+            .presentation(0.0)
+            .main
+            .is_none()
+        {
+            assert!(Instant::now() < end, "main image did not finish");
+            surface.tick(0.0);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            surface
+                .events
+                .iter()
+                .any(|event| matches!(event, SurfaceEvent::Event(2, EventKind::Progress, _)))
+        );
+        surface.tick(0.25);
+        let layers = surface.node(2).unwrap().image.presentation(surface.now);
+        assert!(layers.placeholder.is_some());
+        assert!((layers.main.unwrap().opacity - 0.5).abs() < 0.001);
+        surface.tick(0.5);
+        assert!(
+            surface
+                .node(2)
+                .unwrap()
+                .image
+                .presentation(surface.now)
+                .placeholder
+                .is_none()
+        );
     }
 
     #[test]
@@ -1864,7 +2379,14 @@ mod image_ownership_tests {
         });
         ready.send(()).unwrap();
         let end = Instant::now() + Duration::from_secs(3);
-        while surface.node(2).unwrap().image_raster.is_none() {
+        while surface
+            .node(2)
+            .unwrap()
+            .image
+            .presentation(surface.now)
+            .main
+            .is_none()
+        {
             assert!(Instant::now() < end, "replacement image did not finish");
             surface.tick(0.0);
             std::thread::sleep(Duration::from_millis(1));
@@ -1884,7 +2406,15 @@ mod image_ownership_tests {
             1
         );
         assert_eq!(
-            surface.node(2).unwrap().image_raster.as_ref().unwrap().rgba,
+            surface
+                .node(2)
+                .unwrap()
+                .image
+                .presentation(surface.now)
+                .main
+                .unwrap()
+                .raster
+                .rgba,
             [255, 0, 0, 255]
         );
     }

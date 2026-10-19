@@ -421,6 +421,9 @@ impl CanvasFont {
 
 /// The width of `text` on one line in `font` (canvas `measureText`).
 pub fn measure_line(engine: &impl crate::text::TextEngine, font: &CanvasFont, text: &str) -> f32 {
+    if let Some(width) = engine.measure_canvas(font, text) {
+        return width;
+    }
     let mut attributed = crate::text::AttributedText {
         no_wrap: true,
         max_lines: 1,
@@ -990,6 +993,33 @@ fn arc_to_cubics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canvas_measurement_override_is_forwarded_by_shared_engines() {
+        struct CanvasOnly;
+        impl crate::TextEngine for CanvasOnly {
+            type Prepared = ();
+            fn prepare(&self, _: &crate::AttributedText) {
+                panic!("Canvas override should handle measurement");
+            }
+            fn measure(&self, _: &(), _: Option<f32>) -> crate::Size {
+                panic!("Canvas override should handle measurement");
+            }
+            fn layout(&self, _: &(), _: crate::Size) -> crate::TextLayout {
+                panic!("not used by measurement");
+            }
+            fn measure_canvas(&self, font: &CanvasFont, text: &str) -> Option<f32> {
+                Some(font.size * text.len() as f32)
+            }
+        }
+        let font = CanvasFont::parse("20px sans-serif").unwrap();
+        assert_eq!(
+            measure_line(&std::rc::Rc::new(CanvasOnly), &font, "abc"),
+            60.0
+        );
+        // Engines using the default hook retain their existing prepare/measure path.
+        assert!((measure_line(&crate::ApproxTextEngine, &font, "abc") - 33.0).abs() < 0.001);
+    }
 
     fn consts(op: &PathOp) -> Vec<f32> {
         let v = |n: &Num| match n {

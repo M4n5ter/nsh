@@ -7,8 +7,8 @@
 use std::{
     io::Read,
     path::PathBuf,
-    sync::{Arc, OnceLock},
-    time::Duration,
+    sync::{Arc, OnceLock, Weak},
+    time::{Duration, Instant},
 };
 
 use nsh_core::{Color, Rect, ResizeMode, access::Access};
@@ -22,6 +22,8 @@ const MAX_REDIRECTS: usize = 20;
 const MAX_PIXELS: u64 = 16 << 20;
 const MAX_FRAMES: usize = 600;
 const MAX_ANIMATION_BYTES: usize = 48 << 20;
+const BLUR_CACHE_BYTES: usize = 64 << 20;
+const BLUR_CACHE_ENTRIES: usize = 64;
 
 /// Decoded straight RGBA pixels, shared between mounted images and canvases.
 #[derive(Clone)]
@@ -142,6 +144,224 @@ impl Raster {
             }
         }
         out
+    }
+}
+
+/// Makes an immutable blurred display variant on a worker. Alpha is blurred
+/// premultiplied, so transparent colored pixels cannot create edge fringes.
+/// A sharp variant shares the complete original animation and every frame.
+pub(crate) fn blur_animation(
+    source: &Arc<AnimatedRaster>,
+    radii: (f32, f32),
+) -> Result<Arc<AnimatedRaster>, String> {
+    if radii.0 <= 0.0 && radii.1 <= 0.0 {
+        return Ok(source.clone());
+    }
+    if source.frames.is_empty()
+        || source.frames.len() > MAX_FRAMES
+        || (source.frames.len() > 1 && source.bytes() > MAX_ANIMATION_BYTES)
+    {
+        return Err("blur animation exceeds its frame memory limit".into());
+    }
+    let mut frames = Vec::with_capacity(source.frames.len());
+    for frame in &source.frames {
+        frames.push(Arc::new(blur_raster(frame, radii)?));
+    }
+    Ok(Arc::new(AnimatedRaster {
+        frames,
+        delays: source.delays.clone(),
+        plays: source.plays,
+    }))
+}
+
+struct BlurVariant {
+    source: Weak<AnimatedRaster>,
+    radii: (u32, u32),
+    image: Arc<AnimatedRaster>,
+    used: u64,
+}
+
+/// Shared worker-side variants. Weak source identities prevent allocator
+/// address reuse from aliasing a previous decode, without pinning raw pixels
+/// after the surface's raw-data cache releases them.
+#[derive(Default)]
+pub(crate) struct BlurCache {
+    entries: Vec<BlurVariant>,
+    clock: u64,
+}
+
+impl BlurCache {
+    pub(crate) fn blur(
+        &mut self,
+        source: &Arc<AnimatedRaster>,
+        radii: (f32, f32),
+    ) -> Result<Arc<AnimatedRaster>, String> {
+        if radii.0 <= 0.0 && radii.1 <= 0.0 {
+            return Ok(source.clone());
+        }
+        self.clock = self.clock.wrapping_add(1);
+        self.entries.retain(|entry| entry.source.strong_count() > 0);
+        let key = (radii.0.to_bits(), radii.1.to_bits());
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.radii == key && entry.source.as_ptr() == Arc::as_ptr(source))
+        {
+            entry.used = self.clock;
+            return Ok(entry.image.clone());
+        }
+        let image = blur_animation(source, radii)?;
+        let bytes = image.bytes();
+        if bytes > BLUR_CACHE_BYTES {
+            return Ok(image);
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= BLUR_CACHE_ENTRIES
+                || self
+                    .entries
+                    .iter()
+                    .map(|entry| entry.image.bytes())
+                    .sum::<usize>()
+                    .saturating_add(bytes)
+                    > BLUR_CACHE_BYTES)
+        {
+            let oldest = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(index, _)| index)
+                .expect("nonempty blur cache");
+            self.entries.swap_remove(oldest);
+        }
+        self.entries.push(BlurVariant {
+            source: Arc::downgrade(source),
+            radii: key,
+            image: image.clone(),
+            used: self.clock,
+        });
+        Ok(image)
+    }
+}
+
+fn blur_raster(source: &Raster, radii: (f32, f32)) -> Result<Raster, String> {
+    let (width, height) = (source.width as usize, source.height as usize);
+    let count = width
+        .checked_mul(height)
+        .ok_or("blur image dimensions overflow")?;
+    if width == 0
+        || height == 0
+        || count as u64 > MAX_PIXELS
+        || source.rgba.len()
+            != count
+                .checked_mul(4)
+                .ok_or("blur image dimensions overflow")?
+    {
+        return Err("blur image exceeds its pixel limit or has malformed data".into());
+    }
+    let radius = |value: f32, dimension: usize| {
+        if value.is_nan() || value <= 0.0 {
+            0.0
+        } else {
+            value.min(dimension as f32 * 2.0)
+        }
+    };
+    let rx = blur_boxes(radius(radii.0, width) * 0.5);
+    let ry = blur_boxes(radius(radii.1, height) * 0.5);
+    let mut pixels = source.rgba.clone();
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        for c in 0..3 {
+            pixel[c] = ((u32::from(pixel[c]) * u32::from(pixel[3]) + 127) / 255) as u8;
+        }
+    }
+    let mut scratch = vec![0; pixels.len()];
+    for (x, y) in rx.into_iter().zip(ry) {
+        if x > 0 {
+            box_blur(&pixels, &mut scratch, width, height, x, true);
+            std::mem::swap(&mut pixels, &mut scratch);
+        }
+        if y > 0 {
+            box_blur(&pixels, &mut scratch, width, height, y, false);
+            std::mem::swap(&mut pixels, &mut scratch);
+        }
+    }
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = u32::from(pixel[3]);
+        for channel in &mut pixel[..3] {
+            *channel = (u32::from(*channel) * 255 + alpha / 2)
+                .checked_div(alpha)
+                .unwrap_or(0)
+                .min(255) as u8;
+        }
+    }
+    Ok(Raster {
+        width: source.width,
+        height: source.height,
+        rgba: pixels,
+    })
+}
+
+/// Three odd box kernels approximate a Gaussian of the requested sigma.
+fn blur_boxes(sigma: f32) -> [usize; 3] {
+    if sigma <= 0.0 {
+        return [0; 3];
+    }
+    let sigma = f64::from(sigma);
+    let mut lower = (4.0 * sigma * sigma + 1.0).sqrt().floor() as usize;
+    if lower.is_multiple_of(2) {
+        lower = lower.saturating_sub(1);
+    }
+    let lower = lower.max(1);
+    let count = ((12.0 * sigma * sigma - 3.0 * (lower * lower) as f64 - 12.0 * lower as f64 - 9.0)
+        / (-4.0 * lower as f64 - 4.0))
+        .round()
+        .clamp(0.0, 3.0) as usize;
+    std::array::from_fn(|i| {
+        if i < count {
+            lower / 2
+        } else {
+            (lower + 2) / 2
+        }
+    })
+}
+
+fn box_blur(
+    source: &[u8],
+    destination: &mut [u8],
+    width: usize,
+    height: usize,
+    radius: usize,
+    horizontal: bool,
+) {
+    let (lines, length, step) = if horizontal {
+        (height, width, 4)
+    } else {
+        (width, height, width * 4)
+    };
+    let count = (radius * 2 + 1) as u64;
+    for line in 0..lines {
+        let base = if horizontal {
+            line * width * 4
+        } else {
+            line * 4
+        };
+        let sample =
+            |index: usize, c: usize| u64::from(source[base + index.min(length - 1) * step + c]);
+        let mut sum = [0u64; 4];
+        for (c, value) in sum.iter_mut().enumerate() {
+            *value = sample(0, c) * (radius + 1) as u64;
+            for index in 1..=radius {
+                *value += sample(index, c);
+            }
+        }
+        for index in 0..length {
+            let out = base + index * step;
+            for c in 0..4 {
+                destination[out + c] = ((sum[c] + count / 2) / count) as u8;
+                sum[c] = sum[c] + sample(index + radius + 1, c)
+                    - sample(index.saturating_sub(radius), c);
+            }
+        }
     }
 }
 
@@ -285,13 +505,14 @@ fn still(raster: Raster) -> AnimatedRaster {
     }
 }
 
-/// Reads and decodes every retained frame on a worker.
-pub(crate) fn load_animation(
+/// Reads on a worker and reports bounded progress before decoding frames.
+pub(crate) fn load_animation_with_progress(
     uri: &str,
     base: Option<&AssetBase>,
     access: &Access,
+    progress: &mut dyn FnMut(u64, u64),
 ) -> Result<AnimatedRaster, String> {
-    read_bytes(uri, base, access).and_then(|bytes| decode_animation(&bytes))
+    read_bytes_with_progress(uri, base, access, progress).and_then(|bytes| decode_animation(&bytes))
 }
 
 /// Reads a source on a worker, bounded to 64 MiB.
@@ -300,6 +521,17 @@ pub(crate) fn read_bytes(
     base: Option<&AssetBase>,
     access: &Access,
 ) -> Result<Vec<u8>, String> {
+    read_bytes_with_progress(uri, base, access, &mut |_, _| {})
+}
+
+/// Reports at most once per 100 ms while bytes arrive, followed by one final
+/// complete report even when a response omits Content-Length.
+pub(crate) fn read_bytes_with_progress(
+    uri: &str,
+    base: Option<&AssetBase>,
+    access: &Access,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Vec<u8>, String> {
     if !access.allows_media(uri) {
         return Err(format!(
             "image `{uri}` is not granted by capabilities.network"
@@ -307,12 +539,55 @@ pub(crate) fn read_bytes(
     }
     let location = resolve(uri, base)
         .ok_or_else(|| format!("unsupported image URI or missing asset base: {uri}"))?;
-    let mut result = read(&location, access, &mut |_, _| {})?;
+    let mut reports = Progress::new(progress);
+    let mut result = read(&location, access, &mut |loaded, total| {
+        reports.report(loaded, total, Instant::now())
+    })?;
     if result.len() as u64 > MAX_BYTES {
         result.clear();
         return Err("image exceeds 64 MiB".into());
     }
+    reports.finish(result.len() as u64);
     Ok(result)
+}
+
+struct Progress<'a> {
+    output: &'a mut dyn FnMut(u64, u64),
+    last: Option<Instant>,
+    latest: (u64, u64),
+    reported: Option<(u64, u64)>,
+}
+
+impl<'a> Progress<'a> {
+    fn new(output: &'a mut dyn FnMut(u64, u64)) -> Self {
+        Self {
+            output,
+            last: None,
+            latest: (0, 0),
+            reported: None,
+        }
+    }
+    fn report(&mut self, loaded: u64, total: u64, now: Instant) {
+        self.latest = (loaded, total);
+        if self
+            .last
+            .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_millis(100))
+        {
+            (self.output)(loaded, total);
+            self.last = Some(now);
+            self.reported = Some((loaded, total));
+        }
+    }
+    fn finish(&mut self, loaded: u64) {
+        let total = if self.latest.1 == 0 {
+            loaded
+        } else {
+            self.latest.1
+        };
+        if self.reported != Some((loaded, total)) {
+            (self.output)(loaded, total);
+        }
+    }
 }
 
 /// Where bundled (`asset:/…`) files are.
@@ -543,13 +818,22 @@ fn read(
         Location::Url(url) => {
             let mut response = get(url, access)?;
             let total = response.body().content_length().unwrap_or(0);
-            let mut reader = response.body_mut().with_config().limit(MAX_BYTES).reader();
+            // ureq's limit reports overflow once exactly that many bytes
+            // have been read, so reserve one probe byte to accept the cap.
+            let mut reader = response
+                .body_mut()
+                .with_config()
+                .limit(MAX_BYTES + 1)
+                .reader();
             let mut bytes = Vec::with_capacity(total.min(MAX_BYTES) as usize);
             let mut chunk = [0u8; 16 << 10];
             loop {
                 let n = reader.read(&mut chunk).map_err(|e| format!("{url}: {e}"))?;
                 if n == 0 {
                     break;
+                }
+                if bytes.len().saturating_add(n) as u64 > MAX_BYTES {
+                    return Err("image exceeds 64 MiB".into());
                 }
                 bytes.extend_from_slice(&chunk[..n]);
                 progress(bytes.len() as u64, total);
@@ -870,6 +1154,162 @@ mod tests {
         assert!(resolve("asset:/../secret", Some(&base)).is_none());
         assert!(resolve("asset:/images/logo.png", Some(&base)).is_some());
         assert_eq!(data_uri("data:image/png;base64,YQ==").unwrap(), b"a");
+    }
+
+    #[test]
+    fn blur_preserves_alpha_color_and_animation_timing_without_mutating_shared_pixels() {
+        let mut pixels = [255, 0, 0, 0].repeat(7);
+        pixels[12..16].copy_from_slice(&[0, 0, 255, 255]);
+        let source = Arc::new(AnimatedRaster {
+            frames: vec![
+                Arc::new(Raster {
+                    width: 7,
+                    height: 1,
+                    rgba: pixels.clone(),
+                }),
+                Arc::new(Raster {
+                    width: 7,
+                    height: 1,
+                    rgba: pixels.clone(),
+                }),
+            ],
+            delays: vec![40, 80],
+            plays: 2,
+        });
+        assert!(Arc::ptr_eq(
+            &blur_animation(&source, (0.0, 0.0)).unwrap(),
+            &source
+        ));
+        let blurred = blur_animation(&source, (4.0, 0.0)).unwrap();
+        assert_eq!(blurred.delays, source.delays);
+        assert_eq!(blurred.plays, source.plays);
+        assert_eq!(source.frames[0].rgba, pixels);
+        assert!(!Arc::ptr_eq(&blurred.frames[0], &source.frames[0]));
+        assert!(
+            blurred.frames[0].rgba[7] > 0,
+            "the central alpha must spread to a neighboring pixel"
+        );
+        for pixel in blurred.frames[0].rgba.as_chunks::<4>().0 {
+            assert_eq!(
+                pixel[0], 0,
+                "transparent red must not bleed into the blurred blue"
+            );
+            if pixel[3] > 0 {
+                assert_eq!(pixel[2], 255);
+            }
+        }
+        assert_eq!(blurred.frame_index(40), 1);
+    }
+
+    #[test]
+    fn blur_is_anisotropic_and_validates_dimensions_before_allocating() {
+        let mut data = [0, 0, 0, 255].repeat(49);
+        data[(3 * 7 + 3) * 4..][..4].copy_from_slice(&[255, 255, 255, 255]);
+        let source = Raster {
+            width: 7,
+            height: 7,
+            rgba: data,
+        };
+        let horizontal = blur_raster(&source, (4.0, 0.0)).unwrap();
+        assert!(horizontal.rgba[(3 * 7 + 2) * 4] > 0);
+        assert_eq!(horizontal.rgba[(2 * 7 + 3) * 4], 0);
+        assert!(
+            blur_raster(
+                &Raster {
+                    width: 8193,
+                    height: 8193,
+                    rgba: Vec::new()
+                },
+                (4.0, 4.0)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn blur_cache_shares_variants_and_releases_dead_source_entries() {
+        let source = Arc::new(AnimatedRaster {
+            frames: vec![Arc::new(Raster {
+                width: 3,
+                height: 1,
+                rgba: vec![255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255],
+            })],
+            delays: Vec::new(),
+            plays: 1,
+        });
+        let mut cache = BlurCache::default();
+        let first = cache.blur(&source, (2.0, 2.0)).unwrap();
+        let shared = cache.blur(&source, (2.0, 2.0)).unwrap();
+        assert!(Arc::ptr_eq(&first, &shared));
+        assert!(Arc::ptr_eq(
+            &cache.blur(&source, (0.0, 0.0)).unwrap(),
+            &source
+        ));
+        assert_eq!(cache.entries.len(), 1);
+        let replacement = Arc::new((*source).clone());
+        drop(source);
+        let different = cache.blur(&replacement, (2.0, 2.0)).unwrap();
+        assert!(!Arc::ptr_eq(&first, &different));
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn worker_http_progress_is_throttled_and_finishes_with_the_full_byte_count() {
+        use std::{io::Write as _, net::TcpListener};
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}/image", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+                assert!(header.len() < 8192);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 131072\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            stream.write_all(&[7; 65536]).unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(120));
+            stream.write_all(&[9; 65536]).unwrap();
+        });
+        let mut events = Vec::new();
+        let bytes =
+            read_bytes_with_progress(&url, None, &Access::default(), &mut |loaded, total| {
+                events.push((loaded, total, Instant::now()))
+            })
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(bytes.len(), 131072);
+        assert!(events.len() >= 2);
+        assert_eq!(events.last().map(|e| (e.0, e.1)), Some((131072, 131072)));
+        // The complete report may follow an intermediate report immediately.
+        for pair in events[..events.len() - 1].windows(2) {
+            assert!(pair[1].2.duration_since(pair[0].2) >= Duration::from_millis(95));
+            assert!(pair[1].0 > pair[0].0);
+        }
+    }
+
+    #[test]
+    fn unknown_length_progress_reports_a_final_known_total() {
+        let mut values = Vec::new();
+        {
+            let mut output = |loaded, total| values.push((loaded, total));
+            let mut progress = Progress::new(&mut output);
+            let now = Instant::now();
+            progress.report(10, 0, now);
+            progress.report(20, 0, now + Duration::from_millis(50));
+            progress.report(30, 0, now + Duration::from_millis(100));
+            progress.finish(35);
+        }
+        assert_eq!(values, vec![(10, 0), (30, 0), (35, 35)]);
     }
 
     fn animated_gif() -> Vec<u8> {

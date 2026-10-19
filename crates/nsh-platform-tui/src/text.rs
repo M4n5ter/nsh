@@ -21,18 +21,27 @@ use unicode_linebreak::{BreakOpportunity, linebreaks};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::CellMetrics;
+use crate::{
+    CellMetrics,
+    fonts::{FontCatalog, GlyphPaint, tint_bitmap},
+    image::Raster,
+};
 
 /// A text engine using the host terminal's grapheme and cell geometry.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TerminalTextEngine {
     metrics: CellMetrics,
+    fonts: FontCatalog,
 }
 
 impl TerminalTextEngine {
     /// Creates a text engine with the same cell dimensions as its surface.
     pub fn new(metrics: CellMetrics) -> Self {
-        Self { metrics }
+        Self::with_fonts(metrics, FontCatalog::default())
+    }
+
+    pub(crate) fn with_fonts(metrics: CellMetrics, fonts: FontCatalog) -> Self {
+        Self { metrics, fonts }
     }
 }
 
@@ -95,6 +104,7 @@ pub(crate) struct TerminalLayout {
     pub(crate) lines: Vec<TextLine>,
     pub(crate) attachments: Vec<Option<(f32, f32)>>,
     shadow: Option<TextShadow>,
+    metrics: CellMetrics,
 }
 
 #[derive(Debug)]
@@ -419,6 +429,7 @@ impl TextEngine for TerminalTextEngine {
             lines: Vec::with_capacity(shown),
             attachments: vec![None; prepared.attachment_count],
             shadow: prepared.shadow,
+            metrics: self.metrics,
         };
         let mut y = 0.0;
         for (index, line) in lines.iter().take(shown).enumerate() {
@@ -541,12 +552,377 @@ impl TextEngine for TerminalTextEngine {
     }
 
     fn register_font(&self, data: &[u8]) -> Result<(), String> {
-        // Apps can register the same assets on every backend. Cell metrics stay
-        // stable because the terminal emulator owns the actual font face.
-        ttf_parser::Face::parse(data, 0)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        self.fonts.register(data)
     }
+
+    fn measure_canvas(&self, font: &nsh_core::canvas::CanvasFont, text: &str) -> Option<f32> {
+        Some(self.fonts.measure(font, text))
+    }
+}
+
+/// Rasterizes positioned terminal glyphs for transformed/effected scene groups.
+/// Cell positions remain identical to ordinary terminal text; actual outlines
+/// use this surface's registered fonts and fit within the measured cell boxes.
+pub(crate) fn rasterize(
+    layout: &TextLayout,
+    width: f32,
+    height: f32,
+    fonts: &FontCatalog,
+) -> Result<Raster, String> {
+    let mut pixmap = raster_pixmap(width, height)?;
+    let Some(layout) = layout.downcast::<TerminalLayout>() else {
+        return Ok(Raster::from_pixmap(pixmap));
+    };
+    if let Some(shadow) = layout.shadow
+        && !shadow.color.is_transparent()
+    {
+        let mut mask = raster_pixmap(width, height)?;
+        for run in &layout.runs {
+            let mut style = run.style;
+            style.color = nsh_core::Color::rgba(255, 255, 255, (style.color.0 & 255) as u8);
+            paint_raster_run(
+                &mut mask,
+                run.x,
+                run.y,
+                run.width as f32 * layout.metrics.width(),
+                layout.metrics.height(),
+                &run.text,
+                style,
+                fonts,
+            );
+        }
+        let mut alpha: Vec<_> = mask.pixels().iter().map(|pixel| pixel.alpha()).collect();
+        let radius = shadow.radius.clamp(0.0, 256.0);
+        if radius > 0.0 {
+            crate::canvas::blur(
+                &mut alpha,
+                mask.width() as usize,
+                mask.height() as usize,
+                radius as f64 / 2.0,
+            );
+        }
+        let (r, g, b, a) = shadow.color.to_f64();
+        for (pixel, alpha) in mask.pixels_mut().iter_mut().zip(alpha) {
+            *pixel = tiny_skia::ColorU8::from_rgba(
+                (r * 255.0).round() as u8,
+                (g * 255.0).round() as u8,
+                (b * 255.0).round() as u8,
+                (alpha as f64 * a).round() as u8,
+            )
+            .premultiply();
+        }
+        pixmap.draw_pixmap(
+            0,
+            0,
+            mask.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::from_translate(shadow.offset_x, shadow.offset_y),
+            None,
+        );
+    }
+    for run in &layout.runs {
+        paint_raster_run(
+            &mut pixmap,
+            run.x,
+            run.y,
+            run.width as f32 * layout.metrics.width(),
+            layout.metrics.height(),
+            &run.text,
+            run.style,
+            fonts,
+        );
+    }
+    Ok(Raster::from_pixmap(pixmap))
+}
+
+/// Captures terminal cells as pixels on a graphics worker. Reset backgrounds
+/// are transparent so embedded controls retain the scene's underlying fill.
+pub(crate) fn rasterize_cells(
+    buffer: &Buffer,
+    metrics: CellMetrics,
+    fonts: &FontCatalog,
+) -> Result<Raster, String> {
+    let size = metrics.viewport(buffer.area.width, buffer.area.height);
+    let mut pixmap = raster_pixmap(size.width, size.height)?;
+    for y in buffer.area.y..buffer.area.bottom() {
+        for x in buffer.area.x..buffer.area.right() {
+            let cell = &buffer[(x, y)];
+            let background = if cell.modifier.contains(Modifier::REVERSED) {
+                terminal_color(cell.fg, false)
+            } else {
+                terminal_color(cell.bg, true)
+            };
+            fill_raster_rect(
+                &mut pixmap,
+                (x - buffer.area.x) as f32 * metrics.width(),
+                (y - buffer.area.y) as f32 * metrics.height(),
+                metrics.width(),
+                metrics.height(),
+                background,
+            );
+        }
+    }
+    for y in buffer.area.y..buffer.area.bottom() {
+        for x in buffer.area.x..buffer.area.right() {
+            let cell = &buffer[(x, y)];
+            if cell.modifier.contains(Modifier::HIDDEN) {
+                continue;
+            }
+            let text: String = cell
+                .symbol()
+                .chars()
+                .filter(|&c| printable_character(c))
+                .collect();
+            let columns = UnicodeWidthStr::width(text.as_str());
+            if columns == 0 {
+                continue;
+            }
+            let color = if cell.modifier.contains(Modifier::REVERSED) {
+                terminal_color(cell.bg, false)
+            } else {
+                terminal_color(cell.fg, false)
+            };
+            let (px, py) = (
+                (x - buffer.area.x) as f32 * metrics.width(),
+                (y - buffer.area.y) as f32 * metrics.height(),
+            );
+            let mut style = ResolvedTextStyle {
+                color,
+                font_size: metrics.height() * 0.875,
+                font_weight: if cell.modifier.contains(Modifier::BOLD) {
+                    700
+                } else {
+                    400
+                },
+                italic: cell.modifier.contains(Modifier::ITALIC),
+                ..Default::default()
+            };
+            if cell.modifier.contains(Modifier::DIM) {
+                style.color.0 = (style.color.0 & !255) | 128;
+            }
+            style.decoration.underline = cell.modifier.contains(Modifier::UNDERLINED);
+            style.decoration.line_through = cell.modifier.contains(Modifier::CROSSED_OUT);
+            // Half blocks already represent image pixels, not font glyphs.
+            let half = match text.as_str() {
+                "▀" => Some((py, metrics.height() / 2.0)),
+                "▄" => Some((py + metrics.height() / 2.0, metrics.height() / 2.0)),
+                "█" => Some((py, metrics.height())),
+                _ => None,
+            };
+            if let Some((top, height)) = half {
+                fill_raster_rect(&mut pixmap, px, top, metrics.width(), height, style.color);
+            } else {
+                paint_raster_run(
+                    &mut pixmap,
+                    px,
+                    py,
+                    columns as f32 * metrics.width(),
+                    metrics.height(),
+                    &text,
+                    style,
+                    fonts,
+                );
+            }
+        }
+    }
+    Ok(Raster::from_pixmap(pixmap))
+}
+
+fn raster_pixmap(width: f32, height: f32) -> Result<tiny_skia::Pixmap, String> {
+    if !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || width > 8192.0
+        || height > 8192.0
+        || width.ceil() as u64 * height.ceil() as u64 > 8 << 20
+    {
+        return Err(
+            "terminal glyph raster exceeds the finite 8192-side, 8-million-pixel limit".to_owned(),
+        );
+    }
+    tiny_skia::Pixmap::new(width.ceil() as u32, height.ceil() as u32)
+        .ok_or_else(|| "terminal glyph raster allocation failed".to_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_raster_run(
+    pixmap: &mut tiny_skia::Pixmap,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    text: &str,
+    style: ResolvedTextStyle,
+    fonts: &FontCatalog,
+) {
+    if style.color.is_transparent() || text.is_empty() || width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    if text.chars().all(char::is_whitespace)
+        && !style.decoration.underline
+        && !style.decoration.line_through
+    {
+        return;
+    }
+    let font = nsh_core::canvas::CanvasFont {
+        size: style.font_size,
+        weight: style.font_weight,
+        italic: style.italic,
+        family: style.font_family.map(|family| family.name()),
+        variant: style.font_variant,
+    };
+    let shaped = fonts.shape(&font, text);
+    let natural_height = shaped.ascent + shaped.descent;
+    let scale = if shaped.width > 0.0 && natural_height > 0.0 {
+        (width / shaped.width).min(height / natural_height).min(1.0)
+    } else {
+        1.0
+    };
+    let baseline = y + (height - natural_height * scale) / 2.0 + shaped.ascent * scale;
+    let transform = tiny_skia::Transform::from_row(
+        scale,
+        0.0,
+        0.0,
+        scale,
+        x + (width - shaped.width * scale) / 2.0,
+        baseline,
+    );
+    for glyph in shaped.paints() {
+        match glyph {
+            GlyphPaint::Path(path, color) => {
+                let mut paint = tiny_skia::Paint::default();
+                let c = color.map_or(style.color.0, |color| {
+                    (color.0 & !255) | ((color.0 & 255) * (style.color.0 & 255) / 255)
+                });
+                paint.set_color_rgba8((c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8);
+                pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
+            }
+            GlyphPaint::Image {
+                image,
+                transform: placement,
+                tint,
+            } => {
+                let image = if tint {
+                    Arc::new(tint_bitmap(&image, style.color))
+                } else {
+                    image
+                };
+                let paint = tiny_skia::PixmapPaint {
+                    opacity: if tint {
+                        1.0
+                    } else {
+                        (style.color.0 & 255) as f32 / 255.0
+                    },
+                    quality: tiny_skia::FilterQuality::Bicubic,
+                    ..Default::default()
+                };
+                pixmap.draw_pixmap(
+                    0,
+                    0,
+                    image.as_ref().as_ref(),
+                    &paint,
+                    transform.pre_concat(placement),
+                    None,
+                );
+            }
+        }
+    }
+    let decoration = style.decoration_color.unwrap_or(style.color);
+    let thickness = style.decoration_thickness.unwrap_or(1.0).max(0.5);
+    if style.decoration.underline {
+        fill_raster_rect(
+            pixmap,
+            x,
+            (baseline + style.underline_offset.unwrap_or(1.0)).min(y + height - thickness),
+            width,
+            thickness,
+            decoration,
+        );
+    }
+    if style.decoration.line_through {
+        fill_raster_rect(
+            pixmap,
+            x,
+            baseline - shaped.ascent * scale * 0.35,
+            width,
+            thickness,
+            decoration,
+        );
+    }
+}
+
+fn fill_raster_rect(
+    pixmap: &mut tiny_skia::Pixmap,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: nsh_core::Color,
+) {
+    if color.is_transparent() {
+        return;
+    }
+    let Some(rect) = tiny_skia::Rect::from_xywh(x, y, width, height) else {
+        return;
+    };
+    let mut paint = tiny_skia::Paint::default();
+    let c = color.0;
+    paint.set_color_rgba8((c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8);
+    pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
+}
+
+fn terminal_color(color: TerminalColor, transparent_reset: bool) -> nsh_core::Color {
+    let rgb = match color {
+        TerminalColor::Reset if transparent_reset => return nsh_core::Color::TRANSPARENT,
+        TerminalColor::Reset | TerminalColor::Black => [0, 0, 0],
+        TerminalColor::Red => [128, 0, 0],
+        TerminalColor::Green => [0, 128, 0],
+        TerminalColor::Yellow => [128, 128, 0],
+        TerminalColor::Blue => [0, 0, 128],
+        TerminalColor::Magenta => [128, 0, 128],
+        TerminalColor::Cyan => [0, 128, 128],
+        TerminalColor::Gray => [192, 192, 192],
+        TerminalColor::DarkGray => [128, 128, 128],
+        TerminalColor::LightRed => [255, 0, 0],
+        TerminalColor::LightGreen => [0, 255, 0],
+        TerminalColor::LightYellow => [255, 255, 0],
+        TerminalColor::LightBlue => [0, 0, 255],
+        TerminalColor::LightMagenta => [255, 0, 255],
+        TerminalColor::LightCyan => [0, 255, 255],
+        TerminalColor::White => [255, 255, 255],
+        TerminalColor::Rgb(r, g, b) => [r, g, b],
+        TerminalColor::Indexed(index) => {
+            const ANSI: [[u8; 3]; 16] = [
+                [0, 0, 0],
+                [128, 0, 0],
+                [0, 128, 0],
+                [128, 128, 0],
+                [0, 0, 128],
+                [128, 0, 128],
+                [0, 128, 128],
+                [192, 192, 192],
+                [128, 128, 128],
+                [255, 0, 0],
+                [0, 255, 0],
+                [255, 255, 0],
+                [0, 0, 255],
+                [255, 0, 255],
+                [0, 255, 255],
+                [255, 255, 255],
+            ];
+            if index < 16 {
+                ANSI[index as usize]
+            } else if index >= 232 {
+                [8 + (index - 232) * 10; 3]
+            } else {
+                let cube = index - 16;
+                let channel = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+                [channel(cube / 36), channel(cube / 6 % 6), channel(cube % 6)]
+            }
+        }
+    };
+    nsh_core::Color::rgba(rgb[0], rgb[1], rgb[2], 255)
 }
 
 fn ellipsize(
@@ -877,6 +1253,41 @@ mod tests {
             runs.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>(),
             [(0, 1), (1, 2), (2, 7), (7, 9)]
         );
+    }
+
+    #[test]
+    fn registered_fonts_change_canvas_advances_without_changing_terminal_cells() {
+        let fonts = FontCatalog::default();
+        let engine = TerminalTextEngine::with_fonts(CellMetrics::default(), fonts.clone());
+        let value = text("WWW");
+        let before = engine.measure(&engine.prepare(&value), None);
+        engine
+            .register_font(include_bytes!(
+                "../../../examples/gallery/fonts/Pacifico-Regular.ttf"
+            ))
+            .unwrap();
+        assert_eq!(engine.measure(&engine.prepare(&value), None), before);
+        assert_eq!(before.width, 24.0);
+        let font = nsh_core::canvas::CanvasFont::parse("24px Pacifico").unwrap();
+        let width = nsh_core::canvas::measure_line(&engine, &font, "WWW");
+        assert_eq!(width, fonts.shape(&font, "WWW").width);
+        assert!((width - before.width).abs() > 1.0);
+    }
+
+    #[test]
+    fn rasterized_buffer_keeps_half_block_pixels_and_transparent_reset_backgrounds() {
+        let metrics = CellMetrics::default();
+        let mut buffer = Buffer::empty(CellRect::new(4, 3, 2, 1));
+        buffer[(4, 3)]
+            .set_symbol("▀")
+            .set_fg(TerminalColor::Rgb(255, 0, 0))
+            .set_bg(TerminalColor::Rgb(0, 0, 255));
+        let raster = rasterize_cells(&buffer, metrics, &FontCatalog::default()).unwrap();
+        let pixel = |x: usize, y: usize| &raster.rgba[(y * raster.width as usize + x) * 4..][..4];
+        assert_eq!((raster.width, raster.height), (16, 16));
+        assert_eq!(pixel(2, 2), [255, 0, 0, 255]);
+        assert_eq!(pixel(2, 12), [0, 0, 255, 255]);
+        assert_eq!(pixel(12, 2), [0, 0, 0, 0]);
     }
 
     #[test]

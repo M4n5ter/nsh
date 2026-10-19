@@ -50,6 +50,9 @@ globals.
 the chunks of a split bundle (`Screen.js`: a name that is no native module, with code the host gave; `chunks.rs`,
 `native-pipeline.md`), which `import()` loads through the global `__nsh_import`.
 
+- **Terminal menus** use `nsh/desktop`: `isAvailable` is true, `Menu` controls terminal menus and `Window.setTitle`
+  updates the host's title. `Platform.isDesktop` still describes graphical desktop interaction; terminal apps use
+  `Platform.isTerminal` to choose terminal behavior. Window placement and desktop chrome stay with the host.
 - **Platform modules** are importable on both platforms (one bundle runs on both); on the other one their calls do
   nothing and their components render nothing. `isAvailable` tells which.
 - **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` / `web={{…}}` / `desktop={{…}}` (macOS, Windows, Linux, and browsers in the desktop idiom) on

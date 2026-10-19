@@ -9,61 +9,130 @@ use nsh_core::{NodeId, access::Access, canvas::Drawing};
 use crate::image::{AnimatedRaster, Raster};
 
 enum Job {
-    Image(String, Option<Arc<dyn nsh_engine::Assets>>, Access),
-    Canvas(
+    Blur(
         NodeId,
-        Arc<Drawing>,
-        Vec<(u16, AnimationValue)>,
-        f32,
-        f32,
-        HashMap<Arc<str>, Arc<Raster>>,
+        crate::image_state::ImageRequest,
+        Arc<AnimatedRaster>,
     ),
+    Canvas(CanvasRequest),
     Protocol(NodeId, u64, Box<crate::protocol::Request>),
+    Composite(NodeId, u64, Arc<crate::composite::Scene>),
+}
+
+type ImageJob = (String, Option<Arc<dyn nsh_engine::Assets>>, Access);
+
+pub(crate) struct CanvasRequest {
+    pub(crate) id: NodeId,
+    pub(crate) generation: u64,
+    pub(crate) epoch: u64,
+    pub(crate) drawing: Arc<Drawing>,
+    pub(crate) args: Vec<(u16, AnimationValue)>,
+    pub(crate) size: nsh_core::Size,
+    pub(crate) images: HashMap<Arc<str>, Arc<Raster>>,
 }
 
 pub(crate) enum GraphicsResult {
     Image(String, Result<AnimatedRaster, String>),
-    Canvas(NodeId, Result<Raster, String>),
+    Progress(String, u64, u64),
+    Blur(
+        NodeId,
+        crate::image_state::ImageRequest,
+        Result<Arc<AnimatedRaster>, String>,
+    ),
+    Canvas(NodeId, u64, u64, Result<Raster, String>),
     Protocol(NodeId, u64, Result<crate::protocol::Encoded, String>),
+    Composite(NodeId, u64, Result<Raster, String>),
 }
 
 pub(crate) struct Graphics {
     tx: Sender<Job>,
+    image_tx: Sender<ImageJob>,
     rx: Receiver<GraphicsResult>,
 }
 
 impl Graphics {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(fonts: crate::fonts::FontCatalog) -> Self {
         let (tx, jobs) = unbounded();
         let (results, rx) = unbounded();
+        let (image_tx, image_jobs) = unbounded::<ImageJob>();
+        // IO cannot hold up a placeholder, Canvas or protocol encoder.
+        // Two readers let a small placeholder finish beside its main image.
+        for index in 0..2 {
+            let jobs = image_jobs.clone();
+            let results = results.clone();
+            std::thread::Builder::new()
+                .name(format!("nsh-tui-image-{index}"))
+                .spawn(move || {
+                    while let Ok((uri, assets, access)) = jobs.recv() {
+                        let mut progress = |loaded, total| {
+                            let _ =
+                                results.send(GraphicsResult::Progress(uri.clone(), loaded, total));
+                        };
+                        let result = if !access.allows_media(&uri) {
+                            Err("Image access was denied".to_owned())
+                        } else if uri.starts_with("asset:/") {
+                            assets
+                                .ok_or_else(|| "This app has no asset reader".to_owned())
+                                .and_then(|assets| assets.read(&uri))
+                                .and_then(|bytes| {
+                                    progress(bytes.len() as u64, bytes.len() as u64);
+                                    crate::image::decode_animation(&bytes)
+                                })
+                        } else {
+                            crate::image::load_animation_with_progress(
+                                &uri,
+                                None,
+                                &access,
+                                &mut progress,
+                            )
+                        };
+                        if results.send(GraphicsResult::Image(uri, result)).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .expect("start terminal image reader");
+        }
         std::thread::Builder::new()
             .name("nsh-tui-graphics".to_owned())
             .spawn(move || {
+                let mut blurs = crate::image::BlurCache::default();
                 while let Ok(job) = jobs.recv() {
                     let result = match job {
-                        Job::Image(uri, assets, access) => {
-                            let result = if !access.allows_media(&uri) {
-                                Err("Image access was denied".to_owned())
-                            } else if uri.starts_with("asset:/") {
-                                assets
-                                    .ok_or_else(|| "This app has no asset reader".to_owned())
-                                    .and_then(|assets| assets.read(&uri))
-                                    .and_then(|bytes| crate::image::decode_animation(&bytes))
-                            } else {
-                                crate::image::load_animation(&uri, None, &access)
-                            };
-                            GraphicsResult::Image(uri, result)
+                        Job::Blur(id, request, animation) => {
+                            let radii = request.blur_radii(&animation);
+                            GraphicsResult::Blur(id, request, blurs.blur(&animation, radii))
                         }
-                        Job::Canvas(id, drawing, args, width, height, images) => {
-                            GraphicsResult::Canvas(
-                                id,
-                                crate::canvas::rasterize(&drawing, &args, width, height, &images),
-                            )
-                        }
+                        Job::Canvas(CanvasRequest {
+                            id,
+                            generation,
+                            epoch,
+                            drawing,
+                            args,
+                            size,
+                            images,
+                        }) => GraphicsResult::Canvas(
+                            id,
+                            generation,
+                            epoch,
+                            crate::canvas::rasterize(
+                                &drawing,
+                                &args,
+                                size.width,
+                                size.height,
+                                &images,
+                                &fonts,
+                            ),
+                        ),
                         Job::Protocol(id, sequence, request) => GraphicsResult::Protocol(
                             id,
                             sequence,
                             crate::protocol::encode(&request),
+                        ),
+                        Job::Composite(id, sequence, scene) => GraphicsResult::Composite(
+                            id,
+                            sequence,
+                            crate::composite::rasterize(&scene, &fonts),
                         ),
                     };
                     if results.send(result).is_err() {
@@ -72,7 +141,7 @@ impl Graphics {
                 }
             })
             .expect("start terminal graphics worker");
-        Self { tx, rx }
+        Self { tx, image_tx, rx }
     }
 
     pub(crate) fn image(
@@ -81,20 +150,10 @@ impl Graphics {
         assets: Option<Arc<dyn nsh_engine::Assets>>,
         access: Access,
     ) {
-        let _ = self.tx.send(Job::Image(uri, assets, access));
+        let _ = self.image_tx.send((uri, assets, access));
     }
-    pub(crate) fn canvas(
-        &self,
-        id: NodeId,
-        drawing: Arc<Drawing>,
-        args: Vec<(u16, AnimationValue)>,
-        width: f32,
-        height: f32,
-        images: HashMap<Arc<str>, Arc<Raster>>,
-    ) {
-        let _ = self
-            .tx
-            .send(Job::Canvas(id, drawing, args, width, height, images));
+    pub(crate) fn canvas(&self, request: CanvasRequest) {
+        let _ = self.tx.send(Job::Canvas(request));
     }
     pub(crate) fn poll(&self) -> Option<GraphicsResult> {
         self.rx.try_recv().ok()
@@ -102,5 +161,23 @@ impl Graphics {
 
     pub(crate) fn protocol(&self, id: NodeId, sequence: u64, request: crate::protocol::Request) {
         let _ = self.tx.send(Job::Protocol(id, sequence, Box::new(request)));
+    }
+
+    pub(crate) fn blur(
+        &self,
+        id: NodeId,
+        request: crate::image_state::ImageRequest,
+        animation: Arc<AnimatedRaster>,
+    ) {
+        let _ = self.tx.send(Job::Blur(id, request, animation));
+    }
+
+    pub(crate) fn composite(
+        &self,
+        id: NodeId,
+        sequence: u64,
+        scene: Arc<crate::composite::Scene>,
+    ) -> bool {
+        self.tx.send(Job::Composite(id, sequence, scene)).is_ok()
     }
 }

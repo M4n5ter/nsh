@@ -2,7 +2,7 @@ name: Terminal
 
 on:
   push:
-    branches: [main]
+    branches: [main, "tui/**"]
     paths:
       - "crates/**"
       - "examples/terminal-workbench/**"
@@ -39,6 +39,8 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      NSH_EXE_SUFFIX: ${{ runner.os == 'Windows' && '.exe' || '' }}
     steps:
       - uses: actions/checkout@v4
       # QuickJS and its generated bindings need a C compiler and libclang.
@@ -46,9 +48,11 @@ jobs:
       - name: Install clang
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
-      - name: Configure Windows clang
+      - name: Configure Windows compiler
         if: runner.os == 'Windows'
-        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+        run: |
+          echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+          echo 'RUST_MIN_STACK=268435456' >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -68,19 +72,21 @@ jobs:
       - name: Check the Rust runtime
         run: cargo check --locked -p nsh-platform-tui --no-default-features
       - name: Build the operations workbench
-        if: runner.os == 'Linux'
         run: |
           cargo build --locked -p nsh-cli -p nsh-tui-host
-          ./target/debug/nsh build examples/terminal-workbench -o target/terminal-workbench
+          ./target/debug/nsh${NSH_EXE_SUFFIX} build examples/terminal-workbench -o target/terminal-workbench
       - name: Exercise Unicode, filters, deployment and resize
-        if: runner.os == 'Linux'
         run: |
-          ./target/debug/nsh-tui-host --bundle target/terminal-workbench/bundle.nshc --size 160x50 \
-            --script "wait 300; expect Operations workbench; expect-focus; shot target/terminal-workbench-home.txt; type 王宁; expect 12 services; key Ctrl+a; type gateway; expect 2 services; key Tab; key Tab; key Tab; key Enter; expect No matching services; key Shift+Tab; key Shift+Tab; key Enter; expect 2 services; tap 40 13; expect Selected: edge-gateway; tap 148 1; expect Deploy service; key Ctrl+a; type Canary · 安全发布 👩‍💻; key Tab; key Tab; key Enter; expect Deployment queued; expect v2.19.0; shot target/terminal-workbench-deployed.txt; tap 8 9; expect Active incidents; tap 8 11; expect Release history; resize 120 34; expect Release history; expect Traffic overview; resize 100 30; expect Release history; expect-focus; shot target/terminal-workbench-compact.txt; quit"
+          ./target/debug/nsh-tui-host${NSH_EXE_SUFFIX} --bundle target/terminal-workbench/bundle.nshc --size 160x50 \
+            --script "wait 300; expect Operations workbench; expect-focus; shot target/terminal-workbench-home.txt; type 王宁; expect 12 services; key Ctrl+a; type gateway; expect 2 services; key Tab; key Tab; key Tab; key Enter; expect No matching services; key Shift+Tab; key Shift+Tab; key Enter; expect 2 services; tap 40 13; expect Selected: edge-gateway; tap 148 1; expect Deploy service; key Ctrl+a; type Canary · 安全发布 👩‍💻; key Tab; key Tab; key Enter; expect Deployment queued; wait 300; expect v2.19.0; shot target/terminal-workbench-deployed.txt; tap 8 9; expect Active incidents; tap 8 11; expect Release history; resize 120 34; expect Release history; expect Traffic overview; resize 100 30; expect Release history; expect-focus; shot target/terminal-workbench-compact.txt; quit"
+      - name: Exercise effects, popup menus and the HTML runbook
+        run: |
+          ./target/debug/nsh-tui-host${NSH_EXE_SUFFIX} --bundle target/terminal-workbench/bundle.nshc --size 160x50 \
+            --script "wait 700; tap 142 5; wait 800; expect Surface effects; expect Canvas lettering; shot target/terminal-workbench-effects.txt; tap 151 6; expect Soft focus; key Enter; wait 500; expect Soft focus / 3pt; tap 153 5; wait 1000; expect Rollout checklist; expect Runbook ready; shot target/terminal-workbench-runbook.txt; tap 153 6; wait 500; expect Runbook ready; tap 132 5; expect Activity timeline; quit"
       - name: Upload terminal snapshots
-        if: runner.os == 'Linux' && always()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: terminal-snapshots
-          path: target/terminal-*.txt
+          name: terminal-snapshots-${{ runner.os }}
+          path: target/terminal-workbench-*.txt
           if-no-files-found: ignore

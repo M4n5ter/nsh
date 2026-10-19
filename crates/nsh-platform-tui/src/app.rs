@@ -2,13 +2,18 @@
 //! exclusively owned by `run_app`; an `AppView` can render in a host's buffer.
 
 #[cfg(feature = "dev")]
-use std::{collections::VecDeque, sync::Mutex};
+use std::sync::Mutex;
 use std::{
+    collections::VecDeque,
     io::{self, IsTerminal, Write},
     sync::{Arc, RwLock, mpsc},
     time::{Duration, Instant},
 };
 
+#[cfg(not(windows))]
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::{
     cursor::{Hide, Show},
     event::{
@@ -35,7 +40,11 @@ use ratatui::{
 };
 
 pub use crate::image::AssetBase;
-use crate::{CellMetrics, Surface, SurfaceEvent, TerminalTextEngine, image::AssetReader};
+use crate::{
+    CellMetrics, Surface, SurfaceEvent, TerminalTextEngine,
+    image::AssetReader,
+    services::{HostServices, ServiceManager, ServiceOutput, ServiceRequest},
+};
 
 static UI_SETS: RwLock<Option<Vec<nsh_core::ui::Registry>>> = RwLock::new(None);
 
@@ -91,6 +100,8 @@ pub struct AppOptions {
     /// Native terminal components available through `nsh/native`, scoped
     /// to this view and retained across app reloads.
     pub components: crate::native::Components,
+    /// Requests reduced-motion presentation for navigation and layout.
+    pub reduce_motion: bool,
 }
 
 impl Default for AppOptions {
@@ -106,6 +117,7 @@ impl Default for AppOptions {
             limits: Limits::default(),
             metrics: CellMetrics::default(),
             components: Default::default(),
+            reduce_motion: false,
         }
     }
 }
@@ -155,6 +167,8 @@ pub struct AppView {
     status: Option<String>,
     theme: Option<nsh_core::ui::Theme>,
     image_protocol: Option<crate::ImageProtocol>,
+    services: Option<ServiceManager>,
+    service_output: VecDeque<ServiceOutput>,
     #[cfg(feature = "dev")]
     dev: Option<DevSession>,
 }
@@ -166,6 +180,7 @@ impl AppView {
         let environment = initial_environment(&options);
         surface.set_dark(environment.color_scheme == ColorScheme::Dark);
         surface.set_components(options.components.clone());
+        surface.set_reduce_motion(options.reduce_motion);
         let assets = Arc::new(AssetsProvider(RwLock::new(options.asset_base.clone())));
         Self {
             surface,
@@ -181,6 +196,8 @@ impl AppView {
             status: None,
             theme: None,
             image_protocol: None,
+            services: None,
+            service_output: VecDeque::new(),
             #[cfg(feature = "dev")]
             dev: None,
         }
@@ -199,6 +216,7 @@ impl AppView {
         self.surface
             .set_dark(self.environment.color_scheme == ColorScheme::Dark);
         self.surface.set_components(self.options.components.clone());
+        self.surface.set_reduce_motion(self.options.reduce_motion);
         self.surface.set_image_protocol(self.image_protocol);
         let access = match &app {
             App::Js(bundle) => bundle.policy.access(),
@@ -207,6 +225,10 @@ impl AppView {
         let assets: Arc<dyn nsh_engine::Assets> = self.assets.clone();
         self.surface.set_assets(Some(assets.clone()));
         self.surface.set_access(access);
+        self.surface.services.enabled = self.services.is_some();
+        if let Some(services) = &self.services {
+            services.reset(self.surface.access.clone());
+        }
         let config = EngineConfig {
             app,
             viewport: self.surface.viewport(),
@@ -224,10 +246,11 @@ impl AppView {
         };
         let (tx, rx) = mpsc::channel();
         let metrics = self.options.metrics;
+        let fonts = self.surface.fonts.clone();
         let theme = self.theme.clone();
         self.engine = Some(Engine::start_with(
             config,
-            move || TerminalTextEngine::new(metrics),
+            move || TerminalTextEngine::with_fonts(metrics, fonts),
             Sink(tx),
             move |control| {
                 if let Some(theme) = theme {
@@ -323,6 +346,7 @@ impl AppView {
             }
         }
         self.dispatch_events();
+        changed |= self.poll_services();
         #[cfg(feature = "dev")]
         if let Some(dev) = &self.dev {
             for record in take_logs() {
@@ -388,7 +412,11 @@ impl AppView {
     /// Paints the retained scene, then any development status or error,
     /// clipped to `area`; terminal flushing remains the host's concern.
     pub fn render(&self, area: Rect, buffer: &mut Buffer) {
-        self.surface.render(area, buffer);
+        if self.last_error.is_some() || self.status.is_some() {
+            self.surface.render_plain(area, buffer);
+        } else {
+            self.surface.render(area, buffer);
+        }
         if let Some(error) = &self.last_error {
             Clear.render(area, buffer);
             Paragraph::new(format!(
@@ -465,6 +493,44 @@ impl AppView {
         }
     }
 
+    /// Updates the host's reduced-motion preference for this app and
+    /// subsequent reloads.
+    pub fn set_reduce_motion(&mut self, reduce_motion: bool) {
+        self.options.reduce_motion = reduce_motion;
+        self.environment.reduce_motion = reduce_motion;
+        self.surface.set_reduce_motion(reduce_motion);
+        if let Some(control) = self.control() {
+            control.set_environment(self.environment);
+        }
+    }
+
+    /// Supplies explicit host clipboard, title and accessibility transports.
+    /// Callbacks run on one worker and persist across app reloads. `None`
+    /// restores the local clipboard and stops pending host requests.
+    pub fn set_host_services(&mut self, host: Option<Arc<dyn HostServices>>) -> io::Result<()> {
+        self.services = host.map(ServiceManager::new).transpose()?;
+        if let Some(services) = &self.services {
+            services.reset(self.surface.access.clone());
+        }
+        self.surface.services.enabled = self.services.is_some();
+        self.service_output.clear();
+        Ok(())
+    }
+
+    /// Drains explicit terminal/assistive effects. Embedding hosts own their
+    /// output transport; collecting these effects performs no terminal IO.
+    pub fn drain_service_output(&mut self) -> impl Iterator<Item = ServiceOutput> + '_ {
+        let clipboard = self.surface.access.allows_clipboard();
+        self.service_output
+            .drain(..)
+            .filter(move |output| clipboard || !matches!(output, ServiceOutput::Clipboard(_)))
+    }
+
+    /// Semantic elements suitable for a host's accessibility bridge.
+    pub fn accessibility_snapshot(&self) -> Vec<crate::services::AccessibleNode> {
+        self.surface.accessibility_snapshot()
+    }
+
     /// Enables a graphics protocol already selected by the embedding host,
     /// using that terminal's physical cell dimensions. This performs no
     /// terminal query and persists across app reloads. `None` restores the
@@ -504,6 +570,10 @@ impl AppView {
     }
 
     fn stop_engine(&mut self) {
+        if let Some(services) = &self.services {
+            services.reset(self.surface.access.clone());
+        }
+        self.service_output.clear();
         self.engine = None;
         self.receiver = None;
         self.frame_requested = false;
@@ -521,7 +591,74 @@ impl AppView {
                 SurfaceEvent::States(id, states) => control.set_states(id, states),
                 SurfaceEvent::AnimationsFinished(finished) => control.animations_finished(finished),
                 SurfaceEvent::ComponentSize(id, size) => control.set_component_size(id, size),
+                SurfaceEvent::Zoom(id, scale) => control.zoom(id, scale),
+                SurfaceEvent::RootSize(id, size, insets) => control.set_root_size(id, size, insets),
+                SurfaceEvent::ScreenHeader(id, height) => control.set_screen_header(id, height),
+                SurfaceEvent::Service(request) => self.service_request(request),
             }
+        }
+    }
+
+    fn service_request(&mut self, request: ServiceRequest) {
+        if let Some(services) = &self.services {
+            services.sync_access(self.surface.access.clone());
+            if let Err(request) = services.submit(request) {
+                self.complete_service(request, Err("terminal service queue is full".into()));
+            }
+        } else {
+            self.complete_service(request, Ok(None));
+        }
+    }
+
+    fn poll_services(&mut self) -> bool {
+        if let Some(services) = &self.services {
+            services.sync_access(self.surface.access.clone());
+        }
+        let completed: Vec<_> = self
+            .services
+            .as_ref()
+            .map(|services| services.poll().collect())
+            .unwrap_or_default();
+        let changed = !completed.is_empty();
+        for completion in completed {
+            self.complete_service(completion.request, completion.result);
+        }
+        self.dispatch_events();
+        changed
+    }
+
+    fn complete_service(
+        &mut self,
+        request: ServiceRequest,
+        result: Result<Option<crate::services::ClipboardContent>, String>,
+    ) {
+        match request {
+            ServiceRequest::ClipboardRead { id, has_only } => self.surface.complete_clipboard(
+                id,
+                has_only,
+                result.and_then(|value| {
+                    value.ok_or_else(|| "host clipboard returned no result".into())
+                }),
+            ),
+            ServiceRequest::ClipboardPaste(edit) => self.surface.complete_paste(
+                edit,
+                result.and_then(|value| {
+                    value.ok_or_else(|| "host clipboard returned no result".into())
+                }),
+            ),
+            ServiceRequest::ClipboardWrite(text) if self.surface.access.allows_clipboard() => self
+                .service_output
+                .push_back(ServiceOutput::Clipboard(text)),
+            ServiceRequest::Title(title) => {
+                self.service_output.push_back(ServiceOutput::Title(title))
+            }
+            ServiceRequest::Announce(text) => self
+                .service_output
+                .push_back(ServiceOutput::Announcement(text)),
+            _ => {}
+        }
+        while self.service_output.len() > 256 {
+            self.service_output.pop_front();
         }
     }
 
@@ -535,6 +672,7 @@ impl Drop for AppView {
         // Stop callbacks and component tasks before the retained surface
         // releases its native components and graphical worker handles.
         self.stop();
+        self.services = None;
     }
 }
 
@@ -681,6 +819,7 @@ fn initial_environment(options: &AppOptions) -> Environment {
             Os::Linux
         },
         idiom: Idiom::Desktop,
+        reduce_motion: options.reduce_motion,
         locale,
         ..Environment::default()
     }
@@ -745,6 +884,7 @@ fn run_inner(source: AppSource, options: AppOptions) -> io::Result<()> {
         if let Some(session) = &mut session {
             session.graphics_cleanup = view.image_protocol_cleanup();
         }
+        view.set_host_services(Some(Arc::new(crate::services::SystemServices::default())))?;
     }
     match source {
         AppSource::Rust(root) => view.load(App::Rust(root))?,
@@ -760,9 +900,18 @@ fn run_inner(source: AppSource, options: AppOptions) -> io::Result<()> {
     let (columns, rows) = terminal::size()?;
     view.resize(columns, rows);
     let started = Instant::now();
+    let tmux = terminal_graphics::tmux();
     let mut dirty = true;
     while !view.surface.should_quit() && !signals.as_ref().is_some_and(ShutdownSignals::requested) {
         dirty |= view.tick(started.elapsed().as_secs_f64())?;
+        let output: Vec<_> = view.drain_service_output().collect();
+        if !output.is_empty() {
+            let mut stdout = io::stdout().lock();
+            for effect in output {
+                stdout.write_all(effect.terminal_sequence(tmux).as_bytes())?;
+            }
+            stdout.flush()?;
+        }
         if dirty {
             terminal.draw(|frame| view.render(frame.area(), frame.buffer_mut()))?;
             dirty = false;
@@ -875,6 +1024,14 @@ mod terminal_graphics {
         term.is_some_and(|term| term.starts_with("tmux"))
             || program == Some("tmux")
             || session.is_some_and(|session| !session.is_empty())
+    }
+
+    pub(super) fn tmux() -> bool {
+        tmux_hint(
+            std::env::var("TERM").ok().as_deref(),
+            std::env::var("TERM_PROGRAM").ok().as_deref(),
+            std::env::var("TMUX").ok().as_deref(),
+        )
     }
 
     fn resolve(
@@ -1141,6 +1298,8 @@ mod terminal_graphics {
 
 struct TerminalSession {
     graphics_cleanup: String,
+    #[cfg(not(windows))]
+    keyboard_enhanced: bool,
 }
 
 impl TerminalSession {
@@ -1149,7 +1308,11 @@ impl TerminalSession {
         // Construct the guard first: a partial setup also needs restoring.
         let session = Self {
             graphics_cleanup: String::new(),
+            #[cfg(not(windows))]
+            keyboard_enhanced: false,
         };
+        #[cfg(not(windows))]
+        let mut session = session;
         // An app title is data inside an OSC sequence. Strip terminal
         // controls so a package title cannot inject another sequence.
         let title: String = title.chars().filter(|ch| !ch.is_control()).collect();
@@ -1161,6 +1324,20 @@ impl TerminalSession {
             Hide,
             SetTitle(title)
         )?;
+        // The Windows backend receives native console key records; its
+        // Crossterm transport cannot decode CSI-u keyboard events.
+        #[cfg(not(windows))]
+        {
+            session.keyboard_enhanced = true;
+            execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                )
+            )?;
+        }
         Ok(session)
     }
 }
@@ -1168,6 +1345,10 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = io::stdout().write_all(self.graphics_cleanup.as_bytes());
+        #[cfg(not(windows))]
+        if self.keyboard_enhanced {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
         let _ = execute!(
             io::stdout(),
             Show,

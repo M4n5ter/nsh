@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use nsh_core::{InputConfig, KeyboardType};
+use nsh_core::{AutoCapitalize, InputConfig, KeyboardType};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -92,6 +92,22 @@ impl Editor {
         let start = byte_at_utf16(&self.text, start);
         let end = byte_at_utf16(&self.text, end);
         self.select_bytes(start, end)
+    }
+
+    /// Host edits must name an exact UTF-16 grapheme boundary rather than
+    /// rounding a stale or malformed selection into a different edit.
+    pub(crate) fn is_boundary_utf16(&self, offset: u32) -> bool {
+        let mut units = 0u32;
+        if offset == 0 {
+            return true;
+        }
+        for grapheme in self.text.graphemes(true) {
+            units = units.saturating_add(utf16_len(grapheme));
+            if units >= offset {
+                return units == offset;
+            }
+        }
+        false
     }
 
     fn select_bytes(&mut self, anchor: usize, cursor: usize) -> bool {
@@ -193,9 +209,57 @@ impl Editor {
         }
     }
 
-    pub(crate) fn replace(&mut self, incoming: &str, config: &InputConfig) -> bool {
-        if !config.editable {
+    /// An explicit text-entry policy for hosts implementing an on-screen
+    /// keyboard. Physical terminal keys and paste keep their literal text.
+    pub(crate) fn typed(&mut self, incoming: &str, config: &InputConfig) -> bool {
+        if !config.editable || incoming.is_empty() {
             return false;
+        }
+        if config.secure
+            || config.keyboard != KeyboardType::Default
+            || config.auto_capitalize == AutoCapitalize::None
+        {
+            return self.replace(incoming, config);
+        }
+        let text = sanitize(incoming, config.multiline);
+        if !incoming.is_empty() && text.is_empty() {
+            return false;
+        }
+        let prefix = &self.text[..self.selected_range().start];
+        let text = match config.auto_capitalize {
+            AutoCapitalize::Characters => text.to_uppercase(),
+            AutoCapitalize::Words => capitalize_words(prefix, &text),
+            AutoCapitalize::Sentences => capitalize_sentences(prefix, &text),
+            AutoCapitalize::None => text,
+        };
+        self.replace(&text, config)
+    }
+
+    pub(crate) fn replace(&mut self, incoming: &str, config: &InputConfig) -> bool {
+        self.replace_inner(incoming, config).unwrap_or(false)
+    }
+
+    pub(crate) fn replace_range(
+        &mut self,
+        start: u32,
+        end: u32,
+        incoming: &str,
+        config: &InputConfig,
+    ) -> bool {
+        let previous = (self.anchor, self.cursor, self.goal_column);
+        self.set_selection(start, end);
+        match self.replace_inner(incoming, config) {
+            Some(changed) => changed,
+            None => {
+                (self.anchor, self.cursor, self.goal_column) = previous;
+                false
+            }
+        }
+    }
+
+    fn replace_inner(&mut self, incoming: &str, config: &InputConfig) -> Option<bool> {
+        if !config.editable {
+            return None;
         }
         let text = sanitize(incoming, config.multiline);
         let text: String = if config.keyboard == KeyboardType::Number {
@@ -205,7 +269,7 @@ impl Editor {
         };
         // A rejected key or paste does not delete the current selection.
         if !incoming.is_empty() && text.is_empty() {
-            return false;
+            return None;
         }
         let range = self.selected_range();
         let retained = utf16_len(&self.text) - utf16_len(&self.text[range.clone()]);
@@ -219,11 +283,11 @@ impl Editor {
             })
             .collect();
         if !text.is_empty() && fit.is_empty() {
-            return false;
+            return None;
         }
         if self.text[range.clone()] == fit {
             self.select_bytes(range.start + fit.len(), range.start + fit.len());
-            return false;
+            return Some(false);
         }
         self.record();
         self.text.replace_range(range.clone(), &fit);
@@ -233,7 +297,7 @@ impl Editor {
         self.anchor = self.cursor;
         self.goal_column = None;
         self.count = self.count.saturating_add(1);
-        true
+        Some(true)
     }
 
     pub(crate) fn delete(&mut self, backward: bool, word: bool, config: &InputConfig) -> bool {
@@ -366,6 +430,70 @@ impl Editor {
         }
         visit(self.text.len(), row, column);
     }
+}
+
+fn capitalize_words(prefix: &str, incoming: &str) -> String {
+    // Segment the prefix together with the insertion so apostrophes and
+    // letters spanning the caret still belong to the same Unicode word.
+    let mut context = String::with_capacity(prefix.len().saturating_add(incoming.len()));
+    context.push_str(prefix);
+    context.push_str(incoming);
+    let mut result = String::with_capacity(incoming.len());
+    let mut copied = prefix.len();
+    for (start, word) in context.unicode_word_indices() {
+        let Some((offset, letter)) = word.char_indices().find(|(_, c)| c.is_alphabetic()) else {
+            continue;
+        };
+        let offset = start + offset;
+        if offset >= prefix.len() {
+            result.push_str(&context[copied..offset]);
+            result.extend(letter.to_uppercase());
+            copied = offset + letter.len_utf8();
+        }
+    }
+    result.push_str(&context[copied..]);
+    result
+}
+
+fn capitalize_sentences(prefix: &str, incoming: &str) -> String {
+    let mut result = String::with_capacity(incoming.len());
+    let mut sentence_start = true;
+    let mut terminator = false;
+    for (inserted, c) in prefix
+        .chars()
+        .map(|c| (false, c))
+        .chain(incoming.chars().map(|c| (true, c)))
+    {
+        let uppercase = sentence_start && c.is_alphabetic();
+        match c {
+            '\n' | '\r' => {
+                sentence_start = true;
+                terminator = false;
+            }
+            c if c.is_whitespace() => {
+                sentence_start |= terminator;
+            }
+            '.' | '!' | '?' | '。' | '！' | '？' => terminator = true,
+            // Quotes and brackets between a sentence and its whitespace
+            // must not hide its punctuation or consume its first letter.
+            '\'' | '"' | '‘' | '’' | '“' | '”' | '«' | '»' | '(' | ')' | '[' | ']' | '{' | '}'
+            | '「' | '」' | '『' | '』' => {}
+            c => {
+                if c.is_alphanumeric() {
+                    sentence_start = false;
+                }
+                terminator = false;
+            }
+        }
+        if inserted {
+            if uppercase {
+                result.extend(c.to_uppercase());
+            } else {
+                result.push(c);
+            }
+        }
+    }
+    result
 }
 
 fn bounded_push(history: &mut Vec<Snapshot>, snapshot: Snapshot) {
@@ -529,5 +657,139 @@ mod tests {
         assert_eq!(editor.selection(), (2, 3));
         editor.controlled("a\x1bb".into(), 0);
         assert_eq!(editor.text(), "ab");
+    }
+
+    #[test]
+    fn host_edit_offsets_require_exact_utf16_grapheme_boundaries() {
+        let mut editor = Editor::default();
+        editor.controlled("a😀e\u{301}中".into(), 0);
+        for offset in [0, 1, 3, 5, 6] {
+            assert!(editor.is_boundary_utf16(offset), "{offset}");
+        }
+        // Neither a surrogate pair nor a combining sequence is split.
+        for offset in [2, 4, 7, u32::MAX] {
+            assert!(!editor.is_boundary_utf16(offset), "{offset}");
+        }
+        let empty = Editor::default();
+        assert!(empty.is_boundary_utf16(0));
+        assert!(!empty.is_boundary_utf16(1));
+    }
+
+    #[test]
+    fn explicit_word_capitalization_respects_context_and_literal_paste() {
+        let mut editor = Editor::default();
+        let config = InputConfig {
+            auto_capitalize: AutoCapitalize::Words,
+            ..InputConfig::default()
+        };
+        assert!(editor.typed("élise don't-stop", &config));
+        assert_eq!(editor.text(), "Élise Don't-Stop");
+        editor.controlled("don'".into(), editor.count());
+        editor.typed("t", &config);
+        assert_eq!(editor.text(), "don't");
+        editor.typed(" ", &config);
+        editor.typed("é", &config);
+        editor.typed("lise", &config);
+        assert_eq!(editor.text(), "don't Élise");
+        editor.replace(" pasted words", &config);
+        assert_eq!(editor.text(), "don't Élise pasted words");
+
+        editor.controlled("hello world".into(), editor.count());
+        editor.set_selection(6, 11);
+        editor.typed("friend", &config);
+        assert_eq!(editor.text(), "hello Friend");
+        editor.set_selection(1, 5);
+        editor.typed("i", &config);
+        assert_eq!(editor.text(), "hi Friend");
+    }
+
+    #[test]
+    fn explicit_sentence_capitalization_handles_typing_and_punctuation() {
+        let mut editor = Editor::default();
+        let config = InputConfig {
+            multiline: true,
+            ..InputConfig::default()
+        };
+        editor.typed("hello", &config);
+        editor.typed(" there. ", &config);
+        editor.typed("“élise?!” yes。 next\nnew line", &config);
+        assert_eq!(editor.text(), "Hello there. “Élise?!” Yes。 Next\nNew line");
+
+        editor.controlled("version 3.14 and example.".into(), editor.count());
+        editor.typed("com lower", &config);
+        assert_eq!(editor.text(), "version 3.14 and example.com lower");
+        editor.controlled("hello. world".into(), editor.count());
+        editor.set_selection(7, 12);
+        editor.typed("friend", &config);
+        assert_eq!(editor.text(), "hello. Friend");
+    }
+
+    #[test]
+    fn capitalization_expansion_obeys_grapheme_limits_and_undo() {
+        let mut editor = Editor::default();
+        let config = InputConfig {
+            auto_capitalize: AutoCapitalize::Characters,
+            max_length: Some(5),
+            ..InputConfig::default()
+        };
+        editor.typed("ße\u{301}😀", &config);
+        assert_eq!(editor.text(), "SSE\u{301}");
+        assert_eq!(editor.selection(), (4, 4));
+        assert_eq!(editor.count(), 1);
+        assert!(editor.undo(&config));
+        assert_eq!(editor.text(), "");
+        assert!(editor.redo(&config));
+        assert_eq!(editor.text(), "SSE\u{301}");
+
+        editor.set_selection(0, 2);
+        let tight = InputConfig {
+            max_length: Some(3),
+            ..config
+        };
+        assert!(!editor.typed("é\u{301}", &tight));
+        assert_eq!(editor.selected(), "SS");
+    }
+
+    #[test]
+    fn explicit_capitalization_keeps_secure_and_specialized_inputs_literal() {
+        let mut editor = Editor::default();
+        let mut config = InputConfig {
+            auto_capitalize: AutoCapitalize::Characters,
+            ..InputConfig::default()
+        };
+        config.secure = true;
+        editor.typed("secret", &config);
+        assert_eq!(editor.text(), "secret");
+        config.secure = false;
+        for keyboard in [
+            KeyboardType::Decimal,
+            KeyboardType::Numeric,
+            KeyboardType::NumbersAndPunctuation,
+            KeyboardType::Email,
+            KeyboardType::Phone,
+            KeyboardType::Url,
+        ] {
+            editor.select_all();
+            config.keyboard = keyboard;
+            editor.typed("mixedCase", &config);
+            assert_eq!(editor.text(), "mixedCase");
+        }
+        editor.select_all();
+        config.keyboard = KeyboardType::Number;
+        editor.typed("abc123", &config);
+        assert_eq!(editor.text(), "123");
+
+        config.keyboard = KeyboardType::Default;
+        config.auto_capitalize = AutoCapitalize::None;
+        editor.select_all();
+        editor.typed("literal", &config);
+        assert_eq!(editor.text(), "literal");
+        editor.select_all();
+        assert!(!editor.typed("\x1b\0", &config));
+        assert!(!editor.typed("", &config));
+        assert_eq!(editor.selected(), "literal");
+        config.editable = false;
+        assert!(!editor.typed("replacement", &config));
+        assert_eq!(editor.selected(), "literal");
     }
 }

@@ -24,7 +24,10 @@ app. The distributed host is in `runtime/tui/`; a checkout builds `nsh-tui-host`
 The operations workbench combines sidebar navigation,
 search and status filters, service metrics, a detail inspector, canvas charts, an activity timeline and a deployment
 dialog. Its compact 120×34 layout shows seven complete service rows with metrics and a chart; 160×50 also shows
-the inspector and activity timeline. Shorter terminals fold away secondary content to keep the fleet visible:
+the inspector and activity timeline. At 140 columns and wider, the inspector offers Details, Effects and Guide
+tabs. Effects combines a local image, blur, blend modes, an animated layer, bundled Pacifico canvas lettering and
+a popup menu; Guide opens a local HTML runbook in readable mode. Shorter terminals fold away secondary content to
+keep the fleet visible:
 
 ```sh
 nsh run examples/terminal-workbench --target tui
@@ -51,8 +54,12 @@ together. Text spans preserve colors, bold and italic, underlines and strikethro
 reorder their runs for display. The terminal's font determines the face and glyph size. Explicit line height and
 letter spacing are rounded to terminal rows and columns.
 
-Backgrounds, borders and clipping follow the retained view tree. On startup, the interactive host detects image
-protocols and the terminal's physical cell dimensions. Images and recorded canvas drawings use
+Backgrounds, borders and clipping follow the retained view tree. Transforms project complete view subtrees, with
+pointer hit testing following the transformed geometry. Rounded descendant clipping, group opacity, blend modes,
+ordered filters and backdrop filters are composited on the graphics worker.
+
+On startup, the interactive host detects image protocols and the terminal's physical cell dimensions. Images and
+recorded canvas drawings use
 [`ratatui-image`](https://docs.rs/ratatui-image/11.1.0/ratatui_image/) with Kitty, Sixel or iTerm2 graphics when
 available. Encoding runs on the graphics worker. Colored upper and lower half blocks provide a portable drawing
 path and preserve composition where text or overlays overlap a graphic. The terminal controls how RGB colors map
@@ -67,9 +74,20 @@ The existing [`nsh/ui/mobile`](../components/index.md) components render through
 interactive row enough height to occupy at least one terminal row, use clear color contrast and keep important
 labels legible at the terminal's column width.
 
-Canvas paths, gradients, clipping, transforms, compositing and image drawing are rasterized on a worker; canvas
-text uses shaped system-font outlines. Regular `Text` remains terminal glyphs. Images support PNG, JPEG, GIF and
-WebP, including animated GIF and WebP within the decoder's resource bounds.
+Canvas paths, gradients, clipping, transforms, compositing and image drawing are rasterized on a worker. Canvas
+text uses shaped outlines from fonts registered with the surface and system fallback fonts; `measureText` uses
+the same shaping and font selection as drawing. Registered TrueType, OpenType and font-collection faces belong to
+that surface. Ordinary `Text` uses the terminal's font and cell geometry; transformed or effected text groups
+rasterize font outlines fitted to the measured cell geometry.
+
+Images support PNG, JPEG, GIF and WebP, including animated GIF and WebP within the decoder's resource bounds.
+`defaultSource` remains visible during loading and after a load error. `blurRadius` runs on the worker and
+`fadeDuration` sets the loaded image's fade over its placeholder; the terminal default is 0 ms. Download progress
+arrives at most once every 100 ms and on completion.
+
+Screen stacks and modals apply slide, fade or immediate transitions. Screen-edge back gestures and downward
+modal-header drags follow the mounted navigation and dismissal props. Hosts can select reduced motion with
+`AppOptions::reduce_motion` or `AppView::set_reduce_motion`.
 
 ## Keyboard and mouse
 
@@ -79,23 +97,53 @@ WebP, including animated GIF and WebP within the decoder's resource bounds.
 | Enter, Space | Activate the focused pressable |
 | Escape | Leave an input; otherwise go back or request modal dismissal |
 | Arrows, Page Up / Down, Home / End | Scroll the focused scroll view or a scrollable ancestor |
+| Ctrl+wheel, Ctrl++ / Ctrl+- | Zoom a scroll view within its configured limits |
+| Ctrl+0 | Reset the scroll view's zoom |
+| F10 | Open the application menu |
 | Ctrl+Q | Close the terminal host |
-| Ctrl+C | Copy an input selection; outside an input, close the host |
+| Ctrl+C | Copy an input or selectable-text selection; otherwise close the host |
 
 Click to focus or activate controls. The mouse wheel scrolls vertically; Shift+wheel scrolls horizontally. Pointer
-positions are converted from cells into the same virtual points used by layout.
+positions are converted from cells into the same virtual points used by layout. Middle-button dragging pans scroll
+content with inertia, bounce and pull-to-refresh according to its props. Drag a scrollbar thumb with the left
+button, or click its track to page. Zoom honors the scroll view's zoom and gesture props; paging, snap offsets,
+right-to-left layout and animated scroll commands use the same native scroll state.
 
 Inputs support grapheme-aware cursor movement and deletion, Shift selection, word movement with Ctrl/Alt+arrows,
-Home / End, Ctrl+Home / End, select all, undo and redo, and a clipboard owned by the surface. Ctrl+A/C/X/V select,
-copy, cut and paste; Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y undo and redo. Secure fields mask their contents and protect
-copy and cut. Input methods enter committed text through the terminal; bracketed paste enters text as one edit.
-Enter follows `submitBehavior`, and Shift/Alt+Enter inserts a newline into a multiline input.
+Home / End, Ctrl+Home / End, select all, undo and redo. Ctrl+A/C/X/V select, copy, cut and paste; Ctrl+Z and
+Ctrl+Shift+Z or Ctrl+Y undo and redo. Secure fields mask their contents and protect
+copy and cut. Terminal keys and bracketed paste preserve their literal text. Input methods enter committed text
+through the terminal; bracketed paste enters text as one edit. Enter follows `submitBehavior`, and Shift/Alt+Enter
+inserts a newline into a multiline input.
+
+The interactive standalone host connects copying and pasting to the operating system clipboard through its
+clipboard helpers, with OSC 52 as a copy fallback. Embedded views and scripts start with a surface-local clipboard;
+an embedding host can connect its own clipboard through `HostServices`.
 
 The app's [`nsh/keymap`](../modules/nsh-keymap.md) bindings run before default handling. Terminal emulators decide
 which keys and modifiers reach an app; choose shortcuts that your supported terminal forwards.
 
 Selectable text supports mouse selection and Ctrl+A/C, and inline text links activate through pointer hit testing.
 Native alert and action-sheet overlays use Tab or the arrows to choose a button and Enter to activate it.
+
+[`nsh/desktop`](../modules/nsh-desktop.md) is available on terminal surfaces for titles and menus.
+`Platform.isTerminal` identifies this presentation while `Platform.isDesktop` identifies graphical desktop surfaces.
+F10 opens the application menu; arrows navigate, Enter or Space selects, and Escape closes it. Application and
+popup menus include submenus, checkmarks, disabled items and shortcuts. Window titles update through sanitized
+OSC 2 output in the standalone host.
+
+## Readable pages and video
+
+`WebView` presents HTML as a readable terminal page with headings, paragraphs, lists, preformatted blocks and
+basic tables. Both inline HTML and remote URI sources use this mode. URI navigation follows the app's `webview`
+capabilities and checks redirects against those grants. Links have numbered references: Tab selects a link and
+scrolls it into view, and Enter follows it. Alt+Left and Alt+Right navigate history; reload, stop and scrolling
+commands operate on the reader.
+
+`Video` presents picture playback through FFmpeg, with pause, seek, playback rate, repeat and load/progress events.
+Install `ffmpeg` and `ffprobe` on the executable search path, or select them with `NSH_FFMPEG` and `NSH_FFPROBE`.
+Embedding hosts can supply native components for audio output, browser execution or platform-specific media
+presentations.
 
 ## Packaging
 
@@ -150,11 +198,16 @@ Dropping the view or calling `stop()` ends its engine.
 hosts use `Limits::standalone_desktop()`. `AppOptions::metrics` accepts a validated `CellMetrics` value for hosts
 that choose a different virtual point scale. See [Sandbox and capabilities](./sandbox-and-capabilities.md).
 
+Connect optional clipboard, title and accessibility-announcement callbacks with
+`AppView::set_host_services(Some(services))`. `AppView::accessibility_snapshot()` exposes each accessible node's
+role, label, hint, state, value, frame, focus and actions; `Surface::perform_accessibility_action` routes host
+actions back to the mounted app. Secure input values stay protected. Creating an embedded view leaves terminal
+IO and service integration under the host's control.
+
 For [native components](./native-components.md), implement `NativeComponent` and register its factory with
 `AppView::register_component(name, factory)` before loading the app. Each mounted leaf gets its own instance,
 receives props and commands, paints into its clipped region, and can return native events to TSX. Hosts can supply
-terminal presentations for content such as maps, browser pages and media controls. The built-in `WebView` and
-`Video` elements display descriptive tiles and report an error event for the app to handle.
+terminal presentations for content such as maps, browser pages and media controls.
 
 ## Reproducible interaction
 
@@ -182,7 +235,9 @@ nsh-tui-host --bundle build/bundle.nshc --size 120x40 \
 | `expect-focus` | Assert that a node has keyboard focus |
 | `quit` | Stop the app |
 
-Snapshots preserve characters and layout. Inspect colors and half-block graphics in an interactive terminal.
+Snapshots preserve ordinary terminal text and layout. Rasterized text and graphics appear as half-block
+approximations; use labels outside effect groups for text assertions. Inspect colors and graphic details in an
+interactive terminal.
 
 ## See also
 

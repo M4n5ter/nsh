@@ -134,18 +134,18 @@ mount(() => <View desktop={{ accessibilityLabel: "desktop" }}>
         .expect("mounted keymap");
     let control_k = nsh_core::keymap::Keystroke::parse_with("ctrl+k", false).unwrap();
     assert!(keymap.find(control_k, false, false).consumed());
-    assert!(!batch.items.iter().any(|item| matches!(
+    assert!(batch.items.iter().any(|item| matches!(
         item,
         MountItem::Command {
-            command: nsh_core::Command::Desktop(_),
+            command: nsh_core::Command::Desktop(command),
             ..
-        }
+        } if matches!(**command, nsh_core::desktop::DesktopCommand::SetMenu(_))
     )));
     assert_eq!(
         frame_parts(batch),
         (
             vec![
-                "macos terminal true false false Ctrl+K".into(),
+                "macos terminal true false true Ctrl+K".into(),
                 "terminal".into(),
                 "macos".into(),
                 "default".into()

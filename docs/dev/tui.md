@@ -28,22 +28,37 @@ guide is [Terminal](../../website/docs/tui.md), with a matching
   directly. Terminal widths come from `unicode-width`, graphemes from
   `unicode-segmentation`, line breaks from `unicode-linebreak` and visual
   runs from `unicode-bidi`. Indices crossing the engine are UTF-16.
+- `fonts.rs`: a per-surface font catalog shared with the text engine and
+  graphics worker. Registration, canvas measurement and rasterized glyph
+  outlines use the same face selection and shaping.
 - `input.rs` and `editor.rs`: terminal events, hit testing, focus scopes,
   press state, scroll offsets and grapheme-safe editing. The editor keeps
   undo/redo and selections in Rust. Controlled values use the existing
   event-count protocol to reject stale JS updates.
 - `render.rs`: point-to-cell conversion, view decorations, text and
   input painting, scrollbars, focus indication, modal and system dialogs.
+- `geometry.rs` and `composite.rs`: presentation matrices, inverse hit
+  testing and asynchronous raster composition for transformed or effected
+  subtrees. Ordinary nodes retain the direct terminal-cell paint path.
+  Each immutable render pass caches presentation matrices by node ID;
+  occlusion and ancestor clips reuse them, and input always reads current
+  geometry outside that pass.
+- `scroll.rs` and `navigation.rs`: native scrolling, zoom, drag/inertia,
+  screen and modal transitions, sheet geometry and interactive dismissal.
 - `motion.rs`: presentation tracks for layout create/update/delete,
   style transitions and keyframe animations. Layout/style targets stay
   on the node; drawing and hit testing sample the same presentation.
   Idle nodes keep no motion record, and completed tracks are released.
-- `image.rs`, `canvas.rs`, `worker.rs`: asset loading, image decoding,
+- `image.rs`, `image_state.rs`, `canvas.rs`, `worker.rs`: asset loading, image decoding,
   canvas rasterization and completed-job queues. File and network IO and
   rasterization stay off the terminal draw loop. The renderer samples
   upper/lower half-cell colors for universal `▀` characters; `protocol.rs`
   prepares clipped pixel graphics and encodes them with `ratatui-image` on
   the same worker for capable terminals.
+- `media.rs`: bounded readable-HTML loading and optional pipe-based FFmpeg
+  video decoding. Retired jobs retain worker permits until their IO exits.
+- `services.rs`: explicit embedding callbacks, supervised clipboard
+  helpers, menus, terminal title/output requests and semantic accessibility.
 - `native.rs`: per-view factories for host terminal components, receiving
   the existing native props, commands and event protocol.
 - `script.rs`: deterministic in-memory drawing and simulated events; it
@@ -78,10 +93,17 @@ rounds up to terminal rows, and positive letter spacing rounds to columns.
 Font size and family do not change terminal glyph advances: the emulator
 chooses the physical font. Text shadows use a bounded cell kernel.
 
-Canvas text uses system-font discovery, Rustybuzz shaping and TrueType /
-OpenType outlines in the rasterizer. Its transforms and metrics belong to
-the canvas rather than the terminal glyph grid. Color-only emoji fonts
-may fall back to replacement outlines.
+Registered TrueType, OpenType and collection fonts belong to one surface.
+Canvas text uses that catalog with system-font fallback, Rustybuzz shaping
+and outline rasterization; `measureText` uses the same font selection and
+shaping as drawing. Its transforms and metrics belong to the canvas rather
+than the terminal glyph grid. Rasterized text inside a transformed or
+effected subtree fits outlines to the existing measured grapheme boxes.
+Ordinary text still uses terminal glyphs. Raster glyphs support bounded
+PNG/BGRA/grayscale font bitmaps and COLR v0 layers; COLR v1 paint graphs
+and SVG glyph documents use replacement-outline fallback. Registration
+invalidates that surface's raster caches; it never changes another view's
+fonts.
 
 ## Interaction
 
@@ -95,11 +117,19 @@ their protocol placeholders retain their colors and encoding state.
 
 Inputs support cursor and selection movement, Unicode-safe deletion,
 word/line/document movement, undo/redo, secure values, UTF-16 `maxLength`
-and controlled-value event counts. Their clipboard is owned by the
-surface. `Clipboard` commands enforce the mounted capability policy;
-copy/cut from a secure input is refused. Bracketed paste is one edit.
+and controlled-value event counts. `Clipboard` commands enforce the
+mounted capability policy; copy/cut from a secure input is refused.
+Interactive standalone apps use supervised OS clipboard helpers, with
+OSC 52 as a write fallback. Embedded views and scripts use a local
+clipboard unless the host supplies `HostServices`. Clipboard reads check
+the current focus, selection and edit count before applying a late paste.
+Bracketed paste is one edit, and physical keys and paste preserve literal
+text. `input_context` exposes editing/autofill/correction hints to a host
+keyboard, omitting secure text; `apply_input_edit` validates its node,
+generation, UTF-16 selection, grapheme boundaries and maximum length.
 
-Ctrl+Q always requests exit. Ctrl+C copies in an input and exits elsewhere.
+Ctrl+Q always requests exit. Ctrl+C copies an input or selectable-text
+selection and otherwise requests exit.
 Escape leaves an input first, then invokes native back/modal handling.
 Return follows `submitBehavior`; Shift/Alt+Return inserts a multiline
 newline. Scrollable views accept arrows, Page Up/Down and Home/End;
@@ -107,6 +137,15 @@ wheel detents scroll three rows or three columns. App keymaps are checked
 before ordinary input defaults, with text-input and repeat restrictions.
 Terminal protocols may merge key combinations or consume them before the
 application receives them.
+
+Middle-button content dragging drives native scrolling, inertia, bounce
+and mounted pull-to-refresh behavior. Left-button dragging remains
+available for text, app pans and navigation; scrollbar thumbs and tracks
+accept left-button drag or paging. Wheel events remain discrete and honor
+paging, snapping and RTL. Ctrl+wheel and Ctrl+plus/minus zoom within the
+mounted limits; Ctrl+0 resets the scale. Animated `scrollTo`, `scrollToEnd`
+and `zoomTo` run natively. Drag, momentum, refresh and scroll completion
+events use the shared event protocol.
 
 Selectable text has mouse drag selection and Ctrl+A/C, with inline link
 hit testing through the shaped runs' UTF-16 ranges. Pointer input also
@@ -126,6 +165,18 @@ existing engine messages. Drawing and hit testing share the sampled
 presentation geometry; rendering remains quantized to cells and
 half-cell color samples.
 
+Screen push/pop defaults to a 300 ms horizontal slide with previous-screen
+parallax; fade uses 200 ms and the first screen appears immediately.
+Modals support slide, fade and immediate presentation, with `Show` after
+entry and `Dismiss` after exit. Page and form sheets report their actual
+card dimensions to the engine; transparent presentation uses the full
+viewport without a scrim. Header slots occupy the first terminal row and
+large titles occupy a second row that collapses with vertical scrolling.
+Mounted prevention/dismissal props are checked before back or drag
+decisions. Screen-edge and modal-header gestures complete past the native
+distance/velocity threshold or animate back. Reduced motion selects fades
+while retaining interactive gestures.
+
 ## Graphics and platform boundaries
 
 PNG, JPEG, GIF and WebP decode on the graphics worker. Still images apply
@@ -136,8 +187,14 @@ Encoded images are limited to 64 MiB, 8192 pixels on either side and
 Canvas rasterization is limited to 8192 pixels per side and 8 million
 pixels; it supports paths, clips, transforms, gradients, blend modes,
 alpha, shadows, image cropping and native animation argument slots.
-Image `defaultSource`, `blurRadius` and `fadeDuration` are currently ignored;
-loaded images use the mounted resize mode, tint and view opacity directly.
+Image `defaultSource` remains visible during loading and after failure.
+`blurRadius` applies a bounded premultiplied-alpha Gaussian approximation
+on the worker, including every animation frame. An explicit `fadeDuration`
+fades the new source over its full-opacity placeholder; the terminal
+default is immediate and sharp cache hits appear immediately. Progress
+events are throttled to 100 ms plus completion; a custom asset provider
+reports its completed read. Source/revision tickets discard stale work
+and revoked capabilities remove denied layers.
 
 Interactive `run_app` probes Kitty, Sixel and cell pixel dimensions with
 `ratatui-image`'s capability parser, using environment hints for iTerm2.
@@ -163,19 +220,51 @@ protocols. Before painting their own overlapping widgets above that
 region, they select half blocks with `set_image_protocol(None)`; internal
 NSH overlays already make that composition decision automatically.
 
-View transforms project bounds to
-the cell grid; ordinary text remains upright. Text size, font family,
-subpixel corners and blur cannot produce the same physical results as a
-pixel GUI. Embedding regions are rectangular; terminal glyphs and colors
-are ultimately controlled by the emulator.
+View transforms use inverse homographies for raster contents and hit
+testing, including rotation, skew and projective transforms. Effected
+subtrees apply group opacity once, all CSS blend modes, ordered color and
+spatial filters, backdrop filters from earlier painted content, and
+rounded/continuous descendant clips. Composition is asynchronous and
+bounded: 2 million output pixels, 24 million working pixels, 32 layers,
+32 cached groups / 64 MiB and 8 pending jobs per surface. Larger groups
+downsample; a previous complete frame remains visible while work runs.
+Output uses the selected image protocol or half blocks. Terminal glyphs,
+physical resolution and colors remain controlled by the emulator.
 
-Built-in WebView and Video nodes show descriptive tiles and report an
-error event. Applications can expose terminal alternatives through
-`nsh/native` and per-view `NativeComponent` factories. System dialogs are
-terminal overlays with local keyboard and pointer handling. Status bars,
-desktop window chrome, software keyboard accessories and scroll zoom have
-no graphical host operation here; component layout, native animation,
-layout/style transitions, keyframes and app events remain shared.
+Built-in WebView provides a readable HTML presentation for inline HTML
+and URI sources. HTTP(S) navigation and redirects enforce the mounted
+webview grants. Headings, paragraphs, lists, preformatted text, basic
+tables and numeric link references become terminal text; Tab/Enter select
+and follow links, Alt+Left/Right traverse history, and reload/stop commands
+work through the existing ref. Page scripts are skipped; injected script
+and `postMessage` report an error because this reader has no browser JS
+context. Local fragment anchors are not resolved.
+
+Video uses optional `ffmpeg` and `ffprobe` executables from `PATH`, or
+`NSH_FFMPEG` and `NSH_FFPROBE`. Pipe-based decoding provides visual
+playback, pause/rate/repeat/seek and load/progress/end events; its last row
+contains controls. Sources are bounded to 64 MiB, 8192 pixels per side,
+16 million pixels and four hours; decoding samples at most 512×288 at
+12 fps with three queued frames. Eight actual media workers per surface
+remain reserved until IO stops. HTTP loads have a total 15 s deadline
+across redirects, and a stalled FFmpeg pipe is killed after 15 s. An
+embedding asset callback owns its own timeout. Audio output and a full
+browser context can be supplied through `nsh/native` host components.
+
+System dialogs and application/popup menus are terminal overlays. F10
+opens the app menu; arrows, Enter/Space and Escape handle selection,
+submenus and dismissal. Enabled/checkmarked items and shortcuts retain
+their shared callbacks. Window titles become sanitized OSC 2 output in
+standalone apps. Graphical window geometry, status bars and software
+keyboard accessories remain host-specific presentations.
+
+`HostServices` connects embedded clipboard, title and announcement
+transports explicitly; creating a view performs no terminal IO.
+`accessibility_snapshot` exposes mounted semantics, focus, frames and
+actions, omitting secure values and respecting hidden/grouped children.
+The host can invoke `perform_accessibility_action` and route announcements
+to its assistive technology. The standalone default also shows a visual
+announcement toast; it does not install an OS screen-reader bridge.
 
 The renderer environment is a separate axis from the operating system:
 `Platform.OS` keeps the real OS and `Platform.renderer` identifies the
@@ -202,8 +291,16 @@ newlines. Wheel deltas are detents. Key names include `Enter`, `Esc`,
 `Space`, `PageDown`, `F1`, `Ctrl+a` and `Ctrl+Shift+Left`.
 
 `shot` writes UTF-8 characters, preserving wide-cell spacing, and omits
-color attributes. Inspect interactive rendering for color and half-block
-graphics. Script failures return a process error and are suitable for CI.
+color attributes. Rasterized glyphs inside effect groups become graphic
+samples rather than searchable characters; assert nearby ordinary labels
+and inspect interactive rendering for their visual appearance. Script
+failures return a process error and are suitable for CI.
+
+`expect` checks frame contents rather than input readiness. A background
+notice can update during a modal's exit animation while the modal still
+owns input. Allow the transition to finish before the next background
+action; the workbench uses `expect Deployment queued; wait 300` after
+confirming its fade dialog.
 
 `nsh package --target tui` places the runner beside `nsh/bundle.nshc`,
 `nsh/assets`, `nsh/app.json` and optional `nsh/capabilities.json`, archived
@@ -223,8 +320,8 @@ runners remain console applications.
 | API | Purpose |
 |---|---|
 | `CellMetrics::new(f32, f32) -> Result<Self, String>`; `width()`, `height()`, `viewport(u16, u16)` | Validated point dimensions for terminal cells |
-| `TerminalTextEngine::new(CellMetrics)`; `Default`, `TextEngine` | Point measurement and terminal text runs |
-| `AppOptions` | Trace, assets, ID/title, size, script, appearance, limits, metrics and component factories |
+| `TerminalTextEngine::new(CellMetrics)`; `Clone`, `Default`, `TextEngine` | Point measurement and terminal text runs; the engine owns its shared font catalog and is no longer `Copy` |
+| `AppOptions` | Trace, assets, ID/title, size, script, appearance, limits, metrics, component factories and `reduce_motion` |
 | `AppSource::{Rust(Root), Bundle(Bundle), DevServer(String)}` | Standalone source (`DevServer` requires `dev`) |
 | `AppView::new(AppOptions) -> Self` | Independent embeddable engine and surface |
 | `AppView::load(App) -> io::Result<()>`; `connect(String)` (`dev`) | Load trusted code or start a development session |
@@ -232,7 +329,11 @@ runners remain console applications.
 | `AppView::handle_event(Event) -> bool`; `resize(u16, u16)` | Route local terminal input and region dimensions |
 | `AppView::render(Rect, &mut Buffer)`; `snapshot() -> String` | Render the assigned area or get UTF-8 characters |
 | `AppView::surface()`, `surface_mut()`, `control()`, `last_error()` | Access the scene, engine control and last error |
-| `AppView::set_asset_base`, `set_appearance`, `set_theme` | Update resources and visual environment |
+| `AppView::set_asset_base`, `set_appearance`, `set_theme`, `set_reduce_motion(bool)` | Update resources and visual environment |
+| `AppView::set_host_services(Option<Arc<dyn HostServices>>) -> io::Result<()>` | Opt into host service callbacks on supervised workers |
+| `AppView::drain_service_output() -> impl Iterator<Item = ServiceOutput>` | Retrieve output for the embedding host to transport explicitly |
+| `AppView::accessibility_snapshot() -> Vec<AccessibleNode>`; `Surface::accessibility_snapshot()` | Obtain semantic nodes without terminal IO |
+| `Surface::perform_accessibility_action(NodeId, &str) -> bool` | Invoke a mounted semantic action |
 | `AppView::set_image_protocol(Option<ImageProtocol>)`; `Surface::set_image_protocol(Option<ImageProtocol>)` | Choose host-negotiated graphics without terminal IO |
 | `AppView::image_protocol_cleanup() -> String`; `Surface::image_protocol_cleanup() -> String` | Return commands for the host to release its view's Kitty image resources |
 | `ImageProtocol::new(ProtocolType, u16, u16) -> Result<Self, String>`; `with_tmux(bool)`, `protocol_type()`, `cell_size()` | Select Kitty, Sixel, iTerm2 or half blocks with physical cell pixels |
@@ -240,9 +341,18 @@ runners remain console applications.
 | `Surface::new(u16, u16, CellMetrics)` | Retained rendering/input layer for hosts supplying their own engine wiring |
 | `Surface::apply(MountBatch)`, `tick(f64)`, `animating()`, `render(Rect, &mut Buffer)` | Mount and draw the scene |
 | `Surface::metrics`, `viewport`, `resize`, `snapshot`, `focused`, `should_quit` | Geometry and interaction inspection |
-| `Surface::set_assets`, `set_access`, `set_dark`, `set_components` | Engine resources, capability access and host components |
+| `Surface::set_assets`, `set_access`, `set_dark`, `set_components`, `set_reduce_motion(bool)` | Engine resources, capability access and host components |
+| `Surface::input_context() -> Option<InputContext>` | Snapshot editing hints and generation; secure text is omitted |
+| `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
 | `Surface::handle_event(Event)`; `drain_events()` | Accept input and forward ordered `SurfaceEvent`s |
-| `SurfaceEvent::{Event, Scroll, States, AnimationsFinished, ComponentSize}` | Existing engine messages produced by a surface |
+| `SurfaceEvent::{Event, Scroll, States, AnimationsFinished, ComponentSize, Service, Zoom, RootSize, ScreenHeader}` | Ordered engine and host-service messages produced by a surface |
+| `InputContext`; `InputEdit` | UTF-16 selections, edit generation, keyboard/autofill hints and checked replacements |
+| `HostServices: Send + Sync + 'static` | Cancellable clipboard read/write, title and announcement callbacks |
+| `ServiceCancellation::is_cancelled() -> bool`; `SystemServices` | Cancellation token and the standalone OS-service implementation |
+| `ClipboardContent::{Text(String), HasText(bool)}` | Clipboard read and format-query responses |
+| `ServiceRequest`; `ServiceOutput::{Title, Clipboard, Announcement}` | Explicit service requests and output payloads |
+| `ServiceOutput::terminal_sequence(bool) -> String` | Encode a title or bounded OSC 52 clipboard output, optionally through tmux |
+| `AccessibleNode` | Mounted role, label, hint, state, value, focus, actions and frame |
 | `AssetBase::{Directory(PathBuf), Http(String)}` | Resolve imported assets |
 | `Components::register(name, factory)`; `NativeComponent` | Per-view factories and mounted host leaves |
 | `ComponentContext`, `ComponentEvent`, `ComponentResponse` | Point/cell clipping and native event responses |
@@ -254,14 +364,30 @@ cells relative to the assigned region; drawing uses the region's absolute
 Ratatui rectangle. Native components receive destination cell rectangles
 and must respect both their clip and the buffer bounds.
 
+The shared core trait gains
+`TextEngine::measure_canvas(&self, &CanvasFont, &str) -> Option<f32>`, with
+a default `None` implementation and forwarding through `Rc`. The terminal
+engine returns the shaped advance from its per-surface catalog.
+
 ## Verification
+
+The additive Canvas measurement hook preserves the existing core mount
+stream. On Linux x86-64 in a debug build, `nsh trace examples/counter
+--taps 1` emitted 49 initial and 8 update items before and after this work;
+commit samples were 394/247 µs before and 525/245 µs after. These are local
+samples rather than replacements for the release baselines in
+`performance.md`. In an actual 160×50 Kitty-protocol PTY, the workbench's
+Effects-to-deployment interaction dropped from over 5 seconds to 195 ms
+after per-pass geometry caching and identity-transform shortcuts.
 
 The [operations workbench](../../examples/terminal-workbench/README.md)
 adds a three-pane, searchable service fleet with an inspector, canvas
 charts, an activity timeline and a deployment dialog. Run it at 120×34 for
-the compact view or 160×50
-cells for the full layout; its README includes a checked script for
-filtering, selection, deployment, section navigation and resizing down to 100×30.
+the compact view or 160×50 cells for the full layout. The wide inspector
+also includes local image/blending/font samples, a popup menu and an
+inline-HTML runbook. Its README includes checked scripts for those tabs,
+filtering, selection, deployment, section navigation and resizing down to
+100×30.
 
 ```sh
 cargo test -p nsh-platform-tui -p nsh-tui-host -p nsh-tui-app
@@ -271,7 +397,7 @@ cargo +nightly fmt --all --check
 ```
 
 `.github/workflows/tui.yml` checks all three desktop OSes and exercises the
-operations workbench headlessly on Linux, retaining text snapshots as CI
+operations workbench headlessly on each OS, retaining text snapshots as CI
 artifacts. Changes to focus, Unicode metrics, clipping, assets, hot reload
 or lifecycle should include a focused test that crosses the affected
 boundary and a script that checks the resulting app behavior.

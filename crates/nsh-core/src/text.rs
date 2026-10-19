@@ -348,6 +348,16 @@ pub trait TextEngine {
     /// The final layout in a box of exactly `size`, for drawing.
     fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout;
 
+    /// An optional Canvas-specific line advance in points.
+    ///
+    /// Backends whose Canvas fonts differ from their regular text geometry can
+    /// measure with the same shaping used by Canvas drawing. Returning `None`
+    /// keeps the default path through [`Self::prepare`] and [`Self::measure`].
+    fn measure_canvas(&self, font: &crate::canvas::CanvasFont, text: &str) -> Option<f32> {
+        let _ = (font, text);
+        None
+    }
+
     /// The lines of a final layout (`onTextLayout`); `text` is left empty
     /// (the core fills it in).
     fn lines(&self, layout: &TextLayout) -> Vec<TextLine> {
@@ -388,6 +398,10 @@ impl<T: TextEngine> TextEngine for std::rc::Rc<T> {
 
     fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout {
         (**self).layout(prepared, size)
+    }
+
+    fn measure_canvas(&self, font: &crate::canvas::CanvasFont, text: &str) -> Option<f32> {
+        (**self).measure_canvas(font, text)
     }
 
     fn lines(&self, layout: &TextLayout) -> Vec<TextLine> {
