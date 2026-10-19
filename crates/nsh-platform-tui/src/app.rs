@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::{
     collections::VecDeque,
     io::{self, IsTerminal, Write},
+    path::PathBuf,
     sync::{Arc, RwLock, mpsc},
     time::{Duration, Instant},
 };
@@ -102,6 +103,14 @@ pub struct AppOptions {
     pub components: crate::native::Components,
     /// Requests reduced-motion presentation for navigation and layout.
     pub reduce_motion: bool,
+    /// Where apps keep their data, each in `<dir>/<app id>` (`nsh.json`
+    /// `"id"`, carried by the bundle or Rust root). `None` uses the system's
+    /// data directory ([`nsh_engine::data_dir`]); an embedding host supplies
+    /// its own directory, such as its data directory plus `/nsh`.
+    pub data_dir: Option<PathBuf>,
+    /// The app's storage (`nsh/storage`), overriding the `storage.json` in
+    /// its directory of [`data_dir`](Self::data_dir).
+    pub storage: Option<Arc<dyn nsh_engine::StorageBackend>>,
 }
 
 impl Default for AppOptions {
@@ -118,6 +127,8 @@ impl Default for AppOptions {
             metrics: CellMetrics::default(),
             components: Default::default(),
             reduce_motion: false,
+            data_dir: None,
+            storage: None,
         }
     }
 }
@@ -243,6 +254,8 @@ impl AppView {
             limits: self.options.limits,
             ui_sets: ui_sets(),
             runtime: None,
+            data_dir: self.options.data_dir.clone().or_else(nsh_engine::data_dir),
+            storage: self.options.storage.clone(),
         };
         let (tx, rx) = mpsc::channel();
         let metrics = self.options.metrics;
@@ -714,6 +727,7 @@ impl AppView {
                 bytes,
                 source_map,
                 capabilities,
+                app_id,
             } => {
                 let bundle = match format {
                     // SAFETY: this developer-selected server negotiated
@@ -724,6 +738,7 @@ impl AppView {
                     }
                 }
                 .with_policy(nsh_engine::Policy::development())
+                .with_app_id(app_id.as_deref())
                 .with_capabilities_json(capabilities.as_deref())
                 .map_err(io::Error::other)?;
                 let bundle = match source_map {
@@ -1601,6 +1616,152 @@ mod tests {
             view.load(App::Rust(Root::of::<ScriptApp>())).unwrap();
             assert_eq!(view.image_protocol_cleanup(), cleanup);
         }
+    }
+
+    #[component]
+    fn StorageApp() -> impl IntoElement {
+        use nsh_core::storage::Storage;
+
+        let launches = Storage::get_item("launches")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0)
+            + 1;
+        Storage::set_item("launches", launches.to_string()).unwrap();
+        text(format!("Launches:{launches}"))
+    }
+
+    fn storage_directory(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "nsh-tui-storage-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn wait_for_storage(view: &mut AppView, file: &std::path::Path, launches: u32) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let expected = launches.to_string();
+        loop {
+            view.poll().unwrap();
+            assert_eq!(view.last_error(), None);
+            let stored = std::fs::read(file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            if stored.as_ref().and_then(|value| value["launches"].as_str())
+                == Some(expected.as_str())
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "storage was {stored:?} at {file:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn storage_survives_view_reloads_and_keeps_app_ids_separate() {
+        let dir = storage_directory("app-ids");
+        let options = AppOptions {
+            data_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        let mut view = AppView::new(options.clone());
+        for (id, launches) in [
+            ("com.acme.orders", 1),
+            ("com.acme.notes", 1),
+            ("com.acme.orders", 2),
+        ] {
+            view.load(Root::of::<StorageApp>().app_id(id).into())
+                .unwrap();
+            wait_for_storage(&mut view, &dir.join(id).join("storage.json"), launches);
+        }
+        view.stop();
+        let mut next = AppView::new(options);
+        next.load(Root::of::<StorageApp>().app_id("com.acme.orders").into())
+            .unwrap();
+        wait_for_storage(&mut next, &dir.join("com.acme.orders/storage.json"), 3);
+        next.stop();
+        assert!(!dir.join("default").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn embedding_storage_overrides_the_system_and_app_directories() {
+        let dir = storage_directory("embedding");
+        let mut view = AppView::new(AppOptions {
+            data_dir: Some(dir.join("apps")),
+            storage: Some(nsh_engine::FileStorage::open(dir.join("host-storage"))),
+            ..Default::default()
+        });
+        view.load(Root::of::<StorageApp>().app_id("com.acme.orders").into())
+            .unwrap();
+        wait_for_storage(&mut view, &dir.join("host-storage/storage.json"), 1);
+        view.stop();
+        assert!(!dir.join("apps").exists());
+        drop(view);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn development_bundles_keep_their_storage_identity_after_hot_updates_and_reload() {
+        use nsh_dev::{DevEvent, protocol::BundleFormat};
+
+        let dir = storage_directory("development");
+        let mut view = AppView::new(AppOptions {
+            data_dir: Some(dir.clone()),
+            ..Default::default()
+        });
+        view.connect("ws://127.0.0.1:0/ws".into()).unwrap();
+        let bundle = |version, app_id: &str| DevEvent::Bundle {
+            session: 1,
+            version,
+            format: BundleFormat::Source,
+            bytes: br#"import { Storage } from "nsh/storage";
+                Storage.getItem("launches").then(value =>
+                    Storage.setItem("launches", String(Number(value ?? "0") + 1)));"#
+                .to_vec(),
+            source_map: None,
+            capabilities: None,
+            app_id: Some(app_id.into()),
+        };
+        view.dev_event(bundle(1, "com.acme.orders")).unwrap();
+        wait_for_storage(&mut view, &dir.join("com.acme.orders/storage.json"), 1);
+        view.dev_event(DevEvent::Patch {
+            session: 1,
+            version: 2,
+            base: 1,
+            code: "true".into(),
+            source_map: None,
+        })
+        .unwrap();
+        view.dev_event(bundle(2, "com.acme.orders")).unwrap();
+        assert_eq!(
+            view.dev
+                .as_ref()
+                .unwrap()
+                .latest
+                .as_ref()
+                .unwrap()
+                .2
+                .app_id
+                .as_deref(),
+            Some("com.acme.orders")
+        );
+        view.reload_latest().unwrap();
+        wait_for_storage(&mut view, &dir.join("com.acme.orders/storage.json"), 2);
+        view.dev_event(bundle(3, "com.acme.notes")).unwrap();
+        wait_for_storage(&mut view, &dir.join("com.acme.notes/storage.json"), 1);
+        view.stop();
+        assert!(!dir.join("default").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -145,6 +145,13 @@ Install `ffmpeg` and `ffprobe` on the executable search path, or select them wit
 Embedding hosts can supply native components for audio output, browser execution or platform-specific media
 presentations.
 
+## App data
+
+[`nsh/storage`](../modules/nsh-storage.md) keeps string values across launches and development reloads. Each
+application's `nsh.json` `id` names its own `storage.json` directory under the system data directory: Application
+Support on macOS, `%APPDATA%` on Windows and `$XDG_DATA_HOME` (or `~/.local/share`) on Linux. Bundles and Rust roots
+carry the same app identity, so both entries use the same data. Releases declare their own `id` in `nsh.json`.
+
 ## Packaging
 
 ```sh
@@ -197,6 +204,10 @@ Dropping the view or calling `stop()` ends its engine.
 `AppOptions::limits` configures the VM limits; embedding defaults to `Limits::default()`, while the standalone
 hosts use `Limits::standalone_desktop()`. `AppOptions::metrics` accepts a validated `CellMetrics` value for hosts
 that choose a different virtual point scale. See [Sandbox and capabilities](./sandbox-and-capabilities.md).
+
+`AppOptions::data_dir` chooses the embedding app's directory for app data, such as its own data directory plus
+`nsh/`. Each loaded app uses its own id below that directory. `AppOptions::storage` connects the host's own
+`nsh_engine::StorageBackend` and takes precedence over the file location.
 
 Connect optional clipboard, title and accessibility-announcement callbacks with
 `AppView::set_host_services(Some(services))`. `AppView::accessibility_snapshot()` exposes each accessible node's

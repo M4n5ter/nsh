@@ -7,7 +7,8 @@ use std::{io, path::PathBuf, process::ExitCode};
 use nsh_platform_tui::{AppOptions, AppSource, AssetBase, Bundle, Limits};
 
 /// Runs the development host with process arguments. `--size` uses
-/// terminal columns and rows; `--script` executes headlessly.
+/// terminal columns and rows; `--script` executes headlessly. `--app-id`
+/// names the application; `nsh run` supplies its `nsh.json` identifier.
 pub fn main() -> ExitCode {
     nsh_platform_tui::init_logging();
     match arguments(std::env::args().skip(1))
@@ -64,6 +65,12 @@ fn arguments(args: impl IntoIterator<Item = String>) -> io::Result<(AppSource, A
                 options.size = (columns, rows);
             }
             "--title" => options.title = args.next().ok_or_else(missing)?,
+            "--app-id" => {
+                options.app_id = args
+                    .next()
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(missing)?;
+            }
             "-v" | "--verbose" => {}
             other => {
                 return Err(io::Error::new(
@@ -93,5 +100,13 @@ mod tests {
         assert!(arguments(["--size", "0x24"].map(str::to_owned)).is_err());
         assert!(arguments(["--script"].map(str::to_owned)).is_err());
         assert!(arguments(["--unknown"].map(str::to_owned)).is_err());
+    }
+
+    #[test]
+    fn the_cli_can_name_the_app_in_the_terminal_host() {
+        let (_, options) = arguments(["--app-id", "com.acme.orders"].map(str::to_owned)).unwrap();
+        assert_eq!(options.app_id, "com.acme.orders");
+        assert!(arguments(["--app-id"].map(str::to_owned)).is_err());
+        assert!(arguments(["--app-id", ""].map(str::to_owned)).is_err());
     }
 }

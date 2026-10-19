@@ -33,7 +33,10 @@ impl Window {
     /// `desktop={{ windowDrag: true }}`; the system's window controls stay,
     /// in the area `titleBar()` reports. `height` is the app's bar's height
     /// in points: the controls are centered in it (Windows' caption buttons
-    /// fill it); the platform's own without it.
+    /// fill it); the platform's own without it. On macOS, it selects compact
+    /// chrome up to 44 points and regular chrome above; use `titleBar().height`
+    /// to lay out the bar at AppKit's actual height. An embedding host's
+    /// existing toolbar keeps its own style and height.
     pub(crate) fn set_title_bar(style: TitleBarStyle, height: Option<f32>, cx: &mut ModuleCx) {
         let height = crate::desktop::title_bar_height(height);
         desktop(cx, DesktopCommand::SetTitleBar { style, height });
@@ -60,7 +63,8 @@ impl Window {
     /// corner in macOS screen coordinates and the top left on Windows.
     /// `animated` enables macOS's resize animation (false by default).
     /// Sizing is supported on macOS, Windows and Linux; positioning and levels
-    /// on macOS and Windows. GPUI's host chooses its bounds and level.
+    /// on macOS and Windows. A view embedded in another app's window leaves
+    /// its bounds and level to that app.
     pub(crate) fn set_frame(frame: WindowFrame, cx: &mut ModuleCx) {
         let frame = WindowFrame {
             x: frame.x.filter(|v| v.is_finite()),
@@ -76,7 +80,7 @@ impl Window {
     /// normal level; `"floating"` stays above normal windows. `"desktopIcon"`
     /// selects macOS's desktop icon level or moves a Windows window to the
     /// bottom of the current z-order, where later activation can raise it.
-    /// GTK and GPUI leave the level to the host and window manager.
+    /// Elsewhere the level is left to the host and the window manager.
     pub(crate) fn set_level(level: WindowLevel, cx: &mut ModuleCx) {
         desktop(cx, DesktopCommand::SetLevel(level));
     }

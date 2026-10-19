@@ -126,6 +126,13 @@ Tab 选择链接并滚动到可见区域，Enter 跟随链接。Alt+Left 和 Alt
 到可执行文件搜索路径，或通过 `NSH_FFMPEG` 和 `NSH_FFPROBE` 指定路径。嵌入宿主可以为音频输出、浏览器执行或
 平台专用的媒体呈现提供原生组件。
 
+## 应用数据
+
+[`nsh/storage`](../modules/nsh-storage.md) 跨启动和开发重载保留字符串值。每个应用的 `nsh.json` `id` 在系统数据
+目录下标识自己的 `storage.json` 目录：macOS 使用 Application Support，Windows 使用 `%APPDATA%`，Linux 使用
+`$XDG_DATA_HOME`（或 `~/.local/share`）。包和 Rust 根组件携带同一应用标识，两种入口使用同一份数据。发行应用在
+`nsh.json` 中声明自己的 `id`。
+
 ## 打包
 
 ```sh
@@ -173,6 +180,9 @@ view.render(area, frame.buffer_mut());
 `AppOptions::asset_base` 从资源目录或 HTTP 基地址解析 `asset:/` URI。`AppOptions::limits` 配置虚拟机限制；
 嵌入默认使用 `Limits::default()`，独立宿主使用 `Limits::standalone_desktop()`。`AppOptions::metrics` 接受验证过的
 `CellMetrics`，供宿主选择其他虚拟 point 比例。参见[沙箱与能力](./sandbox-and-capabilities.md)。
+
+`AppOptions::data_dir` 为嵌入应用选择数据目录，例如宿主自身数据目录下的 `nsh/`。加载的各应用按自己的 `id`
+使用其中的独立目录。`AppOptions::storage` 连接宿主自己的 `nsh_engine::StorageBackend`，优先于文件存储位置。
 
 通过 `AppView::set_host_services(Some(services))` 连接可选的剪贴板、标题和无障碍播报回调。
 `AppView::accessibility_snapshot()` 提供每个无障碍节点的角色、标签、提示、状态、值、区域、焦点和操作；

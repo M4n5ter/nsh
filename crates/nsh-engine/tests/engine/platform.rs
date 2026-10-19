@@ -77,6 +77,8 @@ fn first_batch(environment: Environment, source: &str) -> MountBatch {
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
+        data_dir: None,
+        storage: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     rx.recv_timeout(Duration::from_secs(5))

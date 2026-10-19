@@ -71,6 +71,14 @@ platform's default feature is `js`; `--no-default-features` supports a
 native Rust root without linking QuickJS. The backend belongs to the main
 workspace; its dependencies are in the root `Cargo.toml`.
 
+The engine's `nsh/storage` uses `<data_dir>/<app id>/storage.json`, with
+the system data directory by default. `AppOptions::data_dir` selects the
+embedding host's directory; `AppOptions::storage` supplies a backend of
+its own and takes precedence. The app id travels with JS bundles (build
+metadata and dev-server messages) and Rust roots. Full reloads after hot
+updates retain the latest bundle's id, keeping the same storage. Apps
+with different ids keep separate files in a shared data directory.
+
 ## Coordinates and typography
 
 `CellMetrics::default()` is 8 points wide by 16 points high. A 120×40
@@ -321,7 +329,7 @@ runners remain console applications.
 |---|---|
 | `CellMetrics::new(f32, f32) -> Result<Self, String>`; `width()`, `height()`, `viewport(u16, u16)` | Validated point dimensions for terminal cells |
 | `TerminalTextEngine::new(CellMetrics)`; `Clone`, `Default`, `TextEngine` | Point measurement and terminal text runs; the engine owns its shared font catalog and is no longer `Copy` |
-| `AppOptions` | Trace, assets, ID/title, size, script, appearance, limits, metrics, component factories and `reduce_motion` |
+| `AppOptions` | Trace, assets, ID/title, size, script, appearance, limits, metrics, component factories, `reduce_motion`, `data_dir` and `storage` |
 | `AppSource::{Rust(Root), Bundle(Bundle), DevServer(String)}` | Standalone source (`DevServer` requires `dev`) |
 | `AppView::new(AppOptions) -> Self` | Independent embeddable engine and surface |
 | `AppView::load(App) -> io::Result<()>`; `connect(String)` (`dev`) | Load trusted code or start a development session |
