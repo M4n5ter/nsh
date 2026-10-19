@@ -40,7 +40,7 @@ jobs:
       run:
         shell: bash
     env:
-      NSH_EXE_SUFFIX: ${{ runner.os == 'Windows' && '.exe' || '' }}
+      NSH_EXE_SUFFIX: ${{ matrix.os == 'windows-latest' && '.exe' || '' }}
     steps:
       - uses: actions/checkout@v4
       # QuickJS and its generated bindings need a C compiler and libclang.
