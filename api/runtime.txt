@@ -336,6 +336,7 @@ isAvailable boolean
 [nsh/keymap]
 keymap object
 keymap.bind function
+keymap.focusedWithin function
 keymap.label function
 
 [nsh/list]

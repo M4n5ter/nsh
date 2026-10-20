@@ -1800,7 +1800,7 @@ mod tests {
         };
         wait(&mut view, "resize 960 browser=false #1");
         let key = |view: &mut AppView, code, modifiers| {
-            view.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+            view.handle_event(crossterm::event::Event::Key(KeyEvent::new(code, modifiers)));
         };
         key(&mut view, KeyCode::Char('k'), KeyModifiers::CONTROL);
         wait(&mut view, "scoped #1");
