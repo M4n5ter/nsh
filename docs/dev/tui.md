@@ -83,7 +83,8 @@ with different ids keep separate files in a shared data directory.
 `None` uses the process's `set_ui_sets` fallback; `Some(vec![])` explicitly serves no custom modules.
 Use explicit per-view registries for host-owned values (`Registry::value`, [JS modules](js-modules.md#host-owned-values)):
 the factory captures the native capability granted to that view, creates its local wrapper on the
-engine thread at module evaluation, and runs again for each replacement VM. Stopping the view joins
+engine thread on the first import or `nativeModule` lookup, and runs again for each replacement VM. Both access
+paths share the same value in that VM. Stopping the view joins
 its engine thread; the embedding host separately closes external subscriptions and tracks service receipts.
 
 ## Coordinates and typography

@@ -125,6 +125,7 @@ pub(crate) fn uninstall(ctx: &Ctx<'_>) {
         state.canvases.free_all(raw);
         state.animations.free_all(raw);
         state.platform.free_all(raw);
+        state.modules.free_all(raw);
         state.menus.free_all(raw);
         state.lists.free_all(raw);
         state.components.free_all(raw);

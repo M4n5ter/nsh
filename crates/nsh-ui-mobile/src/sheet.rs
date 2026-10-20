@@ -4,9 +4,7 @@
 
 use nsh_core::ui::prelude::*;
 
-/// A panel that slides up from the bottom over a dimmed backdrop while
-/// `open`; dragging it down, tapping the backdrop or the back button closes
-/// it (`onClose`: set `open` to false).
+/// The props of [`Sheet`].
 #[derive(Debug, Clone, PartialEq, Props)]
 pub struct SheetProps {
     /// Shown.
@@ -39,7 +37,9 @@ fn settle(velocity: Option<f32>) -> Spring {
     }
 }
 
-/// A bottom sheet ([`SheetProps`]).
+/// A panel that slides up from the bottom over a dimmed backdrop while
+/// `open`; dragging it down, tapping the backdrop or the back button closes
+/// it (`onClose`: set `open` to false).
 #[component]
 pub fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElement {
     // How far down the panel is from where it rests.
@@ -87,6 +87,9 @@ pub fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElement {
                     .bg(move || theme().overlay)
                     .bind_opacity(&offset.interpolate(&[0.0, height], &[1.0, 0.0]))
                     .label("Close")
+                    // For the pointer: Escape and the back button close it
+                    // from the keyboard, which goes straight to the panel.
+                    .focusable(false)
                     .on_press(move |_: &()| close()),
             )
             .child(

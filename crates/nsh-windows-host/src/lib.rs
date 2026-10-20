@@ -9,7 +9,7 @@
 //!   quit"` runs steps once the window shows: screenshots rendered
 //!   offscreen and simulated input, to check the backend without touching
 //!   the screen.
-//! - `--size 390x844` sets the window size in points (default 1200x800,
+//! - `--window-size 390x844` sets the window size in points (default 1200x800,
 //!   wide enough for desktop layouts such as the gallery's sidebar).
 //! - `--app-id <id>` sets the application id (`com.example.app`); `nsh run`
 //!   passes the app's (`nsh.json` `"id"`). The app's data (`nsh/storage`)
@@ -33,7 +33,7 @@ pub fn main() -> std::process::ExitCode {
     let mut source = None;
     // As the release runner runs the app: on its own.
     let mut options = AppOptions {
-        limits: Limits::standalone_desktop(),
+        limits: Limits::standalone(),
         ..AppOptions::default()
     };
     let mut args = env::args().skip(1);
@@ -66,9 +66,9 @@ pub fn main() -> std::process::ExitCode {
             // Steps run once the window shows (`nsh_platform_windows`'s
             // `script` module): offscreen screenshots and simulated input.
             "--script" => options.script = args.next(),
-            "--size" => match args.next().as_deref().and_then(parse_size) {
+            "--window-size" => match args.next().as_deref().and_then(parse_size) {
                 Some(size) => options.size = size,
-                None => log::warn!("--size takes <width>x<height> in points, as 390x844"),
+                None => log::warn!("--window-size takes <width>x<height> in points, as 390x844"),
             },
             other => log::warn!("unknown argument {other}"),
         }
@@ -89,6 +89,13 @@ fn parse_size(s: &str) -> Option<(i32, i32)> {
     (w > 0 && h > 0).then_some((w, h))
 }
 
+/// Not on Windows: says so and exits.
+#[cfg(not(windows))]
+pub fn main() -> std::process::ExitCode {
+    eprintln!("nsh-windows-host runs on Windows");
+    std::process::ExitCode::FAILURE
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_size;
@@ -101,11 +108,4 @@ mod tests {
         assert_eq!(parse_size("0x10"), None);
         assert_eq!(parse_size("ax10"), None);
     }
-}
-
-/// Not on Windows: says so and exits.
-#[cfg(not(windows))]
-pub fn main() -> std::process::ExitCode {
-    eprintln!("nsh-windows-host runs on Windows");
-    std::process::ExitCode::FAILURE
 }

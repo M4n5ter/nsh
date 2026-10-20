@@ -63,7 +63,8 @@ import { Button, Card, Group, Sheet, Stack, Screen, createNavigator } from "nsh/
 
 所有组件的颜色都取自同一个主题，从不使用写死的颜色值。每种颜色都有浅色和深色两个值。系统在浅色与深色外观之间切换时，组件会在原生层直接换色，无需重新渲染，也不经过 JS。
 
-默认主题是 gpui-kit 的默认主题，一套中性的黑白配色，圆角半径针对移动端做了调整。要使用自己的主题，在 `nsh.json` 中设置 `"theme"`，值为主题文件的路径（相对于 `nsh.json`）：
+默认主题基于 gpui-kit 的默认主题，一套中性的黑白配色，圆角半径针对移动端做了调整，状态色（`danger`、`info`、`success`、`warning`）
+上的文字在浅色和深色外观下都达到 WCAG AA 的对比度。要使用自己的主题，在 `nsh.json` 中设置 `"theme"`，值为主题文件的路径（相对于 `nsh.json`）：
 
 ```json
 {
@@ -104,7 +105,7 @@ import { Button, Card, Group, Sheet, Stack, Screen, createNavigator } from "nsh/
 - 颜色可以是 CSS 颜色（`#7c3aed`、`rgb(…)`、`white`），也可以是 Tailwind 默认调色板中的名称（`neutral-900`、`red-500`）。`nsh.json` 中 `tailwind` 键定义的自定义颜色在这里不可用。
 - `radius` 是控件（按钮、输入框、步进器按钮）的圆角半径，`radius.lg` 是大面积表面（卡片、分组、inset 列表、底部面板）的圆角半径，`font.size` 是按钮文字、卡片标题和步进器的基础字号。单位均为 pt。
 - 如果省略了按下状态的颜色（`primary.active.background`、`secondary.active.background`、`danger.active.background` 等），NSH 会从基础颜色推导：浅色模式下加深 12%，深色模式下提亮 12%。
-- 只有 gpui-kit 桌面组件使用的键（侧边栏、标题栏等）会被忽略，因此 gpui-kit 的主题文件可以直接拿来用。
+- 移动端组件不使用的键（gpui-kit 的侧边栏、标题栏，或你自己的 `chart.up`、`radius.card` 等）不影响组件，因此 gpui-kit 的主题文件可以直接拿来用。应用的类名可以引用每一个键：见[主题 token](../docs/tailwind.md#主题-token)。
 - 打包器在构建时检查主题。文件缺失、JSON 无效、`mode` 未知或某个值不是颜色，都会以 `nsh.json: theme: …` 错误使构建失败。
 
 下表列出移动端组件用到的主题键及其默认的浅色和深色值：

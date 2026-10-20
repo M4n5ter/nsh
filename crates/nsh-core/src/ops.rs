@@ -169,14 +169,16 @@ events! {
     ContentSizeChange = "onContentSizeChange": "The size of an input's text changed (payload: `width`, `height`; raised by the core).",
     BackRequest = "onBackRequest": "The user tried to leave a screen with `preventBack` (back button, header back button).",
     NativeEvent = "onNativeEvent": "A registered native component emitted an event (payload: [`EventPayload::Native`]).",
-    Clipboard = "onClipboard": "A clipboard read finished (root only; payload: `id`, `has`: whether it holds text, `text`: the text, unless only `has` was asked).",
+    Clipboard = "onClipboard": "A clipboard read finished (root only; payload: `id`, `has`: whether it holds what was asked; for text `text`, unless only `has` was asked; for an image `uri` (a `data:` URI), `width` and `height`, unless only `has` was asked; for files `files`, their `file:` URLs one per line).",
     KeyCommand = "onKeyCommand": "A key matched a binding of `nsh/keymap` (root only; payload: the binding's id, [`crate::keymap::KeyBinding::id`]).",
     Menu = "onMenu": "A menu item was chosen: the application menu's or a context menu's (root only; desktops; payload: `id`), or a context menu closed (`closed`: true, after its item).",
-    HoverIn = "onHoverIn": "The mouse came over the view or a view inside it (desktop backends that track the pointer; never on touches).",
-    HoverOut = "onHoverOut": "The mouse left the view and the views inside it, or the window (desktop backends that track the pointer).",
+    HoverIn = "onHoverIn": "The mouse came over the view or a view inside it (never on touches).",
+    HoverOut = "onHoverOut": "The mouse left the view and the views inside it, or the window.",
     FileDragEnter = "onFileDragEnter": "A local file drag entered an eligible desktop drop destination.",
     FileDragLeave = "onFileDragLeave": "A local file drag left its desktop drop destination.",
     FileDrop = "onFileDrop": "Local files were dropped (payload: [`EventPayload::FileDrop`]).",
+    HoverMove = "onHoverMove": "The mouse moved over a hovered view, with no button down (payload: [`EventPayload::Hover`]; at most one per frame).",
+    ContextMenu = "onContextMenu": "The secondary button was pressed over the view (payload: [`EventPayload::ContextMenu`]): the nearest listener around the view under the pointer hears it, unless a text input or selectable text is nearer.",
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -317,6 +319,40 @@ pub struct TouchPoint {
     pub changed: bool,
 }
 
+/// Where the mouse is over a hovered view ([`EventKind::HoverMove`]), in
+/// points.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HoverEvent {
+    /// Position in the view, its transforms undone.
+    pub location_x: f32,
+    /// Position in the view.
+    pub location_y: f32,
+    /// Position in the root view the view is in (the surface, or its
+    /// modal), as touches' `page_x`.
+    pub page_x: f32,
+    /// Position in the root view.
+    pub page_y: f32,
+    /// The modifier keys held.
+    pub modifiers: crate::keymap::Modifiers,
+}
+
+/// Where a context menu was asked for ([`EventKind::ContextMenu`]), in
+/// points.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ContextMenuEvent {
+    /// Position in the view, its transforms undone.
+    pub location_x: f32,
+    /// Position in the view.
+    pub location_y: f32,
+    /// Position in the root view the view is in (the surface, or its
+    /// modal): where `Menu.popup` opens a menu.
+    pub page_x: f32,
+    /// Position in the root view.
+    pub page_y: f32,
+    /// The modifier keys held.
+    pub modifiers: crate::keymap::Modifiers,
+}
+
 /// Touches for the JS responder system.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TouchEvent {
@@ -452,6 +488,10 @@ pub enum EventPayload {
     },
     /// Touches (`onTouch`).
     Touch(Box<TouchEvent>),
+    /// The mouse over a hovered view (`onHoverMove`).
+    Hover(HoverEvent),
+    /// A context menu asked for over a view (`onContextMenu`).
+    ContextMenu(ContextMenuEvent),
     /// Local file URLs dropped by the user, in the platform's order.
     FileDrop(Vec<String>),
     /// The lines of a text block.
@@ -1002,6 +1042,26 @@ pub enum Command {
         /// Only whether it holds text (`Clipboard.hasString`).
         has_only: bool,
     },
+    /// Put the image of a `data:` URI on the system clipboard, replacing
+    /// what it holds (on the root; `Clipboard.setImage`).
+    SetClipboardImage(String),
+    /// Read the image on the system clipboard and report it as
+    /// [`EventKind::Clipboard`] `id` (on the root): `has` and, unless
+    /// `has_only`, the image as a `data:` URI (`uri`) and its size in
+    /// pixels (`width`, `height`).
+    ReadClipboardImage {
+        /// The request.
+        id: u32,
+        /// Only whether it holds an image (`Clipboard.hasImage`).
+        has_only: bool,
+    },
+    /// Read the local files on the system clipboard (files copied in a
+    /// file manager) and report them as [`EventKind::Clipboard`] `id` (on
+    /// the root): `has` and `files`, their `file:` URLs one per line.
+    ReadClipboardFiles {
+        /// The request.
+        id: u32,
+    },
     /// A desktop command (on the root; `nsh/desktop`): the window, its
     /// title bar, menus. Mobile platforms ignore it.
     Desktop(Box<crate::desktop::DesktopCommand>),
@@ -1371,6 +1431,12 @@ pub enum Prop {
     /// a draggable view stay clickable without it.
     #[prop(desktop = "windowDrag")]
     WindowDrag(Option<bool>),
+    /// `focusable`: whether a view that takes presses is a stop of the
+    /// keyboard focus (Tab, on the platforms that move it between
+    /// pressables); `false` leaves it to the pointer (a backdrop that
+    /// closes a popover). Default true.
+    #[prop(js = "focusable")]
+    Focusable(Option<bool>),
     /// `allowFontScaling`: follow the system text size (default true).
     #[prop(js = "allowFontScaling", default = true, on = TEXT | INPUT)]
     AllowFontScaling(bool),

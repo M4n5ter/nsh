@@ -85,16 +85,40 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   `screenReader`, `osVersion` and `idiom` (VoiceOver / TalkBack changes are observed natively).
 - **`disabled`** on any element applies `disabled:` classes and removes its press listeners from what is mounted (no press,
   no feedback).
-- **`onHoverIn` / `onHoverOut`** (any element; macOS, Linux and GPUI) tell JS, after the fact, that the mouse came over a view
-  or left it. They follow the same hover tracking as `hover:` classes: the views along the chain under the mouse
-  (innermost first) whose classes read `HOVERED` or that listen to either event are the hovered ones, so ancestors
-  hear `onHoverIn` too, as with CSS `:hover` and the DOM's `pointerenter`; a handler alone makes its view take part
-  (`input.rs` `hoverable`, the view's mounted event mask), and a view that does not listen gets no event. When the set
-  changes, the views left hear `onHoverOut` from the inside out, then the views entered `onHoverIn` from the outside
-  in. The mouse leaving the window (while no button is down on macOS) unhovers everything; on macOS and GPUI hover is
-  picked again after every batch (on macOS also after every scroll), so a view removed or moved from under a still mouse hears `onHoverOut` and one
-  that arrives there `onHoverIn`; on Linux that waits for the next mouse move. Touches never hover. Other platforms do
-  not raise them yet (iOS, Android, Windows and the web track `hover:` styles only).
+- **`onHoverIn` / `onHoverOut` / `onHoverMove`** (any element) tell JS, after the fact, that the mouse came over a view,
+  left it, or moved over it with no button down. On the desktops they follow the same hover tracking as `hover:`
+  classes: the views along the chain under the mouse (innermost first) whose classes read `HOVERED` or that listen to
+  any of the three are the hovered ones, so ancestors hear `onHoverIn` too, as with CSS `:hover` and the DOM's
+  `pointerenter`; a handler alone makes its view take part (`input.rs` `hoverable`, the view's mounted event mask), and
+  a view that does not listen gets no event. When the set changes, the views left hear `onHoverOut` from the inside
+  out, then the views entered `onHoverIn` from the outside in; then each hovered view with `onHoverMove` hears where
+  the mouse is (`EventPayload::Hover`: `locationX` / `locationY` in the view, its transforms undone, `pageX` / `pageY`
+  in the root view as touches have them, the modifier keys). The mouse leaving the window (while no button is down on
+  macOS) unhovers everything; on macOS and GPUI hover is picked again after every batch (on macOS also after every
+  scroll), so a view removed or moved from under a still mouse hears `onHoverOut` and one that arrives there
+  `onHoverIn`; on Linux and Windows that waits for the next mouse move. Moves with a button down are touches
+  (`onTouchMove`, the responder), not hovers, and touches never hover. The web uses the browser's `pointerenter` /
+  `pointerleave` / `pointermove` of mice (`nsh.js` `installHover`); iOS a `UIHoverGestureRecognizer` per view (iPad
+  pointers, Mac Catalyst's mouse), Android the view's hover listener (mice, styluses): there each view is tracked by
+  the system, not along a chain. The engine merges moves (`State::hover_moves`): the latest per view, delivered at most
+  once per `HOVER_MOVE_INTERVAL` (8 ms) and always before the next other event, so a view hears where the mouse went
+  before it hears it leave; mice report up to 1000 moves a second, and a crosshair needs one per frame.
+- **`onContextMenu`** (any element): the secondary button was pressed over a view (a right click; Control-click on
+  macOS, in GPUI on macOS too; the browser's `contextmenu`, which its keyboard menu key raises too). The platform
+  decides on the main thread from the mounted event masks, walking out from the view under the pointer: the first
+  view that listens hears it (`EventPayload::ContextMenu`: `locationX` / `locationY` in it, `pageX` / `pageY` in its
+  root view, which is where `Menu.popup` takes its point, and the modifier keys); a text field nearer, or selectable
+  text with an edit menu of its own (Windows, GPUI, the web), shows that menu instead and the app hears nothing.
+  JS cannot cancel the system's menu after the fact (the main thread never waits for JS), so the rule is what is
+  mounted. iOS: a `UITapGestureRecognizer` for the secondary button per listening view (iPad pointers, Mac
+  Catalyst's mouse). On touchscreens a menu belongs on `onLongPress`; Android raises `onContextMenu` for no input yet.
+- **Keyboard focus**: on macOS and the web, views that take presses are stops of Tab (the keyboard focus) and Return /
+  Space press the focused one; a click presses without focusing, so a pressable's `FOCUSED` state (`focus:` classes,
+  `.focus(..)`) is keyboard focus, and `focus-visible:` is the same variant. `focusable={false}` (`Prop::Focusable`,
+  `ViewProps::focusable`; Rust `.focusable(false)`) keeps a pressable out of the stops: a backdrop that closes a
+  popover, rows a list moves between with the arrow keys. Inputs are always stops; `focusable` changes only views
+  that take presses (unlike React Native's, `true` makes nothing focusable that is not). Windows, Linux and GPUI move the focus between fields and
+  native components only so far.
 - **`onPanEnd` / `onPanStart`** carry `valueX` / `valueY`: the bound pan values at that moment (a drag may grab a value mid
   animation), for snapping.
 - **Imperative calls**: nodes have `focus()`, `blur()` and `scrollTo({ x, y, animated })` (use `ref`); lists also

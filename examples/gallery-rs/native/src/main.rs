@@ -12,7 +12,7 @@ use nsh_platform_windows as platform;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn main() -> impl std::process::Termination {
     env_logger::init();
-    let gallery = gallery_native::__nsh_native_module();
+    let gallery = gallery_native::registry();
     let assets = asset_directory(&gallery).expect("copy the gallery's registered assets");
     platform::set_ui_sets(vec![nsh_ui_mobile::registry(), gallery]);
     let theme = nsh_core::ui::Theme::from_json(include_str!("../../theme.json"))
@@ -38,10 +38,10 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!(
-    "Run this binary on macOS, Windows or Linux; use the TSX entry with nsh run for iOS and Android."
+    "Run this binary on macOS, Windows or Linux; use nsh run for iOS, Android and the web."
 );
 
-// Registered asset URIs keep the same layout as the TSX host's served assets.
+// Registered asset URIs keep the layout the development hosts serve them in.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn asset_directory(registry: &nsh_core::ui::Registry) -> std::io::Result<std::path::PathBuf> {
     let executable = std::env::current_exe()?;

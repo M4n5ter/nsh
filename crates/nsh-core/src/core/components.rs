@@ -15,7 +15,7 @@ use std::{any::Any, cell::RefCell, rc::Rc, sync::Arc};
 
 use rustc_hash::FxHashMap;
 
-use super::{Core, Kind, NO_KEY};
+use super::{Core, Kind, NO_KEY, views::Anchor};
 use crate::{
     ApplyError, Command, EdgeInsets, EventKind, EventMask, EventPayload, NodeId, Op, Prop, ROOT_ID,
     Tag, TextEngine,
@@ -100,16 +100,16 @@ struct VirtualListState {
 pub(super) enum Placement {
     /// Out of the tree (the view has no place for them).
     None,
-    /// In this node, before the view's node after its `Children` (their
-    /// anchor).
-    At(NodeId, Option<NodeId>),
+    /// In this node, before what the view puts after its `Children` (their
+    /// anchor: a node, or a region, whose nodes may come later).
+    At(NodeId, Anchor),
     /// Each in its own wrapper ([`ParentElement::children_each`]): placed
     /// by the view's region of wrappers.
     Each,
     /// Passed on as the children of the nested component hosted by this
     /// node (`<Inset>{children}</Inset>`), before the content after them
-    /// (their anchor): its view places them.
-    Nested(NodeId, Option<NodeId>),
+    /// (their anchor, as [`Self::At`]'s): its view places them.
+    Nested(NodeId, Anchor),
 }
 
 /// A component instance on its host node.
@@ -117,8 +117,8 @@ pub(super) struct Instance {
     inner: Inner,
     spec: Option<Arc<ComponentSpec>>,
     /// The app's `class` and `classList` on the host.
-    class: Box<str>,
-    class_list: Vec<Box<str>>,
+    pub(super) class: Box<str>,
+    pub(super) class_list: Vec<Box<str>>,
     /// The app's classes, or the styles the view this one is in gives it:
     /// applied after the root's own.
     pub(super) user: Option<Arc<ClassList>>,
@@ -361,6 +361,53 @@ enum Awaited {
     Value(AnswerSlot<f32>),
 }
 
+/// What the platform answered a clipboard read with (the root's
+/// `Clipboard` event).
+#[derive(Default)]
+pub(super) struct ClipboardAnswer {
+    /// Whether it holds what was asked.
+    pub(super) has: bool,
+    /// The text, for a text read.
+    pub(super) text: Option<String>,
+    /// The image, for an image read.
+    pub(super) image: Option<crate::ui::ClipboardImage>,
+    /// The files' `file:` URLs, for a files read.
+    pub(super) files: Vec<String>,
+}
+
+impl ClipboardAnswer {
+    pub(super) fn from_payload(payload: &EventPayload) -> ClipboardAnswer {
+        let mut answer = ClipboardAnswer::default();
+        let EventPayload::Map(entries) = payload else {
+            return answer;
+        };
+        let (mut uri, mut width, mut height) = (None, 0.0, 0.0);
+        for (k, v) in entries {
+            match (*k, v) {
+                ("has", crate::PayloadValue::Bool(b)) => answer.has = *b,
+                ("text", crate::PayloadValue::Str(t)) => answer.text = Some(t.clone()),
+                ("uri", crate::PayloadValue::Str(u)) => uri = Some(u.clone()),
+                ("width", crate::PayloadValue::Number(n)) => width = *n,
+                ("height", crate::PayloadValue::Number(n)) => height = *n,
+                ("files", crate::PayloadValue::Str(f)) => {
+                    answer.files = f
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                }
+                _ => {}
+            }
+        }
+        // Only an image NSH can show, a `data:` URI, and only one the VM
+        // can hold (the web's player encodes its own).
+        answer.image = uri
+            .filter(|u| u.starts_with("data:") && crate::platform::clipboard::uri_within_limit(u))
+            .map(|uri| crate::ui::ClipboardImage { uri, width, height });
+        answer
+    }
+}
+
 /// An HTTP request of a task in flight ([`Core::fetch_event`]).
 struct PendingFetch {
     /// What arrived so far.
@@ -374,7 +421,7 @@ pub(super) struct Components {
     /// The specs of the components made by type (not by name from the
     /// registry), one per type.
     specs: FxHashMap<&'static str, Arc<ComponentSpec>>,
-    theme: Arc<Theme>,
+    pub(super) theme: Arc<Theme>,
     /// The app's theme (`nsh.json`, a Rust app's root): drawn with while
     /// the embedding app sets none ([`Core::set_host_theme`]).
     app_theme: Arc<Theme>,
@@ -629,20 +676,27 @@ impl<M: TextEngine> Core<M> {
     /// so only the bindings that read it run again, and only when it
     /// changed.
     fn theme_changed(&mut self) {
-        let theme = self
-            .components
-            .host_theme
-            .clone()
-            .unwrap_or_else(|| self.components.app_theme.clone());
+        let theme = match &self.components.host_theme {
+            // The app's own tokens the host's theme does not have stay.
+            Some(host) => {
+                let mut theme = (**host).clone();
+                theme.inherit(&self.components.app_theme);
+                Arc::new(theme)
+            }
+            None => self.components.app_theme.clone(),
+        };
         if *theme == *self.components.theme {
             self.components.theme = theme;
             return;
         }
-        let _entered = self.components.runtime.enter();
-        self.components.theme = theme;
-        self.components
-            .runtime
-            .set_theme(self.components.theme.clone());
+        {
+            let _entered = self.components.runtime.enter();
+            self.components.theme = theme;
+            self.components
+                .runtime
+                .set_theme(self.components.theme.clone());
+        }
+        self.theme_tokens_changed();
     }
 
     /// Mounts a Rust app's root component as the content of the root view;
@@ -936,12 +990,16 @@ impl<M: TextEngine> Core<M> {
                 match place {
                     // Before its next JS sibling, else before what the
                     // view puts after the children.
-                    Placement::At(p, anchor) => self.apply_op(Op::Insert {
-                        parent: p,
-                        child,
-                        before: at.and(before).or(anchor),
-                    })?,
+                    Placement::At(p, anchor) => {
+                        let anchor = self.anchor_node(anchor);
+                        self.apply_op(Op::Insert {
+                            parent: p,
+                            child,
+                            before: at.and(before).or(anchor),
+                        })?
+                    }
                     Placement::Nested(nested, anchor) => {
+                        let anchor = self.anchor_node(anchor);
                         self.join_nested_at(nested, child, at.and(before).or(anchor));
                     }
                     // Its wrapper is the view's (a region of them).
@@ -1200,7 +1258,7 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// The app's classes on `host` changed.
-    fn update_user_class(&mut self, host: NodeId) {
+    pub(super) fn update_user_class(&mut self, host: NodeId) {
         let inst = &self.components.instances[&host];
         let mut combined = String::with_capacity(inst.class.len() + 16 * inst.class_list.len());
         combined.push_str(&inst.class);
@@ -2261,45 +2319,27 @@ impl<M: TextEngine> Core<M> {
         let new = new.into_iter().map(|el| (None, el)).collect();
         let (out, placeholder) = self.match_children(parent, old, new, host, inst);
         // A region's nodes go before what follows it.
-        for (i, e) in out.iter().enumerate() {
-            if let Part::Region(region) = e.part {
-                let anchor = out[i + 1..]
-                    .iter()
-                    .find_map(|n| match n.part {
-                        Part::Region(r) => Some(super::views::Anchor::Region(r)),
-                        Part::Children => inst
-                            .js_children
-                            .first()
-                            .map(|&c| super::views::Anchor::Node(c)),
-                        Part::Filled(name) => self
-                            .fill_of(inst, name)
-                            .and_then(|f| self.fill_nodes(f).first().copied())
-                            .map(super::views::Anchor::Node),
-                        _ if n.id != 0 => Some(super::views::Anchor::Node(n.id)),
-                        _ => None,
-                    })
-                    .unwrap_or(super::views::Anchor::End);
-                self.set_region_anchor(region, anchor);
-            }
-        }
+        self.set_region_anchors(&out, inst, Anchor::End);
         let nested = parent != host && self.is_host(parent);
         if nested {
             if let Some(at) = placeholder {
-                let anchor = out[at + 1..]
-                    .iter()
-                    .flat_map(|e| self.placed(e))
-                    .find(|&id| id != 0);
+                let anchor = self.anchor_after(&out[at + 1..], inst, Anchor::End);
                 inst.children_at = Placement::Nested(parent, anchor);
             }
-            self.place_filled(&out, inst, None, |anchor| Placement::Nested(parent, anchor));
+            self.place_filled(&out, inst, Anchor::End, |anchor| {
+                Placement::Nested(parent, anchor)
+            });
             self.fill_nested(parent, &out, host, inst);
             self.join_nested(parent, &out, inst);
             return out;
         }
         if let Some(at) = placeholder {
-            inst.children_at = Placement::At(parent, out.get(at + 1).map(|e| e.id));
+            let anchor = self.anchor_after(&out[at + 1..], inst, Anchor::End);
+            inst.children_at = Placement::At(parent, anchor);
         }
-        self.place_filled(&out, inst, None, |anchor| Placement::At(parent, anchor));
+        self.place_filled(&out, inst, Anchor::End, |anchor| {
+            Placement::At(parent, anchor)
+        });
         // The native children in the view's order: the JS children in the
         // placeholder's place, a region's nodes in its (moves only when the
         // order changed).
@@ -2889,35 +2929,14 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
-    /// The first node among `elements` (in their order), else `end`.
-    pub(super) fn first_node(
-        &self,
-        elements: &[Expanded],
-        inst: &Instance,
-        end: Option<NodeId>,
-    ) -> Option<NodeId> {
-        elements
-            .iter()
-            .find_map(|e| match e.part {
-                Part::Children => inst.js_children.first().copied(),
-                Part::Filled(name) => self
-                    .fill_of(inst, name)
-                    .and_then(|f| self.fill_nodes(f).first().copied()),
-                Part::Region(region) => self.region_nodes(region).first().copied(),
-                Part::Fill(_) => None,
-                _ => Some(e.id).filter(|&id| id != 0),
-            })
-            .or(end)
-    }
-
     /// Where `out` (a view's children, or a region's, `end` after them)
-    /// places what fills its slots: `place` of the node after each.
+    /// places what fills its slots: `place` of what follows each.
     pub(super) fn place_filled(
         &self,
         out: &[Expanded],
         inst: &mut Instance,
-        end: Option<NodeId>,
-        place: impl Fn(Option<NodeId>) -> Placement,
+        end: Anchor,
+        place: impl Fn(Anchor) -> Placement,
     ) {
         if inst.fills.is_empty() {
             return;
@@ -2926,7 +2945,7 @@ impl<M: TextEngine> Core<M> {
             let Part::Filled(name) = e.part else {
                 continue;
             };
-            let at = place(self.first_node(&out[i + 1..], inst, end));
+            let at = place(self.anchor_after(&out[i + 1..], inst, end));
             if let Some(fill) = inst.fills.iter_mut().find(|f| f.name == name) {
                 fill.at = at;
             }
@@ -3123,7 +3142,7 @@ impl<M: TextEngine> Core<M> {
             Placement::At(parent, anchor) => {
                 let parent_key = self.key(parent).ok();
                 // An anchor that left the parent: at the end.
-                let mut before = anchor.filter(|&a| {
+                let mut before = self.anchor_node(anchor).filter(|&a| {
                     self.key(a)
                         .is_ok_and(|k| Some(self.nodes[k as usize].parent) == parent_key)
                 });
@@ -3139,7 +3158,7 @@ impl<M: TextEngine> Core<M> {
                 }
             }
             Placement::Nested(other, anchor) => {
-                let mut before = anchor;
+                let mut before = self.anchor_node(anchor);
                 for &child in nodes.iter().rev() {
                     if !self.nested_precedes(other, child, before) {
                         self.join_nested_at(other, child, before);
@@ -4210,11 +4229,25 @@ impl<M: TextEngine> Core<M> {
             Action::ReadClipboard(read) => {
                 let id = self.components.next_clipboard_read;
                 self.components.next_clipboard_read += 1;
-                let has_only = matches!(read, ClipboardRead::Has(_));
+                let command = match &read {
+                    ClipboardRead::Text(_) => Command::ReadClipboard {
+                        id,
+                        has_only: false,
+                    },
+                    ClipboardRead::Has(_) => Command::ReadClipboard { id, has_only: true },
+                    ClipboardRead::Image(_) => Command::ReadClipboardImage {
+                        id,
+                        has_only: false,
+                    },
+                    ClipboardRead::HasImage(_) => {
+                        Command::ReadClipboardImage { id, has_only: true }
+                    }
+                    ClipboardRead::Files(_) => Command::ReadClipboardFiles { id },
+                };
                 self.components.clipboard_reads.insert(id, read);
                 let _ = self.apply_op(Op::Command {
                     id: crate::ROOT_ID,
-                    command: Command::ReadClipboard { id, has_only },
+                    command,
                 });
             }
         }
@@ -4302,14 +4335,24 @@ impl<M: TextEngine> Core<M> {
         true
     }
 
-    /// The answer to clipboard read `id`: the text, `None` when it holds
-    /// none.
-    pub(super) fn answer_clipboard(&mut self, id: u32, text: Option<String>, has: bool) {
+    /// Resolves clipboard read `id` with the platform's answer (an empty
+    /// one when the clipboard is not granted).
+    pub(super) fn answer_clipboard(&mut self, id: u32, answer: ClipboardAnswer) {
+        let ClipboardAnswer {
+            has,
+            text,
+            image,
+            files,
+        } = answer;
         match self.components.clipboard_reads.remove(&id) {
-            Some(ClipboardRead::Text(answer)) => {
-                answer.borrow_mut().deliver(text.unwrap_or_default())
+            Some(ClipboardRead::Text(slot)) => slot.borrow_mut().deliver(text.unwrap_or_default()),
+            Some(ClipboardRead::Has(slot) | ClipboardRead::HasImage(slot)) => {
+                slot.borrow_mut().deliver(has)
             }
-            Some(ClipboardRead::Has(answer)) => answer.borrow_mut().deliver(has),
+            Some(ClipboardRead::Image(slot)) => slot
+                .borrow_mut()
+                .deliver(image.filter(|i| !i.uri.is_empty())),
+            Some(ClipboardRead::Files(slot)) => slot.borrow_mut().deliver(files),
             None => {}
         }
     }
@@ -4397,17 +4440,8 @@ impl<M: TextEngine> Core<M> {
                 let Some(request) = number("id") else {
                     return false;
                 };
-                let (mut text, mut has) = (None, false);
-                if let EventPayload::Map(entries) = payload {
-                    for (k, v) in entries {
-                        match (*k, v) {
-                            ("text", crate::PayloadValue::Str(t)) => text = Some(t.clone()),
-                            ("has", crate::PayloadValue::Bool(b)) => has = *b,
-                            _ => {}
-                        }
-                    }
-                }
-                self.answer_clipboard(request as u32, text, has);
+                let answer = ClipboardAnswer::from_payload(payload);
+                self.answer_clipboard(request as u32, answer);
                 true
             }
             EventKind::Insets => {

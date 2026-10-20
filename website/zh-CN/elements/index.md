@@ -84,14 +84,17 @@ mount(App);
 
 ### 悬停
 
-在 macOS、Linux 和 GPUI 后端上，JS 可以得知鼠标移到视图上和离开视图（其他平台暂不触发这两个事件；凡是平台跟踪悬停的地方，`hover:` 类都会为悬停的视图设置样式）。
+JS 可以得知鼠标移到视图上、在视图上移动和离开视图：macOS、Windows、Linux、GPUI 后端和桌面浏览器都支持；iOS 上是 iPad 的指针或 Mac 的鼠标，Android 上是鼠标或手写笔。`hover:` 类在同样的地方为悬停的视图设置样式。
 
 | 属性 | 类型 | 说明 |
 |---|---|---|
 | `onHoverIn` | `() => void` | 鼠标移到视图或其内部的视图上。 |
+| `onHoverMove` | `(e: HoverEvent) => void` | 没有按下按键时，鼠标在视图（或其内部的视图）上移动。 |
 | `onHoverOut` | `() => void` | 鼠标离开视图及其内部的视图，或离开窗口。 |
 
-与 CSS 的 `:hover` 一样，鼠标在视图上或在其内部任何内容上时，视图都算作被悬停，因此鼠标下方视图外层的视图也会收到 `onHoverIn`（由外向内；`onHoverOut` 由内向外）。事件在发生之后才通知 JS，触摸从不触发。从鼠标下方移除的视图会收到 `onHoverOut`，在 Linux 上要等到鼠标下一次移动。
+与 CSS 的 `:hover` 一样，鼠标在视图上或在其内部任何内容上时，视图都算作被悬停，因此鼠标下方视图外层的视图也会收到 `onHoverIn`（由外向内；`onHoverOut` 由内向外）。事件在发生之后才通知 JS，触摸从不触发；按着按键移动属于触摸（`onTouchMove`、响应者系统）。从鼠标下方移除的视图会收到 `onHoverOut`，在 Linux 和 Windows 上要等到鼠标下一次移动。
+
+`HoverEvent` 给出鼠标的位置：`locationX` / `locationY` 是在视图中的位置（单位为点，已去掉视图的变换），`pageX` / `pageY` 是在视图所在根视图中的位置（与触摸相同），以及按住的修饰键（`altKey`、`ctrlKey`、`metaKey`：Apple 平台上是 Command，其他平台是 Windows 键，`shiftKey`）。移动事件每帧最多一次，总是最新的那次，并且一定在随后的 `onHoverOut` 之前到达，因此处理函数可以在每次移动时重绘：
 
 ```tsx
 const hovered = signal<string | null>(null);
@@ -99,6 +102,49 @@ const hovered = signal<string | null>(null);
 <View onHoverIn={() => hovered.set(file.path)} onHoverOut={() => hovered.set(null)} class="hover:bg-zinc-100">
   <Text>{file.name}</Text>
 </View>
+
+// 图表上的十字线。
+const at = signal<number | null>(null);
+
+<View onHoverMove={(e) => at.set(e.locationX)} onHoverOut={() => at.set(null)} style={{ height: 200 }}>
+  <If when={at() !== null}>
+    <View style={{ position: "absolute", left: at()!, top: 0, bottom: 0, width: 1, backgroundColor: "#888" }} />
+  </If>
+</View>
+```
+
+### 上下文菜单
+
+`onContextMenu` 告诉视图：鼠标的辅助按钮在它上面按下了——右键单击、macOS 上的 Control 单击、触控板的双指单击、iPad 指针的辅助点按；在浏览器里还有键盘的菜单键。在这里用 [`Menu.popup`](../modules/nsh-desktop.md) 打开应用自己的菜单：
+
+```tsx
+import { Menu } from "nsh/desktop";
+
+<View onContextMenu={(e) => Menu.popup(rowMenu(row), { x: e.pageX, y: e.pageY })}>…</View>
+```
+
+| 属性 | 类型 | 说明 |
+|---|---|---|
+| `onContextMenu` | `(e: ContextMenuEvent) => void` | 辅助按钮在视图或其内部的视图上按下。 |
+
+`ContextMenuEvent` 包含视图中的 `locationX` / `locationY`、根视图中的 `pageX` / `pageY`（`Menu.popup` 放置菜单的位置）以及修饰键（`altKey`、`ctrlKey`、`metaKey`、`shiftKey`）。从指针下方的视图向外，最近的一个监听者收到事件。如果比它更近的是文本输入框，或带有编辑菜单的可选中文本（Windows、GPUI 后端、浏览器），则显示它们自己的菜单。平台在按钮按下时根据已挂载的内容做出决定，因此处理函数在事后得到通知，不需要取消任何东西。在触摸屏上用长按打开菜单：用同一个函数处理 `onLongPress`。
+
+### 键盘焦点
+
+在 macOS 和 Web 上，Tab 在可按压的视图（以及输入框）之间移动键盘焦点，按 Return 或空格会按下获得焦点的视图，`focus:` 类为它设置样式。
+点击会按下视图但不让它获得焦点，所以 `focus:` 只在键盘聚焦时生效。
+
+| 属性 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `focusable` | `boolean` | `true` | 可按压的视图是否是 Tab 的停靠点；`false` 把它留给指针（关闭浮层的背景层、用方向键切换的列表行）。 |
+
+```tsx
+<View class="rounded-lg p-3 focus:bg-sky-100" onPress={open}>
+  <Text>Open</Text>
+</View>
+
+{/* 浮层的背景层：点击关闭浮层，Tab 直接越过它进入内容。 */}
+<View class="absolute inset-0" focusable={false} onPress={close} />
 ```
 
 ### 布局与标识

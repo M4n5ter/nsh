@@ -20,6 +20,10 @@ on every backend (macOS, Windows, Linux, and GPUI, a separate platform backend i
 yet: on macOS, Windows and Linux apps use `nsh/ui/mobile`, whose components render there as on phones, or their own
 layouts from the primitives.
 
+An app's crate exports components, modules and classes of its own the same way (`#[native_module("…")]`,
+`docs/dev/tooling.md`): `examples/rust-exports` exports one of each to TSX, each kind of prop, event, function and
+member once, with headless tests of its TSX entry.
+
 ## The API
 
 ```rust
@@ -73,7 +77,11 @@ reasons: `reactive-components.md`.
   too (`#[module] impl Alert`: `Alert`).
 - **Props** are a struct, **events** an enum; the derives produce a decoder per prop (`PropSpec::decode`: the JS
   value into the field's Rust type, when JS sets it), the conversion of an event's data to JS (`Event::data_js`),
-  defaults, and the TypeScript types (doc comments included). Field and variant names become camel case in JS. Value types
+  defaults, and the TypeScript types (doc comments included: the fields' and variants', while the component's is
+  its `#[component] fn`'s, `Component::DOC`; the props struct's and the event enum's own stay Rust's, and so does
+  any part of a doc comment from its first heading on, `# Rust` for notes meant for Rust callers). Field and variant names become camel case in JS. An
+  event handler's argument is `value` in TS (`event` for a variant with named fields); `#[args(index)]` on the
+  variant names it (`onSelect?: (index: number) => void`). Value types
   implement `JsValue` (numbers, `bool`, strings, `Color`, `Option`, `Vec`, `JsonValue`, `ui::Style` (an inline
   `StyleProp<ViewStyle>`, decoded as a host element's `style` is: transforms, shadow offsets and native animated
   values included; Rust builds one with `Style::from_decls` / `with`), `PropEnum`s, `JsObject` structs). A field that can change is a `Prop<T>` (`Copy`): in the
@@ -177,7 +185,7 @@ reasons: `reactive-components.md`.
   | `I18nManager.forceRTL` / `allowRTL` | `force_rtl(bool)` / `allow_rtl(bool)`: the root's direction at once, `rtl()` readers follow |
   | `import logo from "./logo@2x.png"`, `import font from "./a.ttf"` | `const LOGO: ImageAsset = asset!("logo@2x.png");` (`image(LOGO)` lays out at its natural size), `const A: FontAsset = asset!("a.ttf");` (`.font_family(A.family)`), with `registry.assets(assets!())` (below) |
   | `Image.getSize(uri)`, `Image.prefetch(uri)` | `image_size(uri)` / `prefetch_image(uri)`: answers to await in a task |
-  | `Clipboard.setString(text)`, `await Clipboard.getString()` / `hasString()` (`nsh/clipboard`) | `set_clipboard(text)`, `clipboard_string()` / `clipboard_has_string()`: answers to await in a task (the app's `capabilities.clipboard` applies as for JS) |
+  | `Clipboard.setString(text)`, `await Clipboard.getString()` / `hasString()`, `setImage(uri)`, `getImage()` / `hasImage()`, `getFiles()` (`nsh/clipboard`) | `set_clipboard(text)`, `clipboard_string()` / `clipboard_has_string()`, `set_clipboard_image(uri)`, `clipboard_image()` (an `Option<ClipboardImage>`) / `clipboard_has_image()`, `clipboard_files()`: answers to await in a task (the app's `capabilities.clipboard` applies as for JS) |
   | `await Storage.getItem(k)`, `setItem(k, v)`, `removeItem(k)`, `getAllKeys()`, `clear()` (`nsh/storage`) | `nsh_core::storage::Storage::get_item(k)`, `set_item(k, v)` (`Err(StorageFull)` past the quota), `remove_item(k)`, `get_all_keys()`, `clear()`: synchronous (the entries are in memory on the engine thread), and the same entries the app's JS uses, so a TSX entry and a Rust entry of one app read each other's data |
   | `AccessibilityInfo.announceForAccessibility`, `setAccessibilityFocus(ref)` | `announce_for_accessibility(msg)`, `note.set_accessibility_focus()` (an `ElementRef`) |
   | `Toast.show(msg, "long")` (`nsh/android`) | `toast(msg, ToastDuration::Long)` (nothing happens off Android) |
@@ -260,16 +268,19 @@ write: `#[methods] impl StepperApi { pub fn set_value(&self, v: f64) {..} pub fn
 implements `Api`, the view registers it with `cx.methods(StepperApi { .. })` for as long as it lives, and
 `#[component(methods = StepperApi)]` (`Component::METHODS = Methods::of::<StepperApi>()`) names it in the spec, so the
 JS face builds the ref (`StepperRef`: `node` and the methods, typed from the Rust signatures and docs) with no TS
-written. A call converts its arguments in the JS call (a wrong one throws, or rejects the promise of a method that
-returns a value) into a closure an op carries (`RustCall::Method`), so it runs in order with the props JS set
-before it, with the API the view registered. A method returning nothing is called and forgotten; one returning a
-value gives JS a `Promise`, settled from the core's events (`JsEvent::Reply`, the boxed value converted then) in
-the same frame's commit rounds. Rust calls them directly: `ComponentRef::api::<StepperApi>()`.
+written. A call converts its arguments in the JS call into a closure an op carries (`RustCall::Method`), so it runs
+in order with the props JS set before it, with the API the view registered. Its return type decides what TS gets:
+a method returning `()` gives `void`, with no reply (JS calls it and moves on, a wrong argument throws in the call);
+one returning `Result<(), E>` gives `Promise<void>` (rejected with the `Err`'s message: the method runs at the
+commit, after the JS call returned, so it cannot throw); one returning a value gives `Promise<T>` (a wrong argument
+rejects it). Promises settle from the core's events (`JsEvent::Reply`, the boxed value converted then) in the same
+frame's commit rounds. Rust calls the methods directly: `ComponentRef::api::<StepperApi>()`.
 
 ## Modules
 
 Functions a UI set exports without a component (`Alert.alert`, `Keyboard.dismiss`, `StatusBar.setHidden`) are a
-`#[module]` `impl` block of a unit struct: `pub fn`s are the functions, typed from their signatures (`Option`
+unit struct and its `impl` block, both `#[module]` (the struct's doc comment documents the module; a component of the
+same name stands for the struct, `StatusBar`): `pub fn`s are the functions, typed from their signatures (`Option`
 parameters at the end may be left out). The signature decides how a call runs (`FunctionCall`):
 
 - **No context, not `async`** (`Sync`): it runs inside the JS call, as a class's method does (below), converting
@@ -277,11 +288,12 @@ parameters at the end may be left out). The signature decides how a call runs (`
   (signals, `dialog`, `theme()`) are not there (the reactive graph is not entered).
 - **A last `cx: &mut ModuleCx`** (`Op`): the platform's services, applied in order right after the call (a dialog,
   the status bar, focus). Its arguments are converted in the JS call into a closure an op carries
-  (`RustCall::Op`, in order with the ops before it); one returning a value gives JS a `Promise`, settled like a
-  method's, and a conversion error rejects it.
+  (`RustCall::Op`, in order with the ops before it). As for a method: returning `()`, it gives `void`, with no
+  reply (a conversion error throws); returning `Result<(), E>`, `Promise<void>`; returning a value, `Promise<T>`,
+  settled like a method's (a conversion error rejects it).
 - **`async fn`** (`Async`): no context; it runs as a root task, reaching the platform with the same free functions
-  views use (`Alert.alert` awaits `dialog(..)`), sent as the op above; a `Promise` of its value, rejected with an
-  `Err`'s message or a panic's.
+  views use (`Alert.alert` awaits `dialog(..)`), sent as the op above; it gives a Promise of its value
+  (`Promise<void>` for `()`), rejected with an `Err`'s message or a panic's.
 
 Parameters are `Arg`s: the `JsValue` types, instances (`Instance<T>`) and `Callback`s; results are `Ret`s. In an op
 or a task, instances and functions ride in its closure as they are (`docs/dev/rust-classes.md`, "How calls
@@ -391,7 +403,7 @@ in points: `@2x` / `@3x` divide the pixels), a `FontAsset { uri, family }` (`.tt
 font's name table) or a `FileAsset { uri }`; a missing or unreadable file fails the build, a changed one builds the
 crate again (`include_bytes!`). The URI is `asset:/@<package>/<path>`, apart from the app's own files. The registry
 ships the directory: `registry.assets(assets!())` lists every file (`AssetFile`: URI, the file where the crate was
-built, kind), which the app's command line (`rust_app.rs`, the registry is in-process) serves in development and
+built, kind), which `nsh` (`rust_app.rs`, from the description of the set: each file's path and source) serves in development and
 copies into packages next to the imported assets, and whose fonts the engine registers before the first view
 (`EngineConfig::ui_sets`, read through `EngineConfig::assets`).
 
@@ -440,8 +452,9 @@ is no string to parse and no `.class()`.
 `secondary`, `danger`, `muted`, `border`, `group_box`, `list_*`, `switch*`, `tab*`, ...: the fields mobile components
 use) plus `radius`, `radius_lg` and `font_size`, and derefs to its colors (`theme.primary`). The default
 (`default-theme.json`) is gpui-kit's default theme with mobile radii. An app sets its own in `nsh.json`: `"theme":
-"brand.json"` (a gpui-kit theme file, relative to `nsh.json`) or the same JSON inline. Keys only desktop components
-use are ignored; a pressed color the theme leaves out is derived from its base; null colors (gpui-kit serializes unset
+"brand.json"` (a gpui-kit theme file, relative to `nsh.json`) or the same JSON inline. Keys no field has (desktop
+components', the app's own) are kept by key, colors and numbers alike (`Theme::color` / `number`, `set_color` /
+`set_number`): tokens of the app's classes (`styles.md`), a host's theme inheriting the app's it lacks; a pressed color the theme leaves out is derived from its base; null colors (gpui-kit serializes unset
 ones so) are left as they are; colors are CSS colors or Tailwind palette names. The bundler checks the theme; the entry
 hands it to the renderer (`nsh:rt` `setup`), which sends it to the root (`uiTheme`) before any view is made.
 `theme()` reads it from a signal of the surface: a new theme runs again the bindings that read it. An embedding app

@@ -129,6 +129,21 @@ fn calls_into_rust_settle_their_promises_whatever_happens() {
         4,
         RustCall::Op(Box::new(|_| Ok(Box::new(1.0f64) as Box<dyn ToJs>))),
     )]);
+    // Call 0 (an op or method returning `()`: JS waits for nothing): run,
+    // failed or discarded, no reply.
+    c.apply(op(
+        0,
+        RustCall::Op(Box::new(|_| Ok(Box::new(()) as Box<dyn ToJs>))),
+    ))
+    .unwrap();
+    c.apply(op(0, RustCall::Op(Box::new(|_| panic!("quiet boom")))))
+        .unwrap();
+    c.apply(op(0, RustCall::Method(40, Box::new(|_| None))))
+        .unwrap();
+    c.discard_ops(vec![op(
+        0,
+        RustCall::Op(Box::new(|_| Ok(Box::new(()) as Box<dyn ToJs>))),
+    )]);
     let replies: Vec<_> = js_events(&mut c)
         .into_iter()
         .map(|(_, _, payload)| match payload {
@@ -477,6 +492,208 @@ fn nested_spans_merge_with_styles() {
             .iter()
             .any(|i| matches!(i, MountItem::Create { id: 4, .. }))
     );
+}
+
+/// The attributed text of the first `Text` item in `batch`.
+fn text_item(batch: &MountBatch) -> Option<Arc<AttributedText>> {
+    batch.items.iter().find_map(|i| match i {
+        MountItem::Text { text, .. } => Some(text.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn span_backgrounds_style_their_characters() {
+    // <Text>a <Text bg r=4>b<Text bold>c</Text></Text> d</Text>
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Text,
+            },
+            style_op(2, &[("backgroundColor", StyleValue::Str("#00ff00"))]),
+            Op::CreateText {
+                id: 3,
+                text: "a ".into(),
+            },
+            Op::Create {
+                id: 4,
+                tag: Tag::Text,
+            },
+            style_op(
+                4,
+                &[
+                    ("backgroundColor", StyleValue::Str("#ff0000")),
+                    ("borderRadius", StyleValue::Number(4.0)),
+                ],
+            ),
+            Op::CreateText {
+                id: 5,
+                text: "b".into(),
+            },
+            Op::Create {
+                id: 6,
+                tag: Tag::Text,
+            },
+            style_op(6, &[("fontWeight", StyleValue::Str("bold"))]),
+            Op::CreateText {
+                id: 7,
+                text: "c".into(),
+            },
+            Op::CreateText {
+                id: 8,
+                text: " d".into(),
+            },
+            Op::Insert {
+                parent: 6,
+                child: 7,
+                before: None,
+            },
+            Op::Insert {
+                parent: 4,
+                child: 5,
+                before: None,
+            },
+            Op::Insert {
+                parent: 4,
+                child: 6,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 4,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 8,
+                before: None,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let text = text_item(&batch).unwrap();
+    assert_eq!(text.text, "a bc d");
+    let backgrounds: Vec<_> = text.spans.iter().map(|s| s.style.background).collect();
+    let red = Some(crate::text::TextBackground {
+        color: Color(0xff00_00ff),
+        radius: 4.0,
+        node: 4,
+    });
+    // The block's own background is its view's; the bold span inside the
+    // red one keeps the red one's.
+    assert_eq!(backgrounds, [None, red, red, None]);
+    assert!(text.has_backgrounds());
+    // The view draws the block's background.
+    assert_eq!(
+        view_style_of(&batch, 2).unwrap().background_color,
+        Color(0x00ff_00ff)
+    );
+
+    // A new color draws again without measuring again.
+    apply(
+        &mut c,
+        vec![style_op(
+            4,
+            &[("backgroundColor", StyleValue::Str("#0000ff"))],
+        )],
+    );
+    let batch = c.commit().unwrap();
+    let text = text_item(&batch).unwrap();
+    assert_eq!(
+        text.spans[1].style.background.map(|b| (b.color, b.radius)),
+        Some((Color(0x0000_ffff), 0.0))
+    );
+    assert!(frame_of(&batch, 2).is_none());
+
+    // Transparent is none.
+    apply(
+        &mut c,
+        vec![style_op(
+            4,
+            &[("backgroundColor", StyleValue::Str("transparent"))],
+        )],
+    );
+    let text = text_item(&c.commit().unwrap()).unwrap();
+    assert!(!text.has_backgrounds());
+}
+
+#[test]
+fn background_boxes_join_pieces_of_one_span() {
+    let mut t = AttributedText::default();
+    let plain = ResolvedTextStyle::default();
+    let bg = |node| crate::text::TextBackground {
+        color: Color(0xff00_00ff),
+        radius: 3.0,
+        node,
+    };
+    let code = ResolvedTextStyle {
+        background: Some(bg(4)),
+        ..plain
+    };
+    let bold = ResolvedTextStyle {
+        font_weight: 700,
+        ..code
+    };
+    // "a " "bc" (one background, two runs) "d" " e" (a span of its own,
+    // looking the same) " "
+    t.push("a ", plain);
+    t.push("b", code);
+    t.push("c", bold);
+    t.push(
+        "d",
+        ResolvedTextStyle {
+            background: Some(bg(6)),
+            ..plain
+        },
+    );
+    t.push(" e ", plain);
+    let piece = |i: u32, ascent: f32| crate::text::LinePiece {
+        x: i as f32 * 10.0,
+        width: 10.0,
+        background: t.background_at(i),
+        ascent,
+        descent: 2.0,
+    };
+    let pieces = (0..7).map(|i| piece(i, if i == 3 { 12.0 } else { 10.0 }));
+    let mut boxes = Vec::new();
+    crate::text::BackgroundBox::join(pieces, (0.0, 70.0), |b| boxes.push(b));
+    assert_eq!(boxes.len(), 2);
+    assert_eq!((boxes[0].x, boxes[0].width), (20.0, 20.0));
+    assert_eq!((boxes[0].ascent, boxes[0].descent), (12.0, 2.0));
+    assert_eq!(boxes[0].background.node, 4);
+    assert_eq!((boxes[1].x, boxes[1].width), (40.0, 10.0));
+    assert_eq!(boxes[1].background.node, 6);
+    // At most half its height.
+    assert_eq!(boxes[0].radius(), 3.0);
+    assert_eq!(
+        crate::text::BackgroundBox {
+            ascent: 2.0,
+            descent: 1.0,
+            ..boxes[0]
+        }
+        .radius(),
+        1.5
+    );
+    // Cut to the line.
+    let mut boxes = Vec::new();
+    crate::text::BackgroundBox::join((0..7).map(|i| piece(i, 10.0)), (0.0, 25.0), |b| {
+        boxes.push(b)
+    });
+    assert_eq!(boxes.len(), 1);
+    assert_eq!((boxes[0].x, boxes[0].width), (20.0, 5.0));
 }
 
 #[test]
@@ -3592,13 +3809,13 @@ mod components {
     #[crate::ui::methods]
     impl KnobApi {
         /// Turns it by `by`; where it is.
-        fn turn(&self, by: i32) -> i32 {
+        pub(crate) fn turn(&self, by: i32) -> i32 {
             self.at.update(|at| *at += by);
             self.at.get_untracked()
         }
 
         /// Fails.
-        fn stuck(&self) -> Result<(), String> {
+        pub(crate) fn stuck(&self) -> Result<(), String> {
             Err(format!("stuck at {}", self.at.get_untracked()))
         }
     }
@@ -3941,6 +4158,273 @@ mod components {
                 .style_when(filled, |v| v.mt_2())
                 .child(props.children),
         )
+    }
+
+    /// Children above a footer slot.
+    #[derive(Clone, Copy, PartialEq, Props)]
+    struct PanelProps {
+        footer: crate::ui::Prop<Option<Slot>>,
+        children: Children,
+    }
+
+    #[component]
+    fn Panel(props: PanelProps) -> impl IntoElement {
+        view()
+            .child(props.children)
+            .child(props.footer.place(|f| f))
+    }
+
+    /// JS children come after the view is made (lazy ones, later ones) and
+    /// go before what follows their place: a region (the footer's slot)
+    /// that is empty then, and its node once it fills.
+    #[test]
+    fn children_go_before_a_region_that_fills_later() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Panel>();
+        c.set_components(registry);
+        let child = |id| {
+            vec![
+                Op::Create { id, tag: Tag::View },
+                Op::Insert {
+                    parent: 2,
+                    child: id,
+                    before: None,
+                },
+            ]
+        };
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component(std::any::type_name::<Panel>().into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        c.commit().unwrap();
+        // The footer's region is empty: the child goes at the end.
+        apply(&mut c, child(8));
+        let batch = c.commit().expect("a child before an empty region");
+        assert!(batch.items.iter().any(|i| matches!(
+            i,
+            MountItem::Insert {
+                parent: 2,
+                child: 8,
+                before: None
+            }
+        )));
+        // The footer fills; a later child goes before its node.
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 4,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 4,
+                    prop: Prop::ComponentSlot("footer".into()),
+                },
+                Op::Insert {
+                    parent: 2,
+                    child: 4,
+                    before: None,
+                },
+                Op::Create {
+                    id: 6,
+                    tag: Tag::View,
+                },
+                Op::Insert {
+                    parent: 4,
+                    child: 6,
+                    before: None,
+                },
+            ],
+        );
+        c.commit().expect("the footer filled");
+        apply(&mut c, child(10));
+        let batch = c.commit().unwrap();
+        assert!(
+            batch.items.iter().any(|i| matches!(
+                i,
+                MountItem::Insert {
+                    parent: 2,
+                    child: 10,
+                    before: Some(4)
+                }
+            )),
+            "{:?}",
+            batch.items
+        );
+    }
+
+    /// Children and a footer slot in one region, above a node of the view.
+    #[component]
+    fn Ledger(props: PanelProps) -> impl IntoElement {
+        view()
+            .child(dynamic(move || {
+                vec![props.children.into_element(), props.footer.place(|f| f)]
+            }))
+            .child(view())
+    }
+
+    /// The ids of `parent`'s children in the core's tree, in order.
+    fn child_ids(c: &Core<FakeEngine>, parent: NodeId) -> Vec<NodeId> {
+        let key = c.key(parent).unwrap();
+        c.nodes[key as usize]
+            .children
+            .iter()
+            .map(|&k| c.nodes[k as usize].id)
+            .collect()
+    }
+
+    /// A host of component `C` at node 2, in the root.
+    fn mount_host<C: Component>() -> Core<FakeEngine> {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<C>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component(std::any::type_name::<C>().into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        c.commit().unwrap();
+        c
+    }
+
+    /// JS child `id` of host 2, before its JS sibling `before`.
+    fn js_child(id: NodeId, before: Option<NodeId>) -> Vec<Op> {
+        vec![
+            Op::Create { id, tag: Tag::View },
+            Op::Insert {
+                parent: 2,
+                child: id,
+                before,
+            },
+        ]
+    }
+
+    /// Fills host 2's footer slot with node 4 (holding node 6).
+    fn fill_footer() -> Vec<Op> {
+        vec![
+            Op::Create {
+                id: 4,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 4,
+                prop: Prop::ComponentSlot("footer".into()),
+            },
+            Op::Insert {
+                parent: 2,
+                child: 4,
+                before: None,
+            },
+            Op::Create {
+                id: 6,
+                tag: Tag::View,
+            },
+            Op::Insert {
+                parent: 4,
+                child: 6,
+                before: None,
+            },
+        ]
+    }
+
+    /// A region inside a region resolves to what follows the outer one:
+    /// the JS children before it go before the view's node after both,
+    /// while the inner region (the footer) is empty and once it fills.
+    #[test]
+    fn children_in_a_region_go_before_the_node_after_it() {
+        let mut c = mount_host::<Ledger>();
+        let ids = child_ids(&c, 2);
+        assert_eq!(ids.len(), 1, "{ids:?}");
+        let tail = ids[0];
+        apply(&mut c, js_child(8, None));
+        c.commit().expect("a child before an empty region");
+        assert_eq!(child_ids(&c, 2), [8, tail]);
+        apply(&mut c, fill_footer());
+        c.commit().expect("the footer filled");
+        assert_eq!(child_ids(&c, 2), [8, 4, tail]);
+        apply(&mut c, js_child(10, None));
+        c.commit().unwrap();
+        assert_eq!(child_ids(&c, 2), [8, 10, 4, tail]);
+    }
+
+    /// A region that fills and empties again leaves the children before it
+    /// in place, and later ones go where they would have.
+    #[test]
+    fn children_stay_in_place_as_a_region_fills_and_empties() {
+        let mut c = mount_host::<Ledger>();
+        let tail = child_ids(&c, 2)[0];
+        apply(&mut c, js_child(8, None));
+        apply(&mut c, fill_footer());
+        c.commit().unwrap();
+        assert_eq!(child_ids(&c, 2), [8, 4, tail]);
+        apply(
+            &mut c,
+            vec![Op::Remove {
+                parent: 2,
+                child: 4,
+            }],
+        );
+        c.commit().expect("the footer emptied");
+        assert_eq!(child_ids(&c, 2), [8, tail]);
+        apply(&mut c, js_child(10, None));
+        c.commit().unwrap();
+        assert_eq!(child_ids(&c, 2), [8, 10, tail]);
+        apply(
+            &mut c,
+            vec![Op::Insert {
+                parent: 2,
+                child: 4,
+                before: None,
+            }],
+        );
+        c.commit().expect("the footer filled again");
+        assert_eq!(child_ids(&c, 2), [8, 10, 4, tail]);
+    }
+
+    /// A child inserted before a JS sibling goes before it, wherever the
+    /// region after them is.
+    #[test]
+    fn children_go_before_the_sibling_js_names() {
+        let mut c = mount_host::<Panel>();
+        apply(&mut c, js_child(8, None));
+        apply(&mut c, fill_footer());
+        c.commit().unwrap();
+        assert_eq!(child_ids(&c, 2), [8, 4]);
+        apply(&mut c, js_child(10, Some(8)));
+        c.commit().unwrap();
+        assert_eq!(child_ids(&c, 2), [10, 8, 4]);
+        apply(&mut c, js_child(12, None));
+        c.commit().unwrap();
+        assert_eq!(child_ids(&c, 2), [10, 8, 12, 4]);
     }
 
     #[test]
@@ -4309,6 +4793,123 @@ mod components {
         // Setting the same theme again renders nothing.
         c.set_theme(themed("#0000ff"));
         assert_eq!(c.commit().as_ref().and_then(background), None);
+    }
+
+    #[test]
+    fn classes_naming_theme_tokens_follow_the_theme() {
+        let mut c = core();
+        view_with_classes(&mut c, 2, "w-10 h-10 bg-primary");
+        view_with_classes(&mut c, 4, "w-10 h-10 bg-chart-up");
+        view_with_classes(&mut c, 6, "w-10 h-10 bg-red-500");
+        let default = crate::ui::Theme::default();
+        let batch = c.commit().unwrap();
+        assert_eq!(
+            view_style_of(&batch, 2).unwrap().background_color,
+            default.primary.light
+        );
+        // Not a token of the app's theme.
+        assert!(view_style_of(&batch, 4).is_none());
+        let host = crate::ui::Theme::from_json(
+            r##"{ "themes": [
+                { "mode": "light", "colors": { "primary.background": "#00ff00", "chart.up": "#0000ff" } },
+                { "mode": "dark", "colors": { "primary.background": "#004400" } }
+            ] }"##,
+        )
+        .unwrap();
+        c.set_host_theme(Some(host.clone()));
+        let batch = c.commit().unwrap();
+        assert_eq!(
+            view_style_of(&batch, 2).unwrap().background_color,
+            rgb(0x00ff00)
+        );
+        assert_eq!(
+            view_style_of(&batch, 4).unwrap().background_color,
+            rgb(0x0000ff)
+        );
+        assert!(view_style_of(&batch, 6).is_none());
+        c.set_class_environment(crate::tailwind::ClassEnvironment {
+            dark: true,
+            ..Default::default()
+        });
+        let batch = c.commit().unwrap();
+        assert_eq!(
+            view_style_of(&batch, 2).unwrap().background_color,
+            rgb(0x004400)
+        );
+        // New values of the same tokens: only their classes are resolved.
+        let mut changed = host;
+        changed.set_color("primary.background", rgb(0xff00ff).into());
+        c.set_host_theme(Some(changed));
+        let batch = c.commit().unwrap();
+        assert_eq!(
+            view_style_of(&batch, 2).unwrap().background_color,
+            rgb(0xff00ff)
+        );
+        assert!(view_style_of(&batch, 4).is_none());
+        assert!(view_style_of(&batch, 6).is_none());
+    }
+
+    #[test]
+    fn the_apps_token_classes_on_a_component_follow_the_theme() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Swatch>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component(std::any::type_name::<Swatch>().into()),
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Class("bg-chart-up".into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        c.commit().unwrap();
+        let host = crate::ui::Theme::from_json(
+            r##"{ "themes": [{ "colors": { "chart.up": "#0000ff" } }] }"##,
+        )
+        .unwrap();
+        c.set_host_theme(Some(host));
+        let batch = c.commit().unwrap();
+        // The app's class wins over the component's own background.
+        assert_eq!(
+            view_style_of(&batch, 2).unwrap().background_color,
+            rgb(0x0000ff)
+        );
+    }
+
+    #[test]
+    fn a_host_theme_keeps_the_apps_own_tokens() {
+        let mut c = core();
+        apply(
+            &mut c,
+            vec![Op::SetProp {
+                id: ROOT_ID,
+                prop: Prop::UiTheme(
+                    r##"{ "themes": [{ "colors": { "chart.up": "#0000ff" } }] }"##.into(),
+                ),
+            }],
+        );
+        view_with_classes(&mut c, 2, "w-10 h-10 bg-chart-up");
+        c.set_host_theme(Some(crate::ui::Theme::default()));
+        let batch = c.commit().unwrap();
+        assert_eq!(
+            view_style_of(&batch, 2).unwrap().background_color,
+            rgb(0x0000ff)
+        );
     }
 
     /// Wraps each JS child in a padded row.
@@ -5643,6 +6244,122 @@ mod components {
         assert_eq!(shown.last().unwrap(), "pasted hello");
     }
 
+    /// Pastes the clipboard's image and files when pressed.
+    #[component]
+    fn ImagePaster() -> impl IntoElement {
+        let pasted = signal(String::new());
+        view()
+            .child(text(move || format!("pasted {}", pasted.get())))
+            .child(view().h(px(10.0)).on_press(move |_: &()| {
+                let (has, image, files) =
+                    (clipboard_has_image(), clipboard_image(), clipboard_files());
+                spawn(async move {
+                    let has = has.await;
+                    let image = image
+                        .await
+                        .map(|i| format!("{}x{} {}", i.width, i.height, i.uri));
+                    let files = files.await.join(",");
+                    pasted.set(format!("{has} {image:?} {files}"));
+                });
+            }))
+    }
+
+    #[test]
+    fn components_read_images_and_files_from_the_clipboard() {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<ImagePaster>(|| ()));
+        let batch = c.commit().unwrap();
+        let button = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the button");
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        let reads: Vec<_> = c
+            .commit()
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|i| match i {
+                MountItem::Command {
+                    id: ROOT_ID,
+                    command:
+                        command @ (Command::ReadClipboardImage { .. }
+                        | Command::ReadClipboardFiles { .. }),
+                } => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reads,
+            [
+                Command::ReadClipboardImage {
+                    id: 1,
+                    has_only: true
+                },
+                Command::ReadClipboardImage {
+                    id: 2,
+                    has_only: false
+                },
+                Command::ReadClipboardFiles { id: 3 },
+            ]
+        );
+        use crate::PayloadValue::{Bool, Number, Str};
+        let answers = [
+            vec![("id", Number(1.0)), ("has", Bool(true))],
+            vec![
+                ("id", Number(2.0)),
+                ("has", Bool(true)),
+                ("uri", Str("data:image/png;base64,AA==".into())),
+                ("width", Number(4.0)),
+                ("height", Number(3.0)),
+            ],
+            vec![
+                ("id", Number(3.0)),
+                ("has", Bool(true)),
+                ("files", Str("file:///tmp/a%20b.png\nfile:///tmp/c/".into())),
+            ],
+        ];
+        for payload in answers {
+            assert!(c.component_event(ROOT_ID, EventKind::Clipboard, &EventPayload::Map(payload)));
+        }
+        let shown = run_until(&mut c, |s| s.iter().any(|t| t.starts_with("pasted t")));
+        assert_eq!(
+            shown.last().unwrap(),
+            "pasted true Some(\"4x3 data:image/png;base64,AA==\") file:///tmp/a%20b.png,file:///tmp/c/"
+        );
+    }
+
+    #[test]
+    fn clipboard_images_need_the_capability() {
+        let mut c = core();
+        c.set_access(std::sync::Arc::new(crate::access::Access {
+            declared: crate::access::Capabilities::from_json(&serde_json::json!({})).unwrap(),
+            granted: None,
+        }));
+        c.mount_root(&crate::ui::Root::new::<ImagePaster>(|| ()));
+        let batch = c.commit().unwrap();
+        let button = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the button");
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        let items = c.commit().map(|b| b.items).unwrap_or_default();
+        assert!(
+            !items.iter().any(|i| matches!(i, MountItem::Command { .. })),
+            "nothing reaches the platform"
+        );
+        let shown = run_until(&mut c, |s| s.iter().any(|t| t.starts_with("pasted f")));
+        assert_eq!(shown.last().unwrap(), "pasted false None ");
+    }
+
     /// Shows a fallback while a component below it failed; a press tries
     /// again.
     #[component]
@@ -6500,6 +7217,48 @@ fn window_drag_is_a_view_prop() {
     assert!(batch.items.iter().any(
         |i| matches!(i, MountItem::ViewProps { id: 2, props } if props.window_drag.is_none())
     ));
+}
+
+/// `focusable={false}` reaches the platform in the view's props.
+#[test]
+fn focusable_is_a_view_prop() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Focusable(Some(false)),
+            },
+            Op::Insert {
+                parent: crate::ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(
+        |i| matches!(i, MountItem::ViewProps { id: 2, props } if props.focusable == Some(false))
+    ));
+    // Cleared (JS's `undefined`): the default, sent again.
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::Focusable(None),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert!(
+        batch.items.iter().any(
+            |i| matches!(i, MountItem::ViewProps { id: 2, props } if props.focusable.is_none())
+        )
+    );
 }
 
 /// Components that run once: their views mounted with bindings.
@@ -8469,7 +9228,7 @@ mod views {
     #[crate::ui::methods]
     impl DialApi {
         /// Where it is.
-        fn at(&self) -> i32 {
+        pub(crate) fn at(&self) -> i32 {
             self.at.get_untracked()
         }
     }
@@ -9215,6 +9974,99 @@ fn file_drop_callbacks_keep_urls_and_disabled_targets_unmount_their_events() {
     ] {
         assert!(!events.contains(event));
     }
+}
+
+#[test]
+fn hover_moves_reach_rust_listeners_with_their_positions_and_modifiers() {
+    use crate::ui::prelude::*;
+    #[component]
+    fn Crosshair() -> impl IntoElement {
+        let at = signal(String::new());
+        view()
+            .on_hover_move(move |e: &HoverEvent| {
+                at.set(format!(
+                    "{} {} {} {} {}",
+                    e.location_x, e.location_y, e.page_x, e.page_y, e.modifiers.shift
+                ))
+            })
+            .child(text(move || at.get()))
+    }
+    let mut c = core();
+    c.mount_root(&crate::ui::Root::of::<Crosshair>());
+    let batch = c.commit().unwrap();
+    let host = batch
+        .items
+        .iter()
+        .find_map(|item| match item {
+            MountItem::Events { id, events } if events.contains(EventKind::HoverMove) => Some(*id),
+            _ => None,
+        })
+        .expect("the listening view mounts HoverMove in its event mask");
+    let event = crate::HoverEvent {
+        location_x: 4.0,
+        location_y: 5.0,
+        page_x: 14.0,
+        page_y: 25.0,
+        modifiers: crate::keymap::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    };
+    assert!(c.component_event(host, EventKind::HoverMove, &EventPayload::Hover(event)));
+    let delivered = c.commit().unwrap();
+    assert!(delivered.items.iter().any(|item| matches!(item,
+        MountItem::Text { text, .. } if text.text == "4 5 14 25 true")));
+    // Another payload is not a hover move.
+    assert!(c.component_event(host, EventKind::HoverMove, &EventPayload::None));
+    assert!(
+        c.commit()
+            .is_none_or(|b| !b.items.iter().any(|i| matches!(i, MountItem::Text { .. })))
+    );
+}
+
+#[test]
+fn context_menus_reach_rust_listeners_with_their_positions() {
+    use crate::ui::prelude::*;
+    #[component]
+    fn Row() -> impl IntoElement {
+        let at = signal(String::new());
+        view()
+            .on_context_menu(move |e: &ContextMenuEvent| {
+                at.set(format!(
+                    "{} {} {} {}",
+                    e.location_x, e.location_y, e.page_x, e.page_y
+                ))
+            })
+            .child(text(move || at.get()))
+    }
+    let mut c = core();
+    c.mount_root(&crate::ui::Root::of::<Row>());
+    let batch = c.commit().unwrap();
+    let host = batch
+        .items
+        .iter()
+        .find_map(|item| match item {
+            MountItem::Events { id, events } if events.contains(EventKind::ContextMenu) => {
+                Some(*id)
+            }
+            _ => None,
+        })
+        .expect("the listening view mounts ContextMenu in its event mask");
+    let event = crate::ContextMenuEvent {
+        location_x: 4.0,
+        location_y: 5.0,
+        page_x: 14.0,
+        page_y: 25.0,
+        ..Default::default()
+    };
+    assert!(c.component_event(
+        host,
+        EventKind::ContextMenu,
+        &EventPayload::ContextMenu(event)
+    ));
+    let delivered = c.commit().unwrap();
+    assert!(delivered.items.iter().any(|item| matches!(item,
+        MountItem::Text { text, .. } if text.text == "4 5 14 25")));
 }
 
 /// What builders take: listeners without arguments, children in an

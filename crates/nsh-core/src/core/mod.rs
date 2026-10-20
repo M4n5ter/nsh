@@ -1229,11 +1229,18 @@ impl<M: TextEngine> Core<M> {
                     self.deny(message);
                     continue;
                 }
-                Command::SetClipboard(_) | Command::ReadClipboard { .. }
+                Command::SetClipboard(_)
+                | Command::ReadClipboard { .. }
+                | Command::SetClipboardImage(_)
+                | Command::ReadClipboardImage { .. }
+                | Command::ReadClipboardFiles { .. }
                     if !self.access.allows_clipboard() =>
                 {
-                    if let Command::ReadClipboard { id: request, .. } = &command {
-                        self.answer_clipboard(*request, None, false);
+                    if let Command::ReadClipboard { id: request, .. }
+                    | Command::ReadClipboardImage { id: request, .. }
+                    | Command::ReadClipboardFiles { id: request } = &command
+                    {
+                        self.answer_clipboard(*request, components::ClipboardAnswer::default());
                     }
                     self.deny("the clipboard is not granted: add `\"clipboard\": true` to capabilities in nsh.json".into());
                     continue;
@@ -1588,7 +1595,11 @@ impl<M: TextEngine> Core<M> {
         let flipped = node.rtl != rtl;
         node.rtl = rtl;
         let view_changed = node.view_style != view;
-        let text_changed = node.text_style != text;
+        // A span's background is part of its block's text.
+        let span_background_changed = node.inline
+            && node.kind == Kind::Text
+            && span_background(&node.view_style, node.id) != span_background(&view, node.id);
+        let text_changed = node.text_style != text || span_background_changed;
         let animation_changed = node.animated != animated;
         let z_changed = node.z_index != z_index;
         node.view_style = view;
@@ -2195,6 +2206,13 @@ impl<M: TextEngine> Core<M> {
                 let props = node.props.get_or_insert_default();
                 if props.window_drag != value {
                     props.window_drag = value;
+                    flags |= dirty::VIEW_PROPS;
+                }
+            }
+            Prop::Focusable(value) => {
+                let props = node.props.get_or_insert_default();
+                if props.focusable != value {
+                    props.focusable = value;
                     flags |= dirty::VIEW_PROPS;
                 }
             }
@@ -3316,7 +3334,11 @@ impl<M: TextEngine> Core<M> {
                 Kind::RawText => out.push(&child.text, style),
                 Kind::Text => {
                     let start = out.len_utf16();
-                    self.collect_text(c, style.inherit(&child.text_style), out);
+                    let mut inner = style.inherit(&child.text_style);
+                    if let Some(b) = span_background(&child.view_style, child.id) {
+                        inner.background = Some(b);
+                    }
+                    self.collect_text(c, inner, out);
                     if pressable(child.events) {
                         out.links.push(crate::text::TextLink {
                             start,
@@ -4658,6 +4680,15 @@ const PRESSES: [EventKind; 4] = [
     EventKind::PressIn,
     EventKind::PressOut,
 ];
+
+/// The background a nested text's view style gives its characters.
+fn span_background(style: &ViewStyle, node: NodeId) -> Option<crate::text::TextBackground> {
+    (style.background_color.0 & 0xff != 0).then_some(crate::text::TextBackground {
+        color: style.background_color,
+        radius: style.border_radius.max(0.0),
+        node,
+    })
+}
 
 /// Whether a span with `events` takes presses (a link in its text block).
 fn pressable(events: EventMask) -> bool {

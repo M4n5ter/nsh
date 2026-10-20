@@ -100,13 +100,15 @@ pub(crate) struct Asset {
 /// The files the UI sets' crates ship (`Registry::assets`), published
 /// under `@<package>/`.
 pub(crate) fn crate_assets() -> impl Iterator<Item = Asset> {
-    crate::ui_sets()
+    let assets: Vec<Asset> = crate::ui_sets()
         .iter()
-        .flat_map(nsh_core::ui::Registry::asset_files)
+        .flat_map(|set| &set.assets)
         .map(|file| Asset {
-            path: file.path().to_owned(),
-            source: PathBuf::from(file.source),
+            path: file.path.clone(),
+            source: PathBuf::from(&file.source),
         })
+        .collect();
+    assets.into_iter()
 }
 
 /// The native modules of `natives` that are UI sets (`nsh/ui/mobile`, an
@@ -115,11 +117,7 @@ pub(crate) fn crate_assets() -> impl Iterator<Item = Asset> {
 fn imported_sets(natives: &[String]) -> Vec<String> {
     natives
         .iter()
-        .filter(|spec| {
-            crate::ui_sets()
-                .iter()
-                .any(|set| set.specifier() == Some(spec.as_str()))
-        })
+        .filter(|spec| crate::ui_sets().iter().any(|set| set.specifier == **spec))
         .cloned()
         .collect()
 }
@@ -209,14 +207,14 @@ fn compile_with(
     let dir = dunce::canonicalize(entry)
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf));
-    let bytecode = nsh_js::compile_bytecode_with(&bundle.code, strip, crate::ui_sets())?;
+    let bytecode = nsh_js::compile_bytecode_with(&bundle.code, strip, &crate::ui_sets())?;
     let sources: Vec<(&str, &str)> = bundle
         .chunks
         .iter()
         .map(|c| (c.id.as_str(), c.code.as_str()))
         .collect();
     let chunk_bytecode =
-        nsh_js::compile_chunk_bytecode(&bundle.code, &sources, strip, crate::ui_sets())?;
+        nsh_js::compile_chunk_bytecode(&bundle.code, &sources, strip, &crate::ui_sets())?;
     let chunks = bundle
         .chunks
         .into_iter()
@@ -245,12 +243,12 @@ fn compile_with(
 /// app (source and bytecode) plus the modules, to compute later updates.
 pub(crate) fn compile_hot(entry: &Path) -> Result<(Built, nsh_bundler::HotBundle), BuildError> {
     let start = Instant::now();
-    let hot = nsh_bundler::bundle_hot(entry, crate::ui_sets())?;
+    let hot = nsh_bundler::bundle_hot(entry, &crate::ui_sets())?;
     let dir = dunce::canonicalize(entry)
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf));
     let (code, source_map) = hot.script();
-    let bytecode = nsh_js::compile_bytecode_with(&code, false, crate::ui_sets())?;
+    let bytecode = nsh_js::compile_bytecode_with(&code, false, &crate::ui_sets())?;
     let built = Built {
         code,
         bytecode,
@@ -268,9 +266,16 @@ pub(crate) fn compile_hot(entry: &Path) -> Result<(Built, nsh_bundler::HotBundle
 /// Bundles `entry` into `out/bundle.js`, `out/bundle.js.map` and
 /// `out/bundle.nshc`; `split`: with each chunk next to them
 /// (`Screen.js`, `Screen.js.map`, `Screen.nshc`).
+/// A Rust app (`nsh.json` `"root"`, its crates built before this command
+/// line ran) writes only `app.json` and its crates' assets: its runners
+/// mount the root.
 pub(crate) fn build(entry: &Path, out: &Path, release: bool, split: bool) -> anyhow::Result<()> {
     let compile = if split { compile_split } else { compile };
-    let built = compile(entry, release).map_err(|e| e.into_error(entry))?;
+    let built = if crate::rust_app::is_root(entry) {
+        rust_root()
+    } else {
+        compile(entry, release).map_err(|e| e.into_error(entry))?
+    };
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
     let map = built.source_map.as_deref().unwrap_or_default();
     let mut files = vec![
@@ -278,6 +283,12 @@ pub(crate) fn build(entry: &Path, out: &Path, release: bool, split: bool) -> any
         ("bundle.js.map".to_owned(), map.as_bytes()),
         ("bundle.nshc".to_owned(), &built.bytecode[..]),
     ];
+    if built.rust_root {
+        // No bundle; one left from a TSX entry would not be this app.
+        for (name, _) in files.drain(..) {
+            let _ = fs::remove_file(out.join(name));
+        }
+    }
     for chunk in &built.chunks {
         let stem = chunk.id.strip_suffix(".js").unwrap_or(&chunk.id);
         let map = chunk.source_map.as_deref().unwrap_or_default();
@@ -316,12 +327,21 @@ pub(crate) fn build(entry: &Path, out: &Path, release: bool, split: bool) -> any
         1 => ", 1 asset".to_owned(),
         n => format!(", {n} assets"),
     };
-    ui::done(format!(
-        "built {} into {} {}",
-        ui::path(entry),
-        ui::path(out),
-        built.summary(&assets)
-    ));
+    if built.rust_root {
+        ui::done(format!(
+            "built the Rust app {} into {} {}",
+            ui::path(entry),
+            ui::path(out),
+            ui::dim(format!("(no bundle: its runners mount the root{assets})"))
+        ));
+    } else {
+        ui::done(format!(
+            "built {} into {} {}",
+            ui::path(entry),
+            ui::path(out),
+            built.summary(&assets)
+        ));
+    }
     Ok(())
 }
 

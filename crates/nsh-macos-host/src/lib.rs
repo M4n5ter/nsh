@@ -10,7 +10,7 @@
 //!   simulated input, to check the backend without touching the screen.
 //! - `--fps` shows the performance monitor (frame rate, frame and commit
 //!   costs, CPU, GPU, memory) at the top right.
-//! - `--size 1200x800` sets the window size (1200×800 by default; 390x844
+//! - `--window-size 1200x800` sets the window size (1200×800 by default; 390x844
 //!   shows an app's phone layout).
 //! - `--name <name>` names the app (the menu bar, the window title; `nsh
 //!   run` passes the app's name), "nsh" by default.
@@ -37,7 +37,7 @@ pub fn main() -> std::process::ExitCode {
     // Named "nsh" unless `--name` names the app.
     // As the release runner runs the app: on its own.
     let mut options = AppOptions {
-        limits: Limits::standalone_desktop(),
+        limits: Limits::standalone(),
         ..AppOptions::default()
     };
     let mut args = env::args().skip(1);
@@ -77,7 +77,7 @@ pub fn main() -> std::process::ExitCode {
             // Steps run once the window shows (`nsh_platform_macos`'s
             // `script` module): window screenshots and simulated input.
             "--script" => options.script = args.next(),
-            "--size" => {
+            "--window-size" => {
                 if let Some((w, h)) = args.next().as_deref().and_then(|s| s.split_once('x')) {
                     options.size = (w.parse().unwrap_or(1200), h.parse().unwrap_or(800));
                 }

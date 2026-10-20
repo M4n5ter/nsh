@@ -75,8 +75,9 @@ All components use colors from one theme and never use fixed color values. Each 
 When the system switches between light and dark appearance, the components change color natively, with no render and
 no JS.
 
-The default theme is gpui-kit's default theme, a neutral black-and-white palette, with mobile corner radii. To use
-your own theme, set `"theme"` in `nsh.json`. Its value is the path of a theme file, relative to `nsh.json`:
+The default theme is based on gpui-kit's default theme, a neutral black-and-white palette, with mobile corner radii
+and status colors (`danger`, `info`, `success`, `warning`) whose text reads at WCAG AA contrast in both appearances.
+To use your own theme, set `"theme"` in `nsh.json`. Its value is the path of a theme file, relative to `nsh.json`:
 
 ```json
 {
@@ -122,8 +123,9 @@ You can also write the theme's content inline as the value. The format is gpui-k
 - If you leave out a pressed color (`primary.active.background`, `secondary.active.background`,
   `danger.active.background`, ...), NSH derives it from the base color: 12% darker in light mode, 12% lighter in
   dark mode.
-- Keys that only gpui-kit's desktop components use (sidebars, title bars, ...) are ignored, so you can use a gpui-kit
-  theme file as it is.
+- Keys the mobile components do not use (gpui-kit's sidebars and title bars, or your own such as `chart.up` or
+  `radius.card`) leave the components as they are, so you can use a gpui-kit theme file as it is. Your app's classes
+  can name every key: see [Theme tokens](../docs/tailwind.md#theme-tokens).
 - The bundler checks the theme when it builds. A missing file, invalid JSON, an unknown `mode` or a value that is not
   a color fails the build with an `nsh.json: theme: …` error.
 

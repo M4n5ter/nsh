@@ -737,6 +737,7 @@ impl AppView {
                 source_map,
                 capabilities,
                 app_id,
+                limits,
             } => {
                 let bundle = match format {
                     // SAFETY: this developer-selected server negotiated
@@ -754,6 +755,8 @@ impl AppView {
                     Some(map) => bundle.with_source_map(map),
                     None => bundle,
                 };
+                self.options.limits =
+                    Limits::development(limits.as_deref()).map_err(io::Error::other)?;
                 let Some(dev) = &mut self.dev else {
                     return Ok(());
                 };
@@ -1578,7 +1581,7 @@ mod tests {
     #[cfg(feature = "js")]
     #[class]
     impl ScopedHost {
-        async fn query(this: Instance<Self>) -> Result<String, String> {
+        pub(crate) async fn query(this: Instance<Self>) -> Result<String, String> {
             this.with_mut(|host| {
                 if host.closed.load(std::sync::atomic::Ordering::SeqCst) {
                     return Err("owner closed".into());
@@ -1844,6 +1847,41 @@ mod tests {
 
     #[cfg(feature = "dev")]
     #[test]
+    fn development_bundles_enforce_the_hosts_requested_limits() {
+        use nsh_dev::{DevEvent, protocol::BundleFormat};
+
+        let mut view = AppView::new(AppOptions::default());
+        view.connect("ws://127.0.0.1:0/ws".into()).unwrap();
+        view.dev_event(DevEvent::Bundle {
+            session: 1,
+            version: 1,
+            format: BundleFormat::Source,
+            bytes: br#"import { mount, View, Text } from 'nsh';
+                mount(() => View({ children: Text({ children: 'over quota' }) }));"#
+                .to_vec(),
+            source_map: None,
+            capabilities: None,
+            app_id: None,
+            limits: Some("nodes=1".into()),
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while view.last_error().is_none() {
+            view.poll().unwrap();
+            assert!(
+                Instant::now() < deadline,
+                "host node limit was not enforced"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            view.last_error(),
+            Some("the app created more than 1 nodes and was stopped")
+        );
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
     fn development_bundles_keep_their_storage_identity_after_hot_updates_and_reload() {
         use nsh_dev::{DevEvent, protocol::BundleFormat};
 
@@ -1864,6 +1902,7 @@ mod tests {
             source_map: None,
             capabilities: None,
             app_id: Some(app_id.into()),
+            limits: None,
         };
         view.dev_event(bundle(1, "com.acme.orders")).unwrap();
         wait_for_storage(&mut view, &dir.join("com.acme.orders/storage.json"), 1);

@@ -78,6 +78,8 @@ pub(crate) struct AppConfig {
     pub(crate) build: Option<u32>,
     /// App icon: a square PNG, ideally 1024×1024, relative to `nsh.json`.
     pub(crate) icon: Option<PathBuf>,
+    /// The lowest runtime that runs a signed package (`nsh publish`).
+    pub(crate) min_runtime: Option<String>,
     /// Read and checked by the bundler.
     #[serde(default, rename = "tailwind")]
     _tailwind: Option<serde::de::IgnoredAny>,
@@ -91,6 +93,9 @@ pub(crate) struct AppConfig {
     /// Read and checked by the bundler.
     #[serde(default, rename = "theme")]
     _theme: Option<serde::de::IgnoredAny>,
+    /// Read and checked by the bundler.
+    #[serde(default, rename = "resolve")]
+    _resolve: Option<serde::de::IgnoredAny>,
     /// The app's Rust crate: its builds are the app's own (`rust_app.rs`).
     #[serde(default, rename = "rust")]
     _rust: Option<serde::de::IgnoredAny>,

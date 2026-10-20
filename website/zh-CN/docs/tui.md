@@ -178,7 +178,8 @@ view.render(area, frame.buffer_mut());
 应接收事件的界面转发事件。释放界面或调用 `stop()` 会结束其引擎。
 
 `AppOptions::asset_base` 从资源目录或 HTTP 基地址解析 `asset:/` URI。`AppOptions::limits` 配置虚拟机限制；
-嵌入默认使用 `Limits::default()`，独立宿主使用 `Limits::standalone_desktop()`。`AppOptions::metrics` 接受验证过的
+嵌入默认使用 `Limits::default()`，独立宿主使用 `Limits::standalone()`。`nsh run --target tui --limits` 让 TSX 入口
+使用嵌入默认限制，也可以传入各项限制的名称和值。`AppOptions::metrics` 接受验证过的
 `CellMetrics`，供宿主选择其他虚拟 point 比例。参见[沙箱与能力](./sandbox-and-capabilities.md)。
 
 `AppOptions::data_dir` 为嵌入应用选择数据目录，例如宿主自身数据目录下的 `nsh/`。加载的各应用按自己的 `id`
@@ -211,7 +212,8 @@ let options = AppOptions {
 
 其中 `Service` 是宿主的 `#[class]` 包装类型。其方法（包括异步方法）自动生成 TypeScript 声明；TSX 通过
 `import { service } from "my-app/native"` 使用它。省略类构造函数可将客户端创建保留在宿主侧。
-工厂在每个虚拟机求值该模块时运行一次，重载会创建新值。取消、订阅清理及服务操作回执由宿主管理。
+首次导入或通过 [`nativeModule`](../modules/nsh-native.md#nativemodule) 查找模块时，工厂在该虚拟机中运行一次；
+两种路径共享同一个值，重载会创建新值。取消、订阅清理及服务操作回执由宿主管理。
 `None` 使用进程的默认模块，`Some(vec![])` 则选择空集合。
 
 ## 可复现的交互

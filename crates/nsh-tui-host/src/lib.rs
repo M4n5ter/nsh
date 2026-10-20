@@ -25,7 +25,7 @@ pub fn main() -> ExitCode {
 fn arguments(args: impl IntoIterator<Item = String>) -> io::Result<(AppSource, AppOptions)> {
     let mut source = None;
     let mut options = AppOptions {
-        limits: Limits::standalone_desktop(),
+        limits: Limits::standalone(),
         ..Default::default()
     };
     let mut args = args.into_iter();

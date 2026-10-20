@@ -37,6 +37,7 @@ pub(crate) mod call;
 mod callback;
 pub(crate) mod class;
 mod component;
+pub mod description;
 pub mod desktop;
 pub(crate) mod element;
 mod element_ref;
@@ -156,19 +157,19 @@ pub use self::{
         AdaptiveColor, BorderCurve, FontWeight, Length, StyleRefinement, Styled, WritingDirection,
         px, relative, rgb, rgba,
     },
-    task::{Answer, DialogAnswer, ImageSize, Task},
+    task::{Answer, ClipboardImage, DialogAnswer, ImageSize, Task},
     theme::{Theme, ThemeColors, ThemeError},
     value::{JsValue, NodeRef, PropEnum, PropError, SharedString, TsType, TsTypes, ts_of},
     virtual_list::{ListLayout, ViewableItems, VirtualList, virtual_list},
 };
 pub use crate::{
-    AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, BlendMode, BoxShadow, Cursor,
-    Dialog, DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, EventPayload,
-    KeyboardAppearance, KeyboardDismissMode, KeyboardTaps, KeyboardType, KeyframeAnimation,
-    Keyframes, LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition, Measurement,
-    ModalAnimation, ModalPresentation, PanActivation, PointerEvents, ResizeMode, ReturnKeyType,
-    ScreenAnimation, SnapAlignment, StatusBarConfig, StatusBarSetting, StatusBarStyle,
-    SubmitBehavior, TouchEvent, TransformKind, TransformOrigin, Viewability,
+    AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, BlendMode, BoxShadow,
+    ContextMenuEvent, Cursor, Dialog, DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode,
+    EventKind, EventPayload, HoverEvent, KeyboardAppearance, KeyboardDismissMode, KeyboardTaps,
+    KeyboardType, KeyframeAnimation, Keyframes, LayoutAnimation, LayoutCurve, LayoutProperty,
+    LayoutTransition, Measurement, ModalAnimation, ModalPresentation, PanActivation, PointerEvents,
+    ResizeMode, ReturnKeyType, ScreenAnimation, SnapAlignment, StatusBarConfig, StatusBarSetting,
+    StatusBarStyle, SubmitBehavior, TouchEvent, TransformKind, TransformOrigin, Viewability,
     platform::{Appearance, HttpBody, HttpHead, HttpRequest, Idiom, Locale, Os, Renderer},
     style::{Color, OriginLen},
 };
@@ -206,6 +207,7 @@ pub mod prelude {
         ComponentElement,
         ComponentError,
         ComponentRef,
+        ContextMenuEvent,
         Cursor,
         Curve,
         DialogAnswer,
@@ -226,6 +228,7 @@ pub mod prelude {
         FontAsset,
         FontWeight,
         GestureEvent,
+        HoverEvent,
         // The network.
         HttpRequest,
         HttpResponse,
@@ -336,14 +339,15 @@ pub mod prelude {
         Signal, SignalEquals, Stored,
         ambient::{
             Delay, KeyOptions, Spawned, add_status_bar, allow_rtl, animate_layout, animated_value,
-            announce_for_accessibility, clipboard_has_string, clipboard_string, color,
-            component_ref, dark, dialog, dismiss_keyboard, element_ref, fetch, font_scale,
-            force_rtl, global, idiom, image_size, is_desktop, is_terminal, key_label,
-            keyboard_duration, keyboard_height, locale, measure_text, next_frame, on_back_press,
-            on_key, on_key_with, os, os_version, pixel_ratio, prefetch_image, reduce_motion,
-            renderer, request_animation_frame, round_to_nearest_pixel, rtl, safe_area,
-            screen_reader, set_clipboard, set_color_scheme, set_interval, set_timeout, spawn,
-            theme, timer, timer_until, toast, update_status_bar, window,
+            announce_for_accessibility, clipboard_files, clipboard_has_image, clipboard_has_string,
+            clipboard_image, clipboard_string, color, component_ref, dark, dialog,
+            dismiss_keyboard, element_ref, fetch, font_scale, force_rtl, global, idiom, image_size,
+            is_desktop, is_terminal, key_label, keyboard_duration, keyboard_height, locale,
+            measure_text, next_frame, on_back_press, on_key, on_key_with, os, os_version,
+            pixel_ratio, prefetch_image, reduce_motion, renderer, request_animation_frame,
+            round_to_nearest_pixel, rtl, safe_area, screen_reader, set_clipboard,
+            set_clipboard_image, set_color_scheme, set_interval, set_timeout, spawn, theme, timer,
+            timer_until, toast, update_status_bar, window,
         },
         batch, catch_error, cleanup, component, computed, dynamic, effect, provide_context, signal,
         signal_with, stored, untracked, use_context,
@@ -355,7 +359,7 @@ pub mod prelude {
 pub mod __private {
     pub use serde_json::Map as JsonMap;
 
-    pub use super::class::__private::*;
+    pub use super::{callback::NamedArgs, class::__private::*};
 
     /// Implemented by nothing: what the generated workspace of an app
     /// calls when a crate of the app has no `#[native_module]`

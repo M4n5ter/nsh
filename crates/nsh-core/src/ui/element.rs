@@ -10,9 +10,9 @@ use super::{
     style::{StyleRefinement, Styled, Variant},
 };
 use crate::{
-    AccessibilityProp, AccessibilityRole, AccessibilityState, EdgeInsets, EventKind, EventPayload,
-    ImageSource, ListContentStyle, NativeProp, NodeId, PointerEvents, Prop, Rect, Size, Tag,
-    TouchEvent, style::Color,
+    AccessibilityProp, AccessibilityRole, AccessibilityState, ContextMenuEvent, EdgeInsets,
+    EventKind, EventPayload, HoverEvent, ImageSource, ListContentStyle, NativeProp, NodeId,
+    PointerEvents, Prop, Rect, Size, Tag, TouchEvent, style::Color,
 };
 
 /// A handler of `E` on an element: a closure (`move |e: &E| ..`) that
@@ -967,6 +967,42 @@ pub trait Interactive: Element {
         )
     }
 
+    /// The mouse came over it or an element inside it (never on touches).
+    fn on_hover_in<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.on(
+            EventKind::HoverIn,
+            events::typed(listener.into_listener(), events::unit),
+        )
+    }
+
+    /// The mouse left it and the elements inside it, or the window.
+    fn on_hover_out<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.on(
+            EventKind::HoverOut,
+            events::typed(listener.into_listener(), events::unit),
+        )
+    }
+
+    /// The mouse moved over it (or an element inside it) with no button
+    /// down: where, in it and in its root view, at most once per frame.
+    fn on_hover_move<M>(self, listener: impl IntoListener<HoverEvent, M>) -> Self {
+        self.on(
+            EventKind::HoverMove,
+            events::typed(listener.into_listener(), events::hover),
+        )
+    }
+
+    /// The secondary button was pressed over it (a right click,
+    /// Control-click on Apple platforms): where, to open a menu at
+    /// (`page_x`, `page_y`). The nearest element that listens hears it;
+    /// a text input or selectable text nearer shows its own menu instead.
+    fn on_context_menu<M>(self, listener: impl IntoListener<ContextMenuEvent, M>) -> Self {
+        self.on(
+            EventKind::ContextMenu,
+            events::typed(listener.into_listener(), events::context_menu),
+        )
+    }
+
     /// Handles presses.
     fn on_press<M>(self, listener: impl IntoListener<(), M>) -> Self {
         self.on(
@@ -1255,6 +1291,16 @@ pub trait Interactive: Element {
     fn window_drag(mut self, enabled: impl IntoReactive<bool>) -> Self {
         super::host::bind_prop(self.node(), enabled, |enabled| {
             Prop::WindowDrag(Some(enabled))
+        });
+        self
+    }
+
+    /// Whether a view that takes presses is a stop of the keyboard focus
+    /// (Tab; default true): false leaves it to the pointer, as a backdrop
+    /// that closes a popover is.
+    fn focusable(mut self, focusable: impl IntoReactive<bool>) -> Self {
+        super::host::bind_prop(self.node(), focusable, |focusable| {
+            Prop::Focusable(Some(focusable))
         });
         self
     }

@@ -59,7 +59,7 @@ fn setup() -> io::Result<(PathBuf, AppOptions)> {
     };
     let mut options = AppOptions {
         asset_base: Some(AssetBase::Directory(dir.join("assets"))),
-        limits: Limits::standalone_desktop(),
+        limits: Limits::standalone(),
         script: std::env::var("NSH_SCRIPT").ok(),
         ..Default::default()
     };

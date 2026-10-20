@@ -26,6 +26,7 @@ For people working on NSH itself (`AGENTS.md` at the root is the short version a
 | [gpui.md](gpui.md) | The GPUI backend (macOS, Windows, Linux): building, the surface element and `DrawCx`, embedding as a GPUI view, what differs |
 | [tui.md](tui.md) | The terminal backend (Ratatui): cell metrics, retained rendering, input, graphics, embedding and scripts |
 | [web.md](web.md) | The WebAssembly runtime of the website's demos: `LocalEngine`, the clock, the DOM protocol |
+| [compatibility.md](compatibility.md) | The backward compatibility contract: what apps depend on, the rules, `api/` and its tests |
 | [performance.md](performance.md) | Baselines |
 | [pitfalls.md](pitfalls.md) | Verified constraints and pitfalls, by area |
 

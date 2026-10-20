@@ -334,6 +334,36 @@ export interface PanEvent {
   valueY?: number;
 }
 
+/** Where the mouse is over a hovered view: the payload of `onHoverMove`. */
+export interface HoverEvent {
+  /** Position in the view (points, its transforms undone). */
+  locationX: number;
+  locationY: number;
+  /** Position in the root view the view is in (the surface or its modal), as touches' `pageX`. */
+  pageX: number;
+  pageY: number;
+  altKey: boolean;
+  ctrlKey: boolean;
+  /** Command on Apple platforms, the Windows / Super key elsewhere. */
+  metaKey: boolean;
+  shiftKey: boolean;
+}
+
+/** Where a context menu was asked for: the payload of `onContextMenu`. */
+export interface ContextMenuEvent {
+  /** Position in the view (points, its transforms undone). */
+  locationX: number;
+  locationY: number;
+  /** Position in the root view the view is in: where `Menu.popup` opens a menu. */
+  pageX: number;
+  pageY: number;
+  altKey: boolean;
+  ctrlKey: boolean;
+  /** Command on Apple platforms, the Windows / Super key elsewhere. */
+  metaKey: boolean;
+  shiftKey: boolean;
+}
+
 /** Where a scroll view is: the payload of `onScroll`. */
 export interface ScrollEvent {
   x: number;
@@ -383,13 +413,25 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         EventKind::HoverIn,
         on::ALL,
         "() => void",
-        "The mouse came over the view or a view inside it (macOS and Linux; never on touches).",
+        "The mouse came over the view or a view inside it (never on touches).",
     ),
     (
         EventKind::HoverOut,
         on::ALL,
         "() => void",
-        "The mouse left the view and the views inside it, or the window (macOS and Linux).",
+        "The mouse left the view and the views inside it, or the window.",
+    ),
+    (
+        EventKind::HoverMove,
+        on::ALL,
+        "(e: HoverEvent) => void",
+        "The mouse moved over the view (or a view inside it) with no button down, at most once per frame.",
+    ),
+    (
+        EventKind::ContextMenu,
+        on::ALL,
+        "(e: ContextMenuEvent) => void",
+        "The secondary button (a right click, Control-click on Apple platforms) was pressed over the view: open a menu with `Menu.popup({ x: e.pageX, y: e.pageY })`. The nearest listener hears it; a text input or selectable text nearer shows its own menu instead.",
     ),
     (
         EventKind::FileDragEnter,

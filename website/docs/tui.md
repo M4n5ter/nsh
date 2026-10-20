@@ -202,7 +202,8 @@ Dropping the view or calling `stop()` ends its engine.
 
 `AppOptions::asset_base` resolves `asset:/` URIs from an asset directory or HTTP base.
 `AppOptions::limits` configures the VM limits; embedding defaults to `Limits::default()`, while the standalone
-hosts use `Limits::standalone_desktop()`. `AppOptions::metrics` accepts a validated `CellMetrics` value for hosts
+hosts use `Limits::standalone()`. `nsh run --target tui --limits` uses the embedding defaults for a TSX entry;
+pass named limits to choose their values. `AppOptions::metrics` accepts a validated `CellMetrics` value for hosts
 that choose a different virtual point scale. See [Sandbox and capabilities](./sandbox-and-capabilities.md).
 
 `AppOptions::data_dir` chooses the embedding app's directory for app data, such as its own data directory plus
@@ -238,8 +239,9 @@ let options = AppOptions {
 
 Here `Service` is the host's `#[class]` wrapper. Its methods, including async methods, generate TypeScript
 declarations; TSX uses `import { service } from "my-app/native"`. A class without a constructor keeps
-client creation in the host. The factory runs once per VM when the module is evaluated; reloads create
-new values. The host retains cancellation, subscription cleanup and service-operation receipts.
+client creation in the host. The first import or [`nativeModule`](../modules/nsh-native.md#nativemodule) lookup
+runs the factory once per VM, and both paths share its value; reloads create new values. The host retains
+cancellation, subscription cleanup and service-operation receipts.
 `None` uses the process's default modules, while `Some(vec![])` selects an empty set.
 
 ## Reproducible interaction

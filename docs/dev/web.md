@@ -59,8 +59,9 @@ build to the same file) and takes `nsh.js` from the crate.
   bytes: the engine reads fonts synchronously, `Assets::read`, to measure text with them). Fonts the entry or the UI
   sets register are fetched before the app starts; one only chunks register (`font("asset:/…")` in their code) comes
   with the first of them, through `createPlayer`'s `prepareChunk(id)`, which `nsh.js` awaits with the chunk's download
-  (`web::font_loads`). It runs the bundle with `run(code, { release: true, harden, capabilities, appId, chunks })` (`appId`: the
-  `nsh.json` id, the page's `app.id`; a Rust app's root carries its own); an app whose capabilities restrict `network`
+  (`web::font_loads`). It runs the bundle with `run(code, { release: true, harden, capabilities, appId, chunks })`
+  (`appId`: the `nsh.json` id, the page's `app.id`; a Rust app's root carries its own), without `limits`: a published
+  app runs on its own, with none (`sandbox.md`); an app whose capabilities restrict `network`
   gets a CSP `connect-src` meta with `'self'` and the declared hosts (`web::connect_src`, a host without a port as
   `host:*`), as the browser follows redirects before NSH could check them. Relative URLs resolve against the page
   (`document.baseURI`, `nsh_set_base_url`). The app's code ships as bytecode
@@ -153,7 +154,7 @@ the crate's `build.rs` passes the 8 MiB stack as a link argument of its own (nsh
 where the app builds, and target-wide `rustflags` would rebuild every dependency instead of sharing nsh's builds).
 Both kinds build to `target/wasm32-unknown-unknown/web/nsh_app_<package>_web.wasm` and are copied to
 `.nsh/rust/web-runtime/nsh.wasm` / `nsh-dev.wasm`; `nsh.js` is nsh's. Everything else (bundling, bytecode, the
-crate's assets, the dev server) already knows the set, as the app's command line does.
+crate's assets, the dev server) already knows the set, from its description (`docs/dev/tooling.md`).
 
 `web::ui_sets` (the sets the runtime serves, which `package` checks the app's imports against and the dev page sends
 in its hello) are the command line's own (`crate::ui_sets`). The dev host's files include `nsh.version` (a digest of
@@ -175,7 +176,7 @@ server greets it; the dev session publishes no bundles (`DevSession::rust_root`)
 Rust code meant for the web too uses the engine's services rather than threads and the standard clock: `fetch`
 (`nsh_core::ui::ambient::fetch`, below), the executor's timers, `nsh_core::time`. `examples/gallery-rs` does. As a
 Rust app (2026-10) its `nsh.wasm` is 3.31 MB (1.06 MB gzipped, 0.75 MB with brotli): no QuickJS, so smaller than the
-prebuilt runtime; under its TSX entry (`App.tsx`, QuickJS) 5.26 MB (1.75 / 1.27 MB).
+prebuilt runtime, which a TSX entry (QuickJS) needs: the gallery under one was 5.26 MB (1.75 / 1.27 MB).
 
 ## What WebAssembly changes in the shared crates
 
@@ -389,8 +390,8 @@ browsers' touches into what phones report:
   pressable (Return presses it, Space when released); going back (Escape, Alt+Left, Cmd+[, BrowserBack); scrolling the
   scroll view around the focus or under the mouse (arrows by 40 points, Page Up / Down and Space by 0.875 of a page,
   Home / End).
-- **Focus**: pressables are focusable (`tabindex=0`, role `button` unless they have one) unless disabled or hidden,
-  so Tab and Shift+Tab reach them in DOM order; `focus:` states follow the keyboard focus (`:focus-visible`), which
+- **Focus**: pressables are focusable (`tabindex=0`, role `button` unless they have one) unless disabled, hidden or
+  `focusable={false}` (a focused one that stops being a stop is blurred), so Tab and Shift+Tab reach them in DOM order; `focus:` states follow the keyboard focus (`:focus-visible`), which
   draws a ring inside the view; a popped screen gives the focus back to what had it when the screen was pushed
   (`screenGone`). A click never moves the focus (`mousedown` is prevented outside fields, selectable
   text and hosted pages), as in native apps; it focuses the app's window in an iframe. The views under the newest

@@ -9,6 +9,9 @@
 //! the engine.
 
 mod access;
+mod error;
+#[cfg(all(feature = "headless", not(target_arch = "wasm32")))]
+pub mod headless;
 mod local_storage;
 pub mod perf;
 mod script;
@@ -27,10 +30,10 @@ use nsh_core::{
 };
 pub use nsh_core::{
     access::{Access, Capabilities},
-    js::Limits,
+    js::{HostLimits, Limits},
     platform::{
-        ColorScheme, Environment, FetchEvent, FetchOp, HttpBody, HttpHead, HttpRequest, Idiom,
-        Insets, Locale, Os, Renderer,
+        ColorScheme, Environment, FetchEvent, FetchOp, HostEnvironment, HttpBody, HttpHead,
+        HttpRequest, Idiom, Insets, Locale, Os, Renderer,
     },
     storage::{StorageBackend, StorageChange},
     ui::{Root, Theme},
@@ -44,6 +47,7 @@ use rustc_hash::FxHashMap;
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{FileStorage, app_dir_name, data_dir};
 
+pub use crate::error::{AppError, AppErrorKind, PackageInfo};
 use crate::script::{NetworkQueue, RequestId, Script};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -56,6 +60,11 @@ const ENGINE_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// garbage immediately; only cycles (such as detached node subtrees, whose
 /// parent/child links reference each other) wait for the collector.
 const IDLE_GC_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The shortest time between two deliveries of `onHoverMove`: a frame at
+/// 120 Hz. Mice report moves far more often (up to 1000 Hz), and a handler
+/// that redraws a crosshair needs no more than one per frame.
+const HOVER_MOVE_INTERVAL: Duration = Duration::from_millis(8);
 
 /// The app an engine runs.
 #[derive(Debug, Clone)]
@@ -112,6 +121,9 @@ pub struct Bundle {
     /// The app's id (`nsh.json` `"id"`; a signed package's verified one):
     /// it names where the app keeps its data (`nsh/storage`).
     pub app_id: Option<String>,
+    /// The signed package the bundle came from ([`Bundle::from_package`]),
+    /// named in the app's errors ([`AppError::package`]).
+    pub package: Option<Arc<PackageInfo>>,
 }
 
 /// A chunk of a split bundle (`nsh_bundler::Chunk`): app code that
@@ -229,6 +241,7 @@ impl Bundle {
             chunks: Arc::default(),
             harden_bytecode: None,
             app_id: None,
+            package: None,
         }
     }
 
@@ -242,6 +255,7 @@ impl Bundle {
             chunks: Arc::default(),
             harden_bytecode: None,
             app_id: None,
+            package: None,
         }
     }
 
@@ -332,8 +346,13 @@ impl Bundle {
 impl Bundle {
     /// The bundle of a verified package: its bytecode when it was compiled
     /// for this runtime (else its source), its source map and its declared
-    /// capabilities.
+    /// capabilities. What a newer signer wrote that this runtime does not
+    /// know (header fields, files, capabilities) is logged and left out: an
+    /// unknown capability is not granted.
     pub fn from_package(package: &nsh_package::VerifiedPackage) -> Result<Bundle, String> {
+        for ignored in &package.ignored {
+            log::warn!("package {}: ignored {ignored}", package.app.id);
+        }
         let bundle = match package.bytecode() {
             // SAFETY: verified: signed by a certified release key, hashed,
             // and compiled for this runtime.
@@ -344,12 +363,21 @@ impl Bundle {
             Some(map) => bundle.with_source_map(map.clone()),
             None => bundle,
         };
-        bundle.policy.declared = package
-            .capabilities
-            .as_ref()
-            .map(Capabilities::from_json)
-            .transpose()?;
+        if let Some(json) = &package.capabilities {
+            let (declared, dropped) = Capabilities::from_json_lenient(json)?;
+            for dropped in dropped {
+                log::warn!("package {}: not granted: {dropped}", package.app.id);
+            }
+            bundle.policy.declared = Some(declared);
+        }
         bundle.app_id = Some(package.app.id.clone());
+        bundle.package = Some(Arc::new(PackageInfo {
+            id: package.app.id.clone(),
+            name: package.app.name.clone(),
+            version: package.app.version.clone(),
+            build: package.app.build,
+            sha256: package.sha256.clone(),
+        }));
         Ok(bundle)
     }
 }
@@ -361,7 +389,7 @@ fn read_app_id(path: &std::path::Path) -> Option<String> {
     json.get("id")?.as_str().map(str::to_owned)
 }
 
-/// A verified package, unpacked ([`load_package`]).
+/// A verified package, unpacked ([`load_package`], [`verify_package`]).
 #[cfg(feature = "js")]
 #[derive(Debug)]
 pub struct LoadedPackage {
@@ -371,14 +399,35 @@ pub struct LoadedPackage {
     pub assets: std::path::PathBuf,
     /// Its app.
     pub app: nsh_package::App,
+    /// What accepting it records ([`accept_package`]).
+    pub receipt: nsh_package::PackageReceipt,
 }
 
 /// Verifies the package `bytes` with `trust`, writes its assets under
 /// `assets_root` (`<root>/<app id>/<package hash>/`, once per package) and
-/// records its build (older builds of the app are refused from now on).
+/// records its build (older builds of the app are refused from now on):
+/// [`verify_package`], then [`accept_package`].
 #[cfg(feature = "js")]
 pub fn load_package(
     trust: &mut nsh_package::TrustStore,
+    bytes: &[u8],
+    assets_root: &std::path::Path,
+) -> Result<LoadedPackage, String> {
+    let package = verify_package(trust, bytes, assets_root)?;
+    accept_package(trust, &package)?;
+    Ok(package)
+}
+
+/// [`load_package`] without recording the build: the package is verified as
+/// strictly (signature, certificate, revocations, hashes, and its build not
+/// older than the highest accepted) and its assets written, but the builds
+/// accepted before keep verifying. An embedding app runs it, and once it
+/// decided the package is healthy (its first frame drawn, no fatal error for
+/// a while) calls [`accept_package`]; if it fails before, the app can go
+/// back to the package it ran before, which still verifies.
+#[cfg(feature = "js")]
+pub fn verify_package(
+    trust: &nsh_package::TrustStore,
     bytes: &[u8],
     assets_root: &std::path::Path,
 ) -> Result<LoadedPackage, String> {
@@ -401,10 +450,10 @@ pub fn load_package(
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         std::fs::write(&done, b"").map_err(|e| e.to_string())?;
     }
-    trust.accept(&package).map_err(|e| e.to_string())?;
     Ok(LoadedPackage {
         bundle,
         assets: dir.join("assets"),
+        receipt: package.receipt(),
         app: package.app,
     })
 }
@@ -416,6 +465,19 @@ pub fn load_package(
 #[cfg(feature = "js")]
 pub fn symbolicate(source_map: &str, text: &str) -> String {
     symbolicate::Symbolicator::new(Some(source_map.into())).rewrite(text)
+}
+
+/// Records the build of `package` ([`verify_package`]) in `trust`: older
+/// builds of its app are refused from now on. Refused if the package or its
+/// release key was revoked since it was verified.
+#[cfg(feature = "js")]
+pub fn accept_package(
+    trust: &mut nsh_package::TrustStore,
+    package: &LoadedPackage,
+) -> Result<(), String> {
+    trust
+        .accept_receipt(&package.receipt)
+        .map_err(|e| e.to_string())
 }
 
 /// Parses capabilities in their JSON form (`capabilities.json`, the dev
@@ -440,10 +502,19 @@ pub trait MountSink: Send + 'static {
     /// Called once per commit, in order.
     fn submit(&self, batch: MountBatch);
 
-    /// A fatal app error: the bundle failed to load, or an exception escaped
-    /// a JS callback. Errors are always logged; development hosts also show
-    /// them on screen.
+    /// An error of the app, as text (the message and the stack): the
+    /// bundle failed to load, an exception escaped a JS callback, the VM
+    /// was stopped. Errors are always logged; development hosts also show
+    /// them on screen. What [`MountSink::report`] calls unless it is
+    /// implemented.
     fn report_error(&self, _message: &str) {}
+
+    /// An error of the app, with its parts: what went wrong (whether the
+    /// app can go on), the message, the stack and the package it came
+    /// from. By default, [`MountSink::report_error`] with its text.
+    fn report(&self, error: &AppError) {
+        self.report_error(&error.to_string());
+    }
 
     /// JS or a component's task asked for a display frame
     /// (`requestAnimationFrame`, `ui::ambient::next_frame`): call
@@ -543,6 +614,31 @@ pub struct EngineConfig {
     /// names (the browser's `localStorage`, an embedder's own); `None`
     /// with no data directory either: in memory, for the engine's life.
     pub storage: Option<Arc<dyn nsh_core::storage::StorageBackend>>,
+}
+
+impl EngineConfig {
+    /// `app` on a phone-sized surface (390 × 844 points, iOS's header
+    /// heights) with nothing else: no network, assets, data directory or
+    /// UI sets, the default environment and limits, the shared runtime.
+    /// Set the fields that matter over it (`EngineConfig { ui_sets,
+    /// ..EngineConfig::new(app) }`). There is no `Default`: an engine has
+    /// no app to run by default.
+    pub fn new(app: impl Into<App>) -> Self {
+        Self {
+            app: app.into(),
+            viewport: Size::new(390.0, 844.0),
+            trace: false,
+            network: None,
+            assets: None,
+            environment: Environment::default(),
+            header_heights: (44.0, 96.0),
+            limits: Limits::default(),
+            ui_sets: Vec::new(),
+            runtime: None,
+            data_dir: None,
+            storage: None,
+        }
+    }
 }
 
 /// The storage of the app `config` runs: [`EngineConfig::storage`], or a
@@ -1010,7 +1106,10 @@ impl<M: TextEngine + 'static> Driver<M> {
             for font in root.fonts() {
                 if let Err(err) = core.register_font(font) {
                     log::error!("font failed: {err}");
-                    sink.report_error(&format!("font failed: {err}"));
+                    sink.report(&AppError::new(
+                        AppErrorKind::Asset,
+                        &format!("font failed: {err}"),
+                    ));
                 }
             }
         }
@@ -1028,7 +1127,12 @@ impl<M: TextEngine + 'static> Driver<M> {
             .and_then(|data| core.register_font(&data));
             if let Err(err) = result {
                 log::error!("font failed: {}: {err}", font.uri);
-                sink.report_error(&format!("font failed: {}: {err}", font.uri));
+                let message = format!("font failed: {}: {err}", font.uri);
+                let package = match &config.app {
+                    App::Js(bundle) => bundle.package.clone(),
+                    App::Rust(_) => None,
+                };
+                sink.report(&AppError::new(AppErrorKind::Asset, &message).with_package(package));
             }
         }
         // A task woken on any thread wakes the loop, and so does a JS call
@@ -1054,6 +1158,8 @@ impl<M: TextEngine + 'static> Driver<M> {
             hot: Vec::new(),
             scroll_events: FxHashMap::default(),
             touch_move: None,
+            hover_moves: Vec::new(),
+            hover_moved: None,
             resized: None,
             net: Net {
                 network: config.network.clone(),
@@ -1142,6 +1248,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             script.and_then(Script::next_timer),
             gc_deadline,
             self.state.next_scroll_event(),
+            self.state.next_hover_move(),
             task_timer,
         ]
         .into_iter()
@@ -1167,6 +1274,12 @@ impl<M: TextEngine + 'static> Driver<M> {
         let script = script.as_ref();
         let turn_start = state.trace.then(Instant::now);
         state.dispatch_touch_move(script);
+        if state
+            .next_hover_move()
+            .is_some_and(|due| due <= Instant::now())
+        {
+            state.dispatch_hover_moves(script);
+        }
         state.dispatch_scroll_events(script);
         let hot = std::mem::take(&mut state.hot);
         if let Some(script) = script {
@@ -1222,7 +1335,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             && let Some(reason) = script.fatal()
         {
             self.stopped = true;
-            script.report(&*self.sink, "stopped", &reason);
+            script.report(&*self.sink, AppErrorKind::Stopped, "stopped", &reason);
         }
     }
 }
@@ -1264,6 +1377,12 @@ struct State<M: TextEngine> {
     scroll_events: FxHashMap<NodeId, ScrollEvent>,
     /// Touch moves not delivered yet: those queued in one frame become one.
     touch_move: Option<(NodeId, Box<nsh_core::TouchEvent>)>,
+    /// `onHoverMove`s not delivered yet: the latest per view, in the order
+    /// they came; sent once per [`HOVER_MOVE_INTERVAL`] at most, and before
+    /// any other event.
+    hover_moves: Vec<(NodeId, nsh_core::HoverEvent)>,
+    /// When `hover_moves` were last delivered.
+    hover_moved: Option<Instant>,
     /// The viewport size a resize set this turn ([`MountSink::resized`]).
     resized: Option<Size>,
 }
@@ -1460,6 +1579,38 @@ impl<M: TextEngine> State<M> {
         }
     }
 
+    /// When the pending `onHoverMove`s are due.
+    fn next_hover_move(&self) -> Option<Instant> {
+        if self.hover_moves.is_empty() {
+            return None;
+        }
+        Some(
+            self.hover_moved
+                .map_or_else(Instant::now, |t| t + HOVER_MOVE_INTERVAL),
+        )
+    }
+
+    /// Delivers the pending `onHoverMove`s: to the Rust components whose
+    /// parts they are on, the others to JS.
+    fn dispatch_hover_moves(&mut self, script: Option<&Script>) {
+        if self.hover_moves.is_empty() {
+            return;
+        }
+        self.hover_moved = Some(Instant::now());
+        for (id, event) in std::mem::take(&mut self.hover_moves) {
+            let payload = EventPayload::Hover(event);
+            if self
+                .core
+                .component_event(id, EventKind::HoverMove, &payload)
+            {
+                continue;
+            }
+            if let Some(script) = script {
+                script.dispatch_event(id, EventKind::HoverMove, &payload);
+            }
+        }
+    }
+
     /// When a throttled `onScroll` is due.
     fn next_scroll_event(&self) -> Option<Instant> {
         self.scroll_events
@@ -1546,7 +1697,12 @@ impl<M: TextEngine> State<M> {
             }
             .and_then(|data| self.core.register_font(&data));
             if let Err(err) = result {
-                script.report(sink, "font failed", &format!("{uri}: {err}"));
+                script.report(
+                    sink,
+                    AppErrorKind::Asset,
+                    "font failed",
+                    &format!("{uri}: {err}"),
+                );
             }
         }
     }
@@ -1713,6 +1869,19 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             if state.trace {
                 log::info!(target: "nsh::perf", "event {event:?} on view {id}");
             }
+            // Hover moves wait for the frame, the latest per view; any other
+            // event comes after the moves before it (a view hears where the
+            // mouse went before it hears it leave).
+            if let EventPayload::Hover(hover) = payload
+                && event == EventKind::HoverMove
+            {
+                match state.hover_moves.iter_mut().find(|(v, _)| *v == id) {
+                    Some((_, pending)) => *pending = hover,
+                    None => state.hover_moves.push((id, hover)),
+                }
+                return true;
+            }
+            state.dispatch_hover_moves(script);
             // The core tracks input text for layout and to recognize stale
             // values (from JS and from Rust components alike).
             if let (EventKind::ChangeText, EventPayload::Text { text, count }) = (event, &payload) {

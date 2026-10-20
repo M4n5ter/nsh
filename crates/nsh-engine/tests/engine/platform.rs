@@ -62,7 +62,7 @@ fn first_batch(environment: Environment, source: &str) -> MountBatch {
         entry,
         minify: false,
         split: false,
-        ui_sets: vec![nsh_ui_mobile::registry()],
+        ui_sets: vec![nsh_ui_mobile::registry().into()],
     })
     .unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();

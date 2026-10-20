@@ -2,6 +2,8 @@
 //! keyboard, appearance, device) and the HTTP requests it carries out: the
 //! data both Rust components and JS read, with or without a JS runtime.
 
+pub mod clipboard;
+
 /// Edge insets in points.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Insets {
@@ -226,6 +228,33 @@ impl Default for Environment {
             idiom: Idiom::Phone,
             apple_keyboard: false,
             locale: Locale::EN_US,
+        }
+    }
+}
+
+/// The settings an embedding app gives its surfaces in place of the
+/// system's (`None`: the system's): its own language and text size, for an
+/// app inside a native app that lets its users switch them. The platforms
+/// write them over what they read from the system ([`Self::apply`]), so the
+/// app's `Intl`, `locale()`, `fontScale()` and text follow them like a system
+/// change.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HostEnvironment {
+    /// The locale in place of the user's ([`Environment::locale`]).
+    pub locale: Option<Locale>,
+    /// The text size in place of the user's ([`Environment::font_scale`]);
+    /// values that are not finite and positive count as `None`.
+    pub font_scale: Option<f32>,
+}
+
+impl HostEnvironment {
+    /// Writes the settings `self` has over `env`'s.
+    pub fn apply(&self, env: &mut Environment) {
+        if let Some(locale) = self.locale {
+            env.locale = locale;
+        }
+        if let Some(scale) = self.font_scale.filter(|s| s.is_finite() && *s > 0.0) {
+            env.font_scale = scale;
         }
     }
 }
@@ -463,7 +492,7 @@ pub enum FetchOp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Environment, Idiom, Locale, Os, Renderer};
+    use super::{Environment, HostEnvironment, Idiom, Locale, Os, Renderer};
 
     #[test]
     fn renderer_separates_terminal_from_graphical_desktop_behavior() {
@@ -495,6 +524,29 @@ mod tests {
             }
             .desktop()
         );
+    }
+
+    #[test]
+    fn a_host_environment_replaces_what_it_sets() {
+        let mut env = Environment {
+            font_scale: 1.25,
+            ..Environment::default()
+        };
+        HostEnvironment::default().apply(&mut env);
+        assert_eq!((env.locale, env.font_scale), (Locale::EN_US, 1.25));
+        let zh = Locale::parse("zh-Hans-CN").unwrap();
+        HostEnvironment {
+            locale: Some(zh),
+            font_scale: Some(f32::NAN),
+        }
+        .apply(&mut env);
+        assert_eq!((env.locale, env.font_scale), (zh, 1.25));
+        HostEnvironment {
+            locale: None,
+            font_scale: Some(1.5),
+        }
+        .apply(&mut env);
+        assert_eq!((env.locale, env.font_scale), (zh, 1.5));
     }
 
     #[test]
