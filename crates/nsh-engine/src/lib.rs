@@ -914,6 +914,18 @@ impl<M: TextEngine + 'static> LocalEngine<M> {
         self.control.clone()
     }
 
+    /// Delivers an event from the currently presented UI before queued work.
+    ///
+    /// The embedding host must keep this engine and its mounted surface at
+    /// the same completed presentation while it resolves the target. Calling
+    /// [`Self::pump`] first may recycle a list cell or replace its handler.
+    /// This method does not commit or advance timers. Each physical input's
+    /// target must be captured before any callback is invoked; this entry
+    /// point alone does not freeze state read by subsequent callbacks.
+    pub fn dispatch_event_now(&mut self, id: NodeId, event: EventKind, payload: EventPayload) {
+        self.driver.handle(Message::Event(id, event, payload));
+    }
+
     /// Handles the input sent since the last call, runs what is due
     /// (timers, tasks) and commits. Returns when to call again at the
     /// latest (sooner if input arrives); `None`: only for input.

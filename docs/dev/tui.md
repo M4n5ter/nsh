@@ -360,6 +360,9 @@ runners remain console applications.
 | `Surface::input_context() -> Option<InputContext>` | Snapshot editing hints and generation; secure text is omitted |
 | `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
 | `Surface::handle_event(Event)`; `drain_events()` | Accept input and forward ordered `SurfaceEvent`s |
+| `Surface::set_host_services_enabled(bool)` | Route service requests to the embedding host without terminal IO |
+| `Surface::complete_clipboard(u32, bool, Result<ClipboardContent, String>)` | Complete a host clipboard read with capability and size checks |
+| `Surface::complete_paste(InputEdit, Result<ClipboardContent, String>)` | Complete a paste while its focused input, selection and edit count still match |
 | `SurfaceEvent::{Event, Scroll, States, AnimationsFinished, ComponentSize, Service, Zoom, RootSize, ScreenHeader}` | Ordered engine and host-service messages produced by a surface |
 | `InputContext`; `InputEdit` | UTF-16 selections, edit generation, keyboard/autofill hints and checked replacements |
 | `HostServices: Send + Sync + 'static` | Cancellable clipboard read/write, title and announcement callbacks |
@@ -378,6 +381,18 @@ Embedding hosts own event routing. Mouse events supplied to `AppView` use
 cells relative to the assigned region; drawing uses the region's absolute
 Ratatui rectangle. Native components receive destination cell rectangles
 and must respect both their clip and the buffer bounds.
+
+Hosts driving a `Surface` with `nsh_engine::LocalEngine` can admit one UI
+turn per completed output frame. They deliver presented input through
+`LocalEngine::dispatch_event_now(NodeId, EventKind, EventPayload)` before
+`pump()`, then apply every produced mount batch in order. The host keeps
+both the VM and surface at that presentation until its terminal output
+completes; freezing the surface alone would leave recycled list callbacks
+pointing at newer items. This entry point does not freeze values read by
+multiple callbacks, so the host must validate the whole physical input's
+target sequence before dispatch. Raw `Surface` hosts opt into service
+requests explicitly with `set_host_services_enabled`; clipboard reads and
+pastes are completed through the checked methods above.
 
 The shared core trait gains
 `TextEngine::measure_canvas(&self, &CanvasFont, &str) -> Option<f32>`, with

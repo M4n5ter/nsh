@@ -629,6 +629,16 @@ pub struct AccessibleNode {
 }
 
 impl Surface {
+    /// Routes host-service requests through [`SurfaceEvent::Service`].
+    ///
+    /// Disabled surfaces keep an in-memory clipboard. Enabling this performs
+    /// no IO: the embedding host transports writes and completes reads with
+    /// [`Self::complete_clipboard`] or [`Self::complete_paste`]. Mounted
+    /// capability checks still apply before requests and completions.
+    pub fn set_host_services_enabled(&mut self, enabled: bool) {
+        self.services.enabled = enabled;
+    }
+
     pub(crate) fn write_clipboard(&mut self, text: String) {
         if !self.access.allows_clipboard() || text.len() > MAX_CLIPBOARD {
             return;
@@ -684,7 +694,9 @@ impl Surface {
             self.complete_paste(edit, Ok(ClipboardContent::Text(self.clipboard.clone())));
         }
     }
-    pub(crate) fn complete_clipboard(
+    /// Completes a host clipboard read. Denied, failed or oversized results
+    /// become empty content through the existing clipboard event protocol.
+    pub fn complete_clipboard(
         &mut self,
         id: u32,
         has_only: bool,
@@ -708,7 +720,9 @@ impl Surface {
         }
         self.emit(ROOT_ID, EventKind::Clipboard, EventPayload::Map(fields));
     }
-    pub(crate) fn complete_paste(
+    /// Completes a host paste only if its input, selection and edit count
+    /// still match the request. Capability and payload limits are rechecked.
+    pub fn complete_paste(
         &mut self,
         mut edit: InputEdit,
         result: Result<ClipboardContent, String>,
@@ -1231,7 +1245,7 @@ mod tests {
         surface.write_clipboard("first".into());
         assert_eq!(surface.clipboard, "first");
         assert!(surface.drain_events().next().is_none());
-        surface.services.enabled = true;
+        surface.set_host_services_enabled(true);
         surface.set_access(denied());
         surface.write_clipboard("secret".into());
         surface.read_clipboard(7, false);
