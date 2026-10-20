@@ -1022,6 +1022,18 @@ impl<M: TextEngine + 'static> LocalEngine<M> {
         self.driver.handle(Message::Event(id, event, payload));
     }
 
+    /// Whether queued messages or due timers call for a pump in an otherwise
+    /// idle host. This scheduling hint does not consume input or run app code.
+    /// Hosts still pump after native input or [`Self::dispatch_event_now`],
+    /// which may change app state without enqueueing a message.
+    pub fn needs_pump(&self) -> bool {
+        !self.rx.is_empty()
+            || self
+                .driver
+                .deadline()
+                .is_some_and(|due| due <= Instant::now())
+    }
+
     /// Handles the input sent since the last call, runs what is due
     /// (timers, tasks) and commits. Returns when to call again at the
     /// latest (sooner if input arrives); `None`: only for input.
@@ -2058,6 +2070,81 @@ mod tests {
     }
 
     use nsh_core::{MountItem, Size};
+
+    #[test]
+    fn local_readiness_observes_pending_input_due_timers_and_idle_without_running_them() {
+        use nsh_core::{ApproxTextEngine, EventKind, EventPayload, ui::prelude::*};
+
+        use super::{EngineConfig, LocalEngine, MountSink, Root};
+
+        #[component]
+        fn Readiness() -> impl IntoElement {
+            let value = signal(0);
+            view()
+                .on_press(move |_: &()| {
+                    value.set(1);
+                    set_timeout(std::time::Duration::from_secs(1), move || value.set(2));
+                })
+                .child(text(move || format!("Readiness {}", value.get())))
+        }
+        struct Sink(crossbeam_channel::Sender<nsh_core::MountBatch>);
+        impl MountSink for Sink {
+            fn submit(&self, batch: nsh_core::MountBatch) {
+                self.0.send(batch).unwrap();
+            }
+        }
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut engine = LocalEngine::start(
+            EngineConfig::new(Root::of::<Readiness>()),
+            ApproxTextEngine,
+            Sink(tx),
+        )
+        .unwrap();
+        engine.pump();
+        let first = rx.try_recv().unwrap();
+        let text = |batch: &nsh_core::MountBatch| {
+            batch
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    MountItem::Text { text, .. } => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text(&first), ["Readiness 0"]);
+        assert!(!engine.needs_pump());
+        let button = first
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        engine
+            .control()
+            .dispatch_event(button, EventKind::Press, EventPayload::None);
+        assert!(engine.needs_pump());
+        assert!(engine.needs_pump());
+        assert!(
+            rx.try_recv().is_err(),
+            "probing does not handle the queued press"
+        );
+        let due = engine.pump().expect("the pressed component has a timer");
+        assert_eq!(text(&rx.try_recv().unwrap()), ["Readiness 1"]);
+        assert!(
+            !engine.needs_pump(),
+            "a future timer does not need an idle pump"
+        );
+        std::thread::sleep(due.saturating_duration_since(nsh_core::time::Instant::now()));
+        assert!(engine.needs_pump());
+        assert!(engine.needs_pump());
+        assert!(rx.try_recv().is_err(), "probing does not run the due timer");
+        engine.pump();
+        assert_eq!(text(&rx.try_recv().unwrap()), ["Readiness 2"]);
+        assert!(!engine.needs_pump());
+    }
 
     #[test]
     fn a_frame_sends_a_scroll_views_last_content_size() {
