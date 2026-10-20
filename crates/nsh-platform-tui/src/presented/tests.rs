@@ -1,4 +1,6 @@
-use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use nsh_core::{
     Bounds, Color, Command, EventKind, EventMask, MountBatch, MountItem, NodeId, Point, Points,
     ROOT_ID, Size, Transform, TransformKind, ViewKind, ViewProps, ViewStyle, geometry::px,
@@ -124,6 +126,45 @@ fn a_presented_close_survives_underlay_and_color_feedback_commits() {
     });
     assert!(surface.handle_presented_mouse(up(1, 1), &lease).is_some());
     assert_eq!(presses(&mut surface), [CLOSE]);
+}
+
+#[test]
+fn pointer_focus_preserves_a_clipped_press_and_keyboard_focus_reveals_it() {
+    let mut surface = Surface::new(40, 12, CellMetrics::default());
+    let mut items = mount(2, ViewKind::Scroll, frame(0.0, 0.0, 160.0, 96.0));
+    items.extend(close_button());
+    items.extend([
+        MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(px(160.0), px(320.0)),
+        },
+        MountItem::Insert {
+            parent: 2,
+            child: CLOSE,
+            before: None,
+        },
+        MountItem::Frame {
+            id: CLOSE,
+            frame: frame(8.0, 32.0, 128.0, 232.0),
+        },
+    ]);
+    surface.apply(MountBatch { items });
+    surface.drain_events().for_each(drop);
+    let lease = surface
+        .input_snapshot()
+        .press_at(2, 2)
+        .expect("visible part of a tall button");
+    assert!(surface.handle_presented_mouse(down(2, 2), &lease).is_some());
+    assert_eq!(surface.focused(), Some(CLOSE));
+    assert_eq!(surface.node(2).unwrap().scroll.y, px(0.0));
+    assert!(surface.handle_presented_mouse(up(2, 2), &lease).is_some());
+    assert_eq!(presses(&mut surface), [CLOSE]);
+
+    surface.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(surface.focused(), Some(2));
+    surface.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(surface.focused(), Some(CLOSE));
+    assert_eq!(surface.node(2).unwrap().scroll.y, px(32.0));
 }
 
 #[test]

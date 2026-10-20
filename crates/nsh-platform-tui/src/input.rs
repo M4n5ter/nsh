@@ -16,6 +16,12 @@ use nsh_core::{
 
 use crate::surface::{Surface, SurfaceEvent};
 
+#[derive(Clone, Copy)]
+enum FocusSource {
+    Navigation,
+    Pointer,
+}
+
 /// A focused input's native editing context for a host's completion,
 /// autocorrection or autofill service. Terminal keys remain literal;
 /// hosts decide which services to offer from these mounted hints.
@@ -221,6 +227,10 @@ impl Surface {
     }
 
     pub(crate) fn set_focus(&mut self, id: Option<NodeId>) {
+        self.set_focus_from(id, FocusSource::Navigation);
+    }
+
+    fn set_focus_from(&mut self, id: Option<NodeId>, source: FocusSource) {
         let visible = self.visible_ids();
         let id = id.filter(|id| visible.contains(id) && self.focusable(*id));
         if self.focus == id {
@@ -236,7 +246,11 @@ impl Surface {
             self.emit_if(id, EventKind::Focus, EventPayload::None);
         }
         self.report_states(old, self.pressed, &old_hover);
-        if let Some(id) = id {
+        if let Some(id) = id
+            && matches!(source, FocusSource::Navigation)
+        {
+            // A pointer already hit visible content. Moving it during Down
+            // would invalidate the same physical press before its Up.
             self.reveal_focus(id);
         }
     }
@@ -1228,7 +1242,7 @@ impl Surface {
         });
         if let Some(id) = native {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.focusable(id) {
-                self.set_focus(Some(id));
+                self.set_focus_from(Some(id), FocusSource::Pointer);
             }
             let captured = self.pointer.as_ref().is_some_and(|p| p.native == Some(id));
             let handled = self.native_event(id, &Event::Mouse(mouse));
@@ -1264,7 +1278,7 @@ impl Surface {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.cancel_pointer();
                 let Some(target) = hit else {
-                    self.set_focus(None);
+                    self.set_focus_from(None, FocusSource::Pointer);
                     return false;
                 };
                 let path = self.ancestors(target);
@@ -1283,19 +1297,19 @@ impl Surface {
                     })
                 });
                 if let Some(id) = field {
-                    self.set_focus(Some(id));
+                    self.set_focus_from(Some(id), FocusSource::Pointer);
                     self.drag_input = Some(id);
                     self.place_caret(id, x, y, mouse.modifiers.contains(KeyModifiers::SHIFT));
                 } else if let Some(id) = pressable {
-                    self.set_focus(Some(id));
+                    self.set_focus_from(Some(id), FocusSource::Pointer);
                 } else if let Some(id) = path
                     .iter()
                     .copied()
                     .find(|id| self.node(*id).is_some_and(|node| node.media.is_some()))
                 {
-                    self.set_focus(Some(id));
+                    self.set_focus_from(Some(id), FocusSource::Pointer);
                 } else {
-                    self.set_focus(self.scroll_ancestor(Some(target)));
+                    self.set_focus_from(self.scroll_ancestor(Some(target)), FocusSource::Pointer);
                 }
                 let pan_candidate = path.into_iter().find(|id| {
                     self.node(*id).is_some_and(|n| {

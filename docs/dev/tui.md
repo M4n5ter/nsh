@@ -127,7 +127,8 @@ The focus order includes visible inputs, pressables, enabled scroll views
 and focusable host components. Only the newest modal participates while
 it is open; background navigation screens cannot receive input. Tab and
 Shift+Tab traverse this scope, and Enter/Space activate a pressable.
-Focus changes scroll the chosen node into view.
+Keyboard, programmatic and automatic focus scroll the chosen node into view.
+Pointer focus preserves the scroll position of the content being clicked.
 Compact pressable rows underline their text for focus; graphics cells and
 their protocol placeholders retain their colors and encoding state.
 
