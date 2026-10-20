@@ -104,7 +104,9 @@ Hosts can select reduced motion with `AppOptions::reduce_motion` or `AppView::se
 | Ctrl+C | Copy an input or selectable-text selection; otherwise close the host |
 
 Click to focus or activate controls while keeping their current scroll position. Keyboard navigation and
-programmatic focus scroll the chosen control into view. The mouse wheel scrolls vertically; Shift+wheel scrolls horizontally. Pointer
+programmatic focus scroll the chosen control into view. Newly mounted list controls are revealed at their
+completed layout position; an explicit scroll or zoom issued afterward takes priority for that scroll view.
+The mouse wheel scrolls vertically; Shift+wheel scrolls horizontally. Pointer
 positions are converted from cells into the same virtual points used by layout. Middle-button dragging pans scroll
 content with inertia, bounce and pull-to-refresh according to its props. Drag a scrollbar thumb with the left
 button, or click its track to page. Zoom honors the scroll view's zoom and gesture props; paging, snap offsets,

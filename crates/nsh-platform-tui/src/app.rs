@@ -1761,6 +1761,163 @@ mod tests {
 
     #[cfg(feature = "js")]
     #[test]
+    fn nested_list_focus_reveals_the_canonical_row_after_a_membership_gap() {
+        use nsh_core::{EventKind, EventPayload};
+
+        const APP: &str = r#"
+            import { mount, signal } from 'nsh';
+            import { element, prop, insert, append, list } from 'nsh:rt';
+            const stage = signal('preview'), opened = signal(false), height = signal(416);
+            const phase = signal('initial');
+            let outer, inner, requestFocus = false;
+            function label(text) {
+                const node = element('text');
+                insert(node, text);
+                return node;
+            }
+            function action(name, run) {
+                const node = element('view');
+                prop(node, 'accessibilityLabel', name);
+                prop(node, 'onPress', run);
+                append(node, label(name));
+                return node;
+            }
+            mount(() => {
+                const root = element('view');
+                prop(root, 'style', {flex: 1});
+                append(root, action('Navigate', () => {
+                    opened.set(true);
+                    outer.scrollToIndex({index: 51, viewPosition: 0});
+                    requestFocus = true;
+                    if (inner) {
+                        requestFocus = false;
+                        inner.focus();
+                    } else outer.focus();
+                    phase.set('navigated');
+                }));
+                append(root, action('Settle', () => {
+                    if (GAPPED) stage.set('gap');
+                    phase.set('settled');
+                }));
+                append(root, action('Publish', () => {
+                    height.set(400);
+                    stage.set('canonical');
+                    phase.set('published');
+                }));
+                append(root, label(() => phase()));
+                append(root, list({
+                    get each() {
+                        return Array.from({length: stage() === 'gap' ? 51 : 52}, (_, i) => i);
+                    },
+                    estimatedItemSize: 96,
+                    maintainVisibleContentPosition: {autoscrollToBottomThreshold: 32},
+                    get style() { return {height: height()}; },
+                    accessibilityLabel: 'Outer history',
+                    ref: node => { outer = node; node.scrollToEnd({animated: false}); },
+                    children: id => {
+                        const row = element('view');
+                        insert(row, () => {
+                            if (id() !== 51) {
+                                const history = element('view');
+                                prop(history, 'style', {height: 320 + (id() % 3) * 16});
+                                append(history, label('HISTORY_' + id()));
+                                return history;
+                            }
+                            const group = element('view');
+                            prop(group, 'style', {paddingVertical: 16});
+                            append(group, label(() => stage() === 'canonical'
+                                ? 'WORKING_TARGET' : 'PREPARING_TARGET'));
+                            insert(group, () => opened() && stage() === 'canonical' ? list({
+                                each: ['canonical'],
+                                estimatedItemSize: 16,
+                                contentOffset: {y: 0},
+                                style: {height: 16},
+                                accessibilityLabel: 'Target activity',
+                                ref: node => {
+                                    inner = node;
+                                    node.scrollToEnd({animated: false});
+                                    if (requestFocus) { requestFocus = false; node.focus(); }
+                                },
+                                children: key => label(() => key() + ' literal body')
+                            }) : null);
+                            return group;
+                        });
+                        return row;
+                    }
+                }));
+                return root;
+            });
+        "#;
+
+        fn wait(view: &mut AppView, started: Instant, ready: impl Fn(&AppView) -> bool) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                view.tick(started.elapsed().as_secs_f64()).unwrap();
+                if ready(view) {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        fn press(view: &AppView, label: &str) {
+            let target = view
+                .accessibility_snapshot()
+                .into_iter()
+                .find(|node| node.label == label)
+                .expect("handoff action must be mounted");
+            view.control()
+                .unwrap()
+                .dispatch_event(target.id, EventKind::Press, EventPayload::None);
+        }
+
+        let mut outcomes = Vec::new();
+        for gap in [false, true] {
+            let started = Instant::now();
+            let mut view = AppView::new(AppOptions::default());
+            view.load(App::Js(Bundle::source(
+                APP.replace("GAPPED", if gap { "true" } else { "false" }),
+            )))
+            .unwrap();
+            assert!(
+                wait(&mut view, started, |view| {
+                    view.snapshot().contains("PREPARING_TARGET") && !view.surface().animating()
+                }),
+                "initial target did not mount: gap={gap}, error={:?}",
+                view.last_error()
+            );
+            // Acknowledgments ensure the temporary removal reaches a real
+            // presentation before publication; no second reveal is issued.
+            for (action, phase) in [("Navigate", "navigated"), ("Settle", "settled")] {
+                press(&view, action);
+                assert!(
+                    wait(&mut view, started, |view| view.snapshot().contains(phase)),
+                    "handoff action did not commit: gap={gap}, action={action}, error={:?}",
+                    view.last_error()
+                );
+            }
+            press(&view, "Publish");
+            let visible_and_focused = wait(&mut view, started, |view| {
+                let snapshot = view.snapshot();
+                snapshot.contains("WORKING_TARGET")
+                    && snapshot.contains("canonical literal body")
+                    && view
+                        .accessibility_snapshot()
+                        .iter()
+                        .any(|node| node.label == "Target activity" && node.focused)
+                    && !view.surface().animating()
+            });
+            view.stop();
+            outcomes.push((gap, visible_and_focused));
+        }
+        assert_eq!(outcomes, [(false, true), (true, true)]);
+    }
+
+    #[cfg(feature = "js")]
+    #[test]
     fn scoped_shortcuts_and_resize_read_the_same_native_focus_without_observing_it() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

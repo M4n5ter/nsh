@@ -129,6 +129,12 @@ it is open; background navigation screens cannot receive input. Tab and
 Shift+Tab traverse this scope, and Enter/Space activate a pressable.
 Keyboard, programmatic and automatic focus scroll the chosen node into view.
 Pointer focus preserves the scroll position of the content being clicked.
+Within a mount batch, focus selection and events follow command order. The
+implicit reveal of a newly selected focus waits until the batch's final cell
+positions and scroll limits are applied. It follows only the still-current
+node generation; later explicit scroll or zoom commands retain their chosen
+position for the affected ancestor. The reveal is consumed before `apply`
+returns, so later user scrolling remains independent.
 Compact pressable rows underline their text for focus; graphics cells and
 their protocol placeholders retain their colors and encoding state.
 

@@ -18,8 +18,16 @@ use ratatui::{buffer::Buffer, layout::Rect as CellRect};
 use crate::{
     editor::Editor,
     image::{AnimatedRaster, Raster},
+    input::FocusSource,
     metrics::CellMetrics,
 };
+
+// A mount batch can position a virtual cell after its focus command.
+// Only the implicit reveal waits for that final geometry.
+struct FocusReveal {
+    target: (NodeId, u64),
+    overridden: Vec<(NodeId, u64)>,
+}
 
 /// Input and native work to forward to a surface's engine in order.
 #[derive(Debug)]
@@ -579,6 +587,7 @@ impl Surface {
         let mut tracked = Vec::new();
         let mut layout = None::<nsh_core::LayoutAnimation>;
         let mut scrolls = Vec::new();
+        let mut focus_reveal: Option<FocusReveal> = None;
         for item in batch.items {
             match item {
                 MountItem::LayoutAnimation(animation) => layout = Some(animation),
@@ -913,7 +922,33 @@ impl Surface {
                     }
                     self.component_size(id);
                 }
-                MountItem::Command { id, command } => self.command(id, command),
+                MountItem::Command { id, command } => {
+                    let focus_command = matches!(
+                        command,
+                        Command::Focus | Command::AccessibilityFocus | Command::Blur
+                    );
+                    let explicit_scroll = match &command {
+                        Command::ScrollTo { x, y, .. } => x.0.is_finite() && y.0.is_finite(),
+                        Command::ScrollToEnd { .. } => true,
+                        Command::ZoomTo { scale, .. } => scale.is_finite(),
+                        _ => false,
+                    };
+                    let old_focus = self.focus;
+                    self.command(id, command);
+                    if self.focus != old_focus {
+                        focus_reveal = self.focus.filter(|_| focus_command).and_then(|id| {
+                            self.node(id).map(|node| FocusReveal {
+                                target: (id, node.generation),
+                                overridden: Vec::new(),
+                            })
+                        });
+                    } else if explicit_scroll
+                        && let Some(reveal) = &mut focus_reveal
+                        && let Some(node) = self.node(id)
+                    {
+                        reveal.overridden.push((id, node.generation));
+                    }
+                }
                 MountItem::NativeProps { id, props } => self.set_media(id, props),
                 MountItem::Refreshing { id, refreshing } => self.set_refreshing(id, refreshing),
                 MountItem::Overflow { .. } | MountItem::LayoutDirection { .. } => {}
@@ -929,6 +964,14 @@ impl Surface {
         }
         self.navigation_reconcile();
         self.reconcile_focus();
+        if let Some(reveal) = focus_reveal
+            && self.focus == Some(reveal.target.0)
+            && self
+                .node(reveal.target.0)
+                .is_some_and(|node| node.generation == reveal.target.1)
+        {
+            self.reveal_focus(reveal.target.0, &reveal.overridden);
+        }
         for id in tracked {
             self.refresh_input_states(id);
         }
@@ -947,7 +990,9 @@ impl Surface {
             return;
         }
         match command {
-            Command::Focus | Command::AccessibilityFocus => self.set_focus(Some(id)),
+            Command::Focus | Command::AccessibilityFocus => {
+                self.set_focus_from(Some(id), FocusSource::Mount)
+            }
             Command::Blur => self.set_focus(None),
             Command::SetSelection { start, end } => self.selection(id, start, end),
             Command::ScrollTo { x, y, animated } => self.scroll_command(id, x, y, animated),

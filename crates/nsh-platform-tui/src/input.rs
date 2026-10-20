@@ -17,9 +17,10 @@ use nsh_core::{
 use crate::surface::{Surface, SurfaceEvent};
 
 #[derive(Clone, Copy)]
-enum FocusSource {
+pub(crate) enum FocusSource {
     Navigation,
     Pointer,
+    Mount,
 }
 
 /// A focused input's native editing context for a host's completion,
@@ -244,7 +245,7 @@ impl Surface {
         self.set_focus_from(id, FocusSource::Navigation);
     }
 
-    fn set_focus_from(&mut self, id: Option<NodeId>, source: FocusSource) {
+    pub(crate) fn set_focus_from(&mut self, id: Option<NodeId>, source: FocusSource) {
         let visible = self.visible_ids();
         let id = id.filter(|id| visible.contains(id) && self.focusable(*id));
         if self.focus == id {
@@ -263,9 +264,9 @@ impl Surface {
         if let Some(id) = id
             && matches!(source, FocusSource::Navigation)
         {
-            // A pointer already hit visible content. Moving it during Down
-            // would invalidate the same physical press before its Up.
-            self.reveal_focus(id);
+            // Pointer focus keeps the hit content still until Up. Mount
+            // focus reveals after the batch finishes positioning its cells.
+            self.reveal_focus(id, &[]);
         }
     }
 
@@ -495,13 +496,16 @@ impl Surface {
         true
     }
 
-    fn reveal_focus(&mut self, id: NodeId) {
+    pub(crate) fn reveal_focus(&mut self, id: NodeId, overridden: &[(NodeId, u64)]) {
         let ancestors = self.ancestors(id);
         for scroll in ancestors.into_iter().skip(1) {
             let Some(node) = self.node(scroll) else {
                 continue;
             };
-            if node.kind != ViewKind::Scroll || !node.scroll.enabled {
+            if node.kind != ViewKind::Scroll
+                || !node.scroll.enabled
+                || overridden.contains(&(scroll, node.generation))
+            {
                 continue;
             }
             let (x, y) = (node.scroll.x.0, node.scroll.y.0);
@@ -2092,6 +2096,138 @@ mod tests {
 
     fn key(surface: &mut Surface, code: KeyCode, modifiers: KeyModifiers) {
         surface.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+
+    fn parked_focus_scene() -> Surface {
+        use nsh_core::{MountBatch, MountItem};
+        let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+        let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+        items.extend(create(4, ViewKind::View, 2, -1_000_000.0));
+        items.extend(create(6, ViewKind::Input, 4, 0.0));
+        items.extend(create(8, ViewKind::Input, 2, 0.0));
+        items.push(MountItem::Events {
+            id: 6,
+            events: mask(&[EventKind::Focus, EventKind::Blur]),
+        });
+        items.push(MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(px(160.0), px(1000.0)),
+        });
+        surface.apply(MountBatch { items });
+        assert_eq!(surface.focused(), Some(2));
+        surface.events.clear();
+        surface
+    }
+
+    #[test]
+    fn mount_focus_reveals_final_frames_and_respects_later_explicit_scrolls() {
+        use nsh_core::{Command, MountBatch, MountItem};
+
+        for (later, expected_offset) in [
+            (None, 640.0),
+            (
+                Some(MountItem::Command {
+                    id: 2,
+                    command: Command::ScrollTo {
+                        x: px(0.0),
+                        y: px(80.0),
+                        animated: false,
+                    },
+                }),
+                80.0,
+            ),
+            (
+                Some(MountItem::ScrollBy {
+                    id: 2,
+                    dx: px(0.0),
+                    dy: px(16.0),
+                }),
+                640.0,
+            ),
+            (
+                Some(MountItem::Command {
+                    id: 2,
+                    command: Command::ScrollTo {
+                        x: px(0.0),
+                        y: px(f32::NAN),
+                        animated: false,
+                    },
+                }),
+                640.0,
+            ),
+        ] {
+            let mut surface = parked_focus_scene();
+            let mut items = vec![MountItem::Command {
+                id: 6,
+                command: Command::Focus,
+            }];
+            items.extend(later);
+            // A duplicate focus is a no-op, including after an explicit scroll.
+            items.push(MountItem::Command {
+                id: 6,
+                command: Command::Focus,
+            });
+            items.push(MountItem::Frame {
+                id: 4,
+                frame: Bounds::new(point(px(0.0), px(640.0)), Size::new(px(160.0), px(32.0))),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(6));
+            assert_eq!(surface.node(2).unwrap().scroll.y, px(expected_offset));
+            let focus_events: Vec<_> = surface
+                .drain_events()
+                .filter_map(|event| match event {
+                    SurfaceEvent::Event(id, EventKind::Focus, _) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(focus_events, [6]);
+        }
+    }
+
+    #[test]
+    fn superseded_mount_focus_does_not_reveal_a_retired_target() {
+        use nsh_core::{Command, MountBatch, MountItem};
+
+        for (later, expected_focus) in [
+            (
+                vec![MountItem::Command {
+                    id: 6,
+                    command: Command::Blur,
+                }],
+                None,
+            ),
+            (vec![MountItem::Remove { id: 6 }], Some(2)),
+            (
+                vec![MountItem::Command {
+                    id: 8,
+                    command: Command::Focus,
+                }],
+                Some(8),
+            ),
+            (
+                {
+                    let mut items = vec![MountItem::Delete { id: 6 }];
+                    items.extend(create(6, ViewKind::Input, 4, 0.0));
+                    items
+                },
+                Some(6),
+            ),
+        ] {
+            let mut surface = parked_focus_scene();
+            let mut items = vec![MountItem::Command {
+                id: 6,
+                command: Command::Focus,
+            }];
+            items.extend(later);
+            items.push(MountItem::Frame {
+                id: 4,
+                frame: Bounds::new(point(px(0.0), px(640.0)), Size::new(px(160.0), px(32.0))),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), expected_focus);
+            assert_eq!(surface.node(2).unwrap().scroll.y, px(0.0));
+        }
     }
 
     #[test]
