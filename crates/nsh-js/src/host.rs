@@ -606,6 +606,81 @@ impl Host {
         }
     }
 
+    /// Delivers one event immediately and reports whether it may have entered
+    /// application code through a handler, property access or data conversion.
+    /// An unsubscribed event does not run pending JS jobs. A component event's
+    /// `name` and `Drop` must not enter application code, as with the core's
+    /// closed event forwarders.
+    pub fn deliver_now(&self, event: nsh_core::ui::JsEvent) -> bool {
+        if let nsh_core::ui::JsEvent::Event(id, kind, payload) = &event {
+            return self.dispatch_event_now(*id, *kind, payload);
+        }
+        let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.guarded(Phase::Call, || {
+                let entered = self.ctx.with(|ctx| {
+                    let (entered, result) =
+                        crate::components::deliver_now(ctx.as_raw().as_ptr(), event);
+                    if result.is_err() {
+                        self.report::<()>(&ctx, Err(rquickjs::Error::Exception));
+                    }
+                    entered
+                });
+                if entered {
+                    self.run_jobs();
+                }
+                entered
+            })
+            .unwrap_or(false)
+        }));
+        match delivered {
+            Ok(entered) => entered,
+            Err(_) => {
+                log::error!(target: "js", "a value for JS panicked as it dropped");
+                true
+            }
+        }
+    }
+
+    fn dispatch_event_now(&self, id: NodeId, event: EventKind, payload: &EventPayload) -> bool {
+        self.guarded(Phase::Call, || {
+            let entered = self.ctx.with(|ctx| {
+                let raw = ctx.as_raw().as_ptr();
+                // The responder system can enter several app handlers.
+                if let (EventKind::Touch, EventPayload::Touch(touch)) = (event, payload) {
+                    if crate::touch::dispatch(raw, touch).is_err() {
+                        self.report::<()>(&ctx, Err(rquickjs::Error::Exception));
+                    }
+                    return true;
+                }
+                let Some(handler) = crate::dom::handler(raw, id, event) else {
+                    return false;
+                };
+                // SAFETY: an owned function value of this context.
+                let handler = unsafe { Value::from_raw(ctx.clone(), handler) };
+                let Some(handler) = handler.into_function() else {
+                    return false;
+                };
+                let payload = match (event, payload) {
+                    (EventKind::ChangeText, EventPayload::Text { text, .. }) => {
+                        rquickjs::String::from_str(ctx.clone(), text).map(|s| s.into_value())
+                    }
+                    (_, EventPayload::Value(value)) => payload_value(&ctx, value),
+                    _ => payload_object(&ctx, payload),
+                };
+                self.report(
+                    &ctx,
+                    payload.and_then(|payload| handler.call::<_, ()>((payload,))),
+                );
+                true
+            });
+            if entered {
+                self.run_jobs();
+            }
+            entered
+        })
+        .unwrap_or(false)
+    }
+
     /// Delivers a native event (and its data) to the node's JS handler.
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: &EventPayload) {
         self.guarded(Phase::Call, || {
@@ -1643,6 +1718,77 @@ const report = (v) => text(String(v));
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn immediate_component_events_report_property_entry_without_running_unbound_work() {
+        use nsh_core::ui::{EventToJs, JsEvent, JsHost, JsOwned, PropError};
+
+        struct CountedEvent {
+            name: &'static str,
+            conversions: Rc<Cell<u32>>,
+        }
+
+        impl EventToJs for CountedEvent {
+            fn name(&self) -> &'static str {
+                self.name
+            }
+
+            fn data_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+                self.conversions.set(self.conversions.get() + 1);
+                Ok(JsOwned::new(host, host.undefined()))
+            }
+        }
+
+        let host = Host::with_options(HostOptions {
+            ui_sets: vec![nsh_base::registry()],
+            ..Default::default()
+        })
+        .unwrap();
+        host.eval_source(
+            r#"import { Button } from "nsh/base";
+            globalThis.log = [];
+            globalThis.undefinedButton = Button({
+                get onPress() { log.push("undefined"); return undefined; }
+            });
+            globalThis.throwingButton = Button({
+                get onPress() { log.push("throw"); throw Error("getter failed"); }
+            });"#,
+        )
+        .unwrap();
+        let ids = host.ctx.with(|ctx| {
+            ["undefinedButton", "throwingButton"].map(|name| {
+                let node: Value = ctx.globals().get(name).unwrap();
+                crate::dom::node_id(ctx.as_raw().as_ptr(), node.as_raw()).unwrap()
+            })
+        });
+        host.ctx.with(|ctx| {
+            ctx.eval::<(), _>("Promise.resolve().then(() => log.push('job'));")
+                .unwrap();
+        });
+        let log = || {
+            host.ctx
+                .with(|ctx| ctx.eval::<String, _>("log.join(',')").unwrap())
+        };
+        let conversions = Rc::new(Cell::new(0));
+        let event = |host, name| JsEvent::Component {
+            host,
+            event: Box::new(CountedEvent {
+                name,
+                conversions: conversions.clone(),
+            }),
+        };
+        assert!(!host.deliver_now(event(ids[0], "pressDown")));
+        assert_eq!(conversions.get(), 0);
+        assert_eq!(log(), "");
+
+        assert!(host.deliver_now(event(ids[0], "press")));
+        assert_eq!(conversions.get(), 1);
+        assert_eq!(log(), "undefined,job");
+
+        assert!(host.deliver_now(event(ids[1], "press")));
+        assert_eq!(conversions.get(), 2);
+        assert_eq!(log(), "undefined,job,throw");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

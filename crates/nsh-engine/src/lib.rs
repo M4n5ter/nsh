@@ -1125,11 +1125,32 @@ impl<M: TextEngine + 'static> LocalEngine<M> {
     /// [`Self::pump`] first may recycle a list cell or replace its handler.
     /// This method does not commit or advance timers. Each physical input's
     /// target must be captured before any callback is invoked; this entry
-    /// point alone does not freeze state read by subsequent callbacks.
-    pub fn dispatch_event_now(&mut self, id: NodeId, event: EventKind, payload: EventPayload) {
+    /// point stops native component routing at its first application entry
+    /// and returns `true` then. JS touch responder negotiation is treated as
+    /// one conservative application entry and retains its existing routing.
+    /// An unhandled component phase returns `false` without running JS jobs,
+    /// so the host may continue resolving that presentation's native input.
+    /// A `true` result requires a new presentation before further input.
+    pub fn dispatch_event_now(
+        &mut self,
+        id: NodeId,
+        event: EventKind,
+        payload: EventPayload,
+    ) -> bool {
         let _clock = self.driver.clock.enter();
-        self.driver
-            .handle(Message::Event(id, event, payload), &self.rx);
+        let state = &mut self.driver.state;
+        if state.trace {
+            log::info!(target: "nsh::perf", "presented event {event:?} on view {id}");
+        }
+        if let (EventKind::ChangeText, EventPayload::Text { text, count }) = (event, &payload) {
+            state.core.input_changed(id, text, *count);
+        }
+        let script = self.driver.script.as_ref();
+        state
+            .core
+            .component_event_now(id, event, &payload, |event| {
+                script.is_some_and(|script| script.deliver_now(event))
+            })
     }
 
     /// Whether queued messages or due timers call for a pump in an otherwise
@@ -2400,6 +2421,167 @@ mod tests {
         engine.pump();
         assert_eq!(text(&rx.try_recv().unwrap()), ["Readiness 2"]);
         assert!(!engine.needs_pump());
+    }
+
+    #[cfg(feature = "js")]
+    #[test]
+    fn presented_component_events_stop_at_application_entry_and_preserve_its_emits() {
+        use std::cell::Cell;
+
+        use nsh_core::{ApproxTextEngine, EventKind, EventPayload, Op, ui::prelude::*};
+
+        use super::{Bundle, EngineConfig, LocalEngine, MountSink};
+
+        thread_local! {
+            static LATER: Cell<u32> = const { Cell::new(0) };
+        }
+        #[derive(Event)]
+        enum Pressed {
+            Press,
+        }
+        #[component]
+        fn Forward(cx: Scope<Pressed>) -> impl IntoElement {
+            view()
+                .test_id("forward")
+                .on_press(cx.forward(Pressed::Press))
+                .on_press(|_: &()| LATER.with(|later| later.set(later.get() + 1)))
+        }
+        #[component]
+        fn Business(cx: Scope<Pressed>) -> impl IntoElement {
+            view()
+                .test_id("business")
+                .on_press(move |_: &()| cx.emit(Pressed::Press))
+                .on_press(|_: &()| LATER.with(|later| later.set(later.get() + 1)))
+        }
+        struct Sink(crossbeam_channel::Sender<nsh_core::MountBatch>);
+        impl MountSink for Sink {
+            fn submit(&self, batch: nsh_core::MountBatch) {
+                self.0.send(batch).unwrap();
+            }
+        }
+        let mut registry = Registry::ui_set("test/presented");
+        registry.register::<Forward>().register::<Business>();
+        let sets = vec![nsh_base::registry(), registry];
+        let descriptions = sets.iter().map(Into::into).collect::<Vec<_>>();
+        let source = nsh_bundler::compile_module(
+            "presented.tsx",
+            r#"import { mount, signal, Text, View } from "nsh";
+import { text } from "nsh:rt";
+import { Button } from "nsh/base";
+import { Forward, Business } from "test/presented";
+const rendered = signal("");
+const report = value => { text(value); rendered.set(value); };
+mount(() => <View>
+  <Button testID="button" onPress={() => report("button")} />
+  <Forward onPress={() => report("forward")} />
+  <Business onPress={() => report("business")} />
+  <Text>{rendered()}</Text>
+</View>);"#,
+            &descriptions,
+        )
+        .unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut engine = LocalEngine::start(
+            EngineConfig {
+                ui_sets: sets,
+                ..EngineConfig::new(Bundle::source(source))
+            },
+            ApproxTextEngine,
+            Sink(tx),
+        )
+        .unwrap();
+        let first = rx.try_recv().unwrap();
+        let node = |name| {
+            first
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    MountItem::ViewProps { id, props }
+                        if props.test_id.as_deref() == Some(name) =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {name}: {:?}", first.items))
+        };
+        let (button, forward, business) = (node("button"), node("forward"), node("business"));
+        // Observe the callback's actual JS output before any frame, then
+        // hand its ops back to the ordinary commit.
+        let reports = |engine: &mut LocalEngine<ApproxTextEngine>| {
+            let mut ops = Vec::new();
+            engine.driver.script.as_ref().unwrap().take_ops(&mut ops);
+            let reports = ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::CreateText { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            engine.driver.state.ops.extend(ops);
+            reports
+        };
+        let rendered = || {
+            rx.try_iter()
+                .flat_map(|batch| batch.items)
+                .filter_map(|item| match item {
+                    MountItem::Text { text, .. } => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(!engine.dispatch_event_now(button, EventKind::PressDown, EventPayload::None));
+        assert!(!engine.dispatch_event_now(button, EventKind::PressUp, EventPayload::None));
+        assert!(reports(&mut engine).is_empty());
+        assert!(engine.dispatch_event_now(button, EventKind::Press, EventPayload::None));
+        assert_eq!(reports(&mut engine), ["button"]);
+        engine.pump();
+        assert_eq!(rendered(), ["button"]);
+
+        engine
+            .control()
+            .dispatch_event(button, EventKind::Press, EventPayload::None);
+        assert!(engine.dispatch_event_now(forward, EventKind::Press, EventPayload::None));
+        assert_eq!(
+            reports(&mut engine),
+            ["forward"],
+            "queued input stays queued"
+        );
+        assert_eq!(
+            LATER.with(Cell::get),
+            0,
+            "JS entry stops the later Rust listener"
+        );
+        engine.pump();
+        assert_eq!(
+            rendered(),
+            ["forward", "button"],
+            "the commit applies direct output before the queued callback's output"
+        );
+
+        assert!(engine.dispatch_event_now(business, EventKind::Press, EventPayload::None));
+        assert!(
+            reports(&mut engine).is_empty(),
+            "an opaque Rust callback is the first entry"
+        );
+        assert_eq!(LATER.with(Cell::get), 0);
+        engine.pump();
+        assert_eq!(
+            rendered(),
+            ["business"],
+            "the first callback's own emit survives"
+        );
+
+        engine
+            .control()
+            .dispatch_event(forward, EventKind::Press, EventPayload::None);
+        engine.pump();
+        assert_eq!(rendered(), ["forward"]);
+        assert_eq!(
+            LATER.with(Cell::get),
+            1,
+            "ordinary queued dispatch retains all listeners"
+        );
     }
 
     #[test]

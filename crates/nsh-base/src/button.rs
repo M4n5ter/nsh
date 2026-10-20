@@ -57,8 +57,8 @@ pub fn Button(props: ButtonProps, cx: Scope<ButtonEvent>) -> impl IntoElement {
             ..AccessibilityState::default()
         })
         .selected_style(props.selected_style)
-        .on_press(move |_: &()| cx.emit(ButtonEvent::Press))
-        .on_press_down(move |_: &()| cx.emit(ButtonEvent::PressDown))
-        .on_press_up(move |_: &()| cx.emit(ButtonEvent::PressUp))
+        .on_press(cx.forward(ButtonEvent::Press))
+        .on_press_down(cx.forward(ButtonEvent::PressDown))
+        .on_press_up(cx.forward(ButtonEvent::PressUp))
         .child(props.children)
 }

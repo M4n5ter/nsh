@@ -171,11 +171,28 @@ pub(crate) fn measure(ctx: *mut JsContext, id: u32) -> JsValue {
 /// runs (conversions, drops) cannot unwind out: a panic there is logged,
 /// or rejects the call's promise.
 pub(crate) fn deliver(ctx: *mut JsContext, event: JsEvent) -> Result<(), JsValue> {
+    deliver_inner(ctx, event, false).1
+}
+
+/// Delivers only a subscribed event and reports any possible app entry.
+pub(crate) fn deliver_now(ctx: *mut JsContext, event: JsEvent) -> (bool, Result<(), JsValue>) {
+    deliver_inner(ctx, event, true)
+}
+
+fn deliver_inner(ctx: *mut JsContext, event: JsEvent, now: bool) -> (bool, Result<(), JsValue>) {
     match event {
-        JsEvent::Event(..) => Ok(()),
+        JsEvent::Event(..) => (false, Ok(())),
         JsEvent::Component { host, event } => {
-            let host_js = crate::classes::host_outside_calls(ctx);
             let name = event.name();
+            let handler = if now {
+                let Some(handler) = dom::component_handler(ctx, host, name) else {
+                    return (false, Ok(()));
+                };
+                Some(Owned(ctx, handler))
+            } else {
+                None
+            };
+            let host_js = crate::classes::host_outside_calls(ctx);
             let data = catch_unwind(AssertUnwindSafe(move || {
                 event.data_js(&host_js).map(|d| d.into_raw())
             }));
@@ -185,7 +202,7 @@ pub(crate) fn deliver(ctx: *mut JsContext, event: JsEvent) -> Result<(), JsValue
                     // What a conversion threw (the error says it).
                     let _ = crate::web::js::take_exception(ctx);
                     log::error!(target: "js", "the data of event `{name}` did not convert: {e}");
-                    return Ok(());
+                    return (true, Ok(()));
                 }
                 Err(payload) => {
                     let _ = crate::web::js::take_exception(ctx);
@@ -194,16 +211,27 @@ pub(crate) fn deliver(ctx: *mut JsContext, event: JsEvent) -> Result<(), JsValue
                         "the data of event `{name}` panicked as it converted: {}",
                         crate::classes::panic_message(payload)
                     );
-                    return Ok(());
+                    return (true, Ok(()));
                 }
             };
-            component_event(ctx, host, name, crate::classes::from_raw(data))
+            (
+                true,
+                component_event(ctx, host, name, crate::classes::from_raw(data), handler),
+            )
         }
         JsEvent::Children { host, wanted } => {
+            let handler = if now {
+                let Some(handler) = dom::component_handler(ctx, host, CHILDREN) else {
+                    return (false, Ok(()));
+                };
+                Some(Owned(ctx, handler))
+            } else {
+                None
+            };
             let data = if wanted { qjs::JS_TRUE } else { qjs::JS_FALSE };
-            component_event(ctx, host, CHILDREN, data)
+            (true, component_event(ctx, host, CHILDREN, data, handler))
         }
-        JsEvent::Reply { call, result } => settle(ctx, call, result),
+        JsEvent::Reply { call, result } => (true, settle(ctx, call, result)),
     }
 }
 
@@ -218,8 +246,11 @@ fn component_event(
     host: nsh_core::NodeId,
     name: &str,
     data: JsValue,
+    handler: Option<Owned>,
 ) -> Result<(), JsValue> {
-    let Some(handler) = dom::handler(ctx, host, EventKind::NativeEvent) else {
+    let handler = handler
+        .or_else(|| dom::handler(ctx, host, EventKind::NativeEvent).map(|value| Owned(ctx, value)));
+    let Some(handler) = handler else {
         // SAFETY: ours.
         unsafe { qjs::JS_FreeValue(ctx, data) };
         return Ok(());
@@ -231,9 +262,8 @@ fn component_event(
         qjs::JS_SetPropertyStr(ctx, event, c"name".as_ptr(), new_string(ctx, name));
         qjs::JS_SetPropertyStr(ctx, event, c"data".as_ptr(), data);
         let mut args = [event];
-        let r = qjs::JS_Call(ctx, handler, UNDEFINED, 1, args.as_mut_ptr());
+        let r = qjs::JS_Call(ctx, handler.1, UNDEFINED, 1, args.as_mut_ptr());
         qjs::JS_FreeValue(ctx, event);
-        qjs::JS_FreeValue(ctx, handler);
         if qjs::JS_IsException(r) {
             return Err(r);
         }
@@ -657,25 +687,30 @@ fn render_component(
         }
         Some(api)
     };
-    let handles_events = spec
+    let mut events: Vec<_> = spec
         .events
         .iter()
-        .any(|e| has(ctx, props, &handler_name(e.name)));
+        .filter(|e| has(ctx, props, &handler_name(e.name)))
+        .map(|e| e.name)
+        .collect();
     // Lazy children: made while this signal (the core's `$children`) is
     // true.
     let lazy = (spec.lazy_children && spec.takes_children() && has(ctx, props, "children"))
         .then(|| Owned(ctx, reactive::new_signal(ctx, qjs::JS_FALSE)));
-    if handles_events || lazy.is_some() {
+    if !events.is_empty() || lazy.is_some() {
+        if lazy.is_some() {
+            events.push(CHILDREN);
+        }
         let mut edata = [props, lazy.as_ref().map_or(UNDEFINED, |l| l.1)];
         // SAFETY: the function keeps dups of `edata`.
         let on = Owned(ctx, unsafe {
             qjs::JS_NewCFunctionData(ctx, Some(on_native_event), 1, 0, 2, edata.as_mut_ptr())
         });
-        dom::set_handler(
+        dom::set_component_handler(
             ctx,
             dom::node_id(ctx, node).unwrap_or(0),
-            EventKind::NativeEvent,
             on.1,
+            events.into_boxed_slice(),
         )?;
     }
     // One effect reads every prop and sends those that changed.

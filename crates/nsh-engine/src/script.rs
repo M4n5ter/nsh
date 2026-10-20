@@ -221,6 +221,10 @@ mod imp {
             self.host.deliver(event);
         }
 
+        pub(crate) fn deliver_now(&self, event: nsh_core::ui::JsEvent) -> bool {
+            self.host.deliver_now(event)
+        }
+
         pub(crate) fn bind_list(&self, list: NodeId, binds: &[(u32, u32)]) {
             self.host.bind_list(list, binds);
         }
@@ -357,6 +361,10 @@ mod stub {
         }
 
         pub(crate) fn deliver(&self, _: nsh_core::ui::JsEvent) {
+            match *self {}
+        }
+
+        pub(crate) fn deliver_now(&self, _: nsh_core::ui::JsEvent) -> bool {
             match *self {}
         }
 

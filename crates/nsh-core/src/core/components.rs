@@ -33,6 +33,27 @@ use crate::{
     },
 };
 
+/// Dispatch state lives only for one input. Ordinary queued input retains
+/// its full routing; presented input stops at its first application entry.
+#[derive(Default)]
+pub(super) struct EventDispatch<'a> {
+    deliver: Option<&'a mut dyn FnMut(JsEvent) -> bool>,
+    entered: bool,
+    emit_start: usize,
+}
+
+impl EventDispatch<'_> {
+    pub(super) fn stopped(&self) -> bool {
+        self.entered
+    }
+
+    fn application(&mut self) {
+        if self.deliver.is_some() {
+            self.entered = true;
+        }
+    }
+}
+
 /// Lowered styles kept for reuse (many elements have the same styles);
 /// cleared when full.
 const STYLE_CACHE: usize = 4096;
@@ -3805,7 +3826,12 @@ impl<M: TextEngine> Core<M> {
     /// A component's own list reported its viewable rows: they are the
     /// owner's to handle now, or once they stayed so for the minimum view
     /// time (a change meanwhile starts the wait again).
-    fn viewable_changed(&mut self, list: NodeId, payload: &EventPayload) {
+    fn viewable_changed(
+        &mut self,
+        list: NodeId,
+        payload: &EventPayload,
+        dispatch: &mut EventDispatch<'_>,
+    ) {
         let executor = self.components.executor.clone();
         let Some(state) = self.components.virtual_lists.get_mut(&list) else {
             return;
@@ -3820,13 +3846,17 @@ impl<M: TextEngine> Core<M> {
                     Action::ReportViewable(list),
                 ));
             }
-            None => self.report_viewable(list),
+            None => self.report_viewable_in(list, dispatch),
         }
     }
 
     /// Hands list `list`'s owner the rows viewable now, unless they are the
     /// ones reported last.
     fn report_viewable(&mut self, list: NodeId) {
+        self.report_viewable_in(list, &mut EventDispatch::default());
+    }
+
+    fn report_viewable_in(&mut self, list: NodeId, dispatch: &mut EventDispatch<'_>) {
         let Some(state) = self.components.virtual_lists.get_mut(&list) else {
             return;
         };
@@ -3837,7 +3867,13 @@ impl<M: TextEngine> Core<M> {
         let payload = virtual_list::viewable_payload(state.latest, state.reported);
         state.reported = state.latest;
         let owner = state.owner;
-        self.handle(owner, list, EventKind::ViewableItemsChanged, &payload);
+        self.handle(
+            owner,
+            list,
+            EventKind::ViewableItemsChanged,
+            &payload,
+            dispatch,
+        );
     }
 
     fn release_id(&mut self, id: NodeId) {
@@ -3983,43 +4019,84 @@ impl<M: TextEngine> Core<M> {
     /// own parts' events never reach JS, which does not know them).
     pub fn component_event(&mut self, id: NodeId, kind: EventKind, payload: &EventPayload) -> bool {
         let _entered = self.components.runtime.enter();
-        let handled = self.dispatch_event(id, kind, payload);
-        // What views' listeners emitted reaches its listeners (JS hears it
-        // in this turn).
+        let mut dispatch = EventDispatch::default();
+        let handled = self.dispatch_event(id, kind, payload, &mut dispatch);
+        self.drain_component_emits(&mut dispatch);
+        handled
+    }
+
+    /// Delivers one presented input in routing order, stopping after its
+    /// first application callback. `deliver` handles JS events immediately
+    /// and returns whether it entered application code. Older queued events
+    /// are left for the ordinary commit. The result is application entry,
+    /// rather than whether an internal component handled the native event.
+    pub fn component_event_now(
+        &mut self,
+        id: NodeId,
+        kind: EventKind,
+        payload: &EventPayload,
+        mut deliver: impl FnMut(JsEvent) -> bool,
+    ) -> bool {
+        let _entered = self.components.runtime.enter();
+        let mut dispatch = EventDispatch {
+            deliver: Some(&mut deliver),
+            entered: false,
+            emit_start: self.components.runtime.emits_len(),
+        };
+        let handled = self.dispatch_event(id, kind, payload, &mut dispatch);
+        self.drain_component_emits(&mut dispatch);
+        if !handled && !dispatch.stopped() {
+            dispatch.entered =
+                dispatch.deliver.as_mut().unwrap()(JsEvent::Event(id, kind, payload.clone()));
+        }
+        dispatch.entered
+    }
+
+    fn drain_component_emits(&mut self, dispatch: &mut EventDispatch<'_>) {
         loop {
-            let emits = self.components.runtime.take_emits();
+            let emits = self
+                .components
+                .runtime
+                .take_emits_since(dispatch.emit_start);
             if emits.is_empty() {
                 break;
             }
             for (host, event) in emits {
-                self.route_emit(host, event);
+                if !dispatch.stopped() {
+                    self.route_emit_in(host, event, dispatch);
+                }
             }
         }
-        handled
     }
 
-    fn dispatch_event(&mut self, id: NodeId, kind: EventKind, payload: &EventPayload) -> bool {
+    fn dispatch_event(
+        &mut self,
+        id: NodeId,
+        kind: EventKind,
+        payload: &EventPayload,
+        dispatch: &mut EventDispatch<'_>,
+    ) -> bool {
         // Touches come on the root with the listening nodes around each
         // finger: the components hear theirs, JS its own.
         if kind == EventKind::Touch && id == ROOT_ID {
             if let EventPayload::Touch(touch) = payload {
-                self.touches(payload, touch);
+                self.touches(payload, touch, dispatch);
             }
             return false;
         }
-        if self.platform_event(id, kind, payload) {
+        if self.platform_event(id, kind, payload, dispatch) {
             return true;
         }
         if self.is_host(id) {
             // The component whose view makes the host's node handles them.
             let base = self.base_of(id);
-            return self.handle(base, base, kind, payload);
+            return self.handle(base, base, kind, payload, dispatch);
         }
         // A component's own list reports its viewable rows as they settle.
         if kind == EventKind::ViewableItemsChanged
             && self.components.virtual_lists.contains_key(&id)
         {
-            self.viewable_changed(id, payload);
+            self.viewable_changed(id, payload, dispatch);
             return true;
         }
         // A slot's node: the component it is a slot of handles its events,
@@ -4028,12 +4105,13 @@ impl<M: TextEngine> Core<M> {
         let slot_of = self.components.slot_hosts.get(&id).copied();
         let owner = self.components.owners.get(&id).copied();
         if let Some(host) = slot_of {
-            self.handle(host, id, kind, payload);
+            self.handle(host, id, kind, payload, dispatch);
         }
         if let Some(host) = owner
             && Some(host) != slot_of
+            && !dispatch.stopped()
         {
-            self.handle(host, id, kind, payload);
+            self.handle(host, id, kind, payload, dispatch);
         }
         // The core's nodes (odd ids) are the components': JS does not know
         // them.
@@ -4059,13 +4137,16 @@ impl<M: TextEngine> Core<M> {
         id: NodeId,
         kind: EventKind,
         payload: &EventPayload,
+        dispatch: &mut EventDispatch<'_>,
     ) -> bool {
         let mut handled = false;
         let mut from = 0;
-        while let Some((at, listener)) = self.next_handler(host, id, kind, from) {
+        while !dispatch.stopped()
+            && let Some((at, listener)) = self.next_handler(host, id, kind, from)
+        {
             from = at + 1;
             // A listener may release the component: the rest go with it.
-            if !self.run_listener(host, &listener, payload) {
+            if !self.run_listener(host, &listener, payload, dispatch) {
                 break;
             }
             handled = true;
@@ -4115,14 +4196,32 @@ impl<M: TextEngine> Core<M> {
         host: NodeId,
         listener: &Listener<E>,
         event: &E,
+        dispatch: &mut EventDispatch<'_>,
     ) -> bool {
+        if dispatch.stopped() {
+            return false;
+        }
         let Some(owner) = self.state_owner(host) else {
             return false;
         };
+        let application = listener.enters_application();
         if let Err(message) = caught(|| listener.call(event)) {
             self.component_failed(owner, message);
         }
-        self.apply_actions();
+        if dispatch.deliver.is_none() {
+            self.apply_actions();
+        }
+        if application {
+            dispatch.application();
+            if dispatch.stopped() {
+                // The first callback's business events belong to its
+                // normal pump, not the remainder of this presented input.
+                dispatch.emit_start = self.components.runtime.emits_len();
+            }
+        }
+        if dispatch.deliver.is_some() {
+            self.drain_component_emits(dispatch);
+        }
         true
     }
 
@@ -4367,7 +4466,13 @@ impl<M: TextEngine> Core<M> {
 
     /// Events the components handle before anything else: dialog answers
     /// (theirs never reach JS), insets of screens and modals.
-    fn platform_event(&mut self, id: NodeId, kind: EventKind, payload: &EventPayload) -> bool {
+    fn platform_event(
+        &mut self,
+        id: NodeId,
+        kind: EventKind,
+        payload: &EventPayload,
+        dispatch: &mut EventDispatch<'_>,
+    ) -> bool {
         let number = |key: &str| match payload {
             EventPayload::Map(entries) => entries.iter().find_map(|(k, v)| match v {
                 crate::PayloadValue::Number(n) if *k == key => Some(*n),
@@ -4400,10 +4505,16 @@ impl<M: TextEngine> Core<M> {
                 let found = self.components.executor.keys.borrow().handler(binding);
                 // A binding removed since the platform matched it.
                 if let Some((text, handler)) = found {
+                    dispatch.application();
                     let result = caught(|| handler(&text));
-                    self.apply_actions();
+                    if dispatch.deliver.is_none() {
+                        self.apply_actions();
+                    }
                     if let Err(message) = result {
                         log::error!(target: "js", "a keyboard shortcut failed: {message}");
+                    }
+                    if dispatch.stopped() {
+                        dispatch.emit_start = self.components.runtime.emits_len();
                     }
                 }
                 true
@@ -4411,7 +4522,12 @@ impl<M: TextEngine> Core<M> {
             EventKind::BackPress if id == crate::ROOT_ID => {
                 let listeners = self.components.executor.back.borrow().newest_first();
                 for listener in listeners {
-                    if self.back_pressed(&listener) {
+                    dispatch.application();
+                    let handled = self.back_pressed(&listener, dispatch);
+                    if dispatch.stopped() {
+                        dispatch.emit_start = self.components.runtime.emits_len();
+                    }
+                    if handled || dispatch.stopped() {
                         return true;
                     }
                 }
@@ -4472,9 +4588,15 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// Runs a back listener: whether it handled the press.
-    fn back_pressed(&mut self, listener: &crate::ui::BackListener) -> bool {
+    fn back_pressed(
+        &mut self,
+        listener: &crate::ui::BackListener,
+        dispatch: &EventDispatch<'_>,
+    ) -> bool {
         let result = caught(|| listener());
-        self.apply_actions();
+        if dispatch.deliver.is_none() {
+            self.apply_actions();
+        }
         result.unwrap_or_else(|message| {
             log::error!(target: "js", "a back press listener failed: {message}");
             false
@@ -4580,31 +4702,48 @@ impl<M: TextEngine> Core<M> {
         host: NodeId,
         event: Box<dyn crate::ui::element::AnyEvent>,
     ) {
+        self.route_emit_in(host, event, &mut EventDispatch::default());
+    }
+
+    fn route_emit_in(
+        &mut self,
+        host: NodeId,
+        event: Box<dyn crate::ui::element::AnyEvent>,
+        dispatch: &mut EventDispatch<'_>,
+    ) {
         match self.components.owners.get(&host).copied() {
             Some(parent) => {
-                let Some(owner) = self.state_owner(parent) else {
-                    return;
-                };
                 // In order, found one at a time (no list per event).
                 let mut from = 0;
-                while let Some((at, listener)) =
-                    self.components.instances.get(&parent).and_then(|inst| {
-                        inst.event_handlers
-                            .iter()
-                            .enumerate()
-                            .skip(from)
-                            .find(|(_, (n, _))| *n == host)
-                            .map(|(at, (_, l))| (at, l.clone()))
-                    })
+                while !dispatch.stopped()
+                    && let Some((at, listener)) =
+                        self.components.instances.get(&parent).and_then(|inst| {
+                            inst.event_handlers
+                                .iter()
+                                .enumerate()
+                                .skip(from)
+                                .find(|(_, (n, _))| *n == host)
+                                .map(|(at, (_, l))| (at, l.clone()))
+                        })
                 {
                     from = at + 1;
-                    if let Err(message) = caught(|| listener.call(event.as_any())) {
-                        self.component_failed(owner, message);
+                    if !self.run_listener(parent, &listener, event.as_any(), dispatch) {
+                        break;
                     }
-                    self.apply_actions();
                 }
             }
-            None => self.events.push(JsEvent::Component { host, event }),
+            None => {
+                let event = JsEvent::Component { host, event };
+                match dispatch.deliver.as_mut() {
+                    Some(deliver) => {
+                        dispatch.entered = deliver(event);
+                        if dispatch.stopped() {
+                            dispatch.emit_start = self.components.runtime.emits_len();
+                        }
+                    }
+                    None => self.events.push(event),
+                }
+            }
         }
     }
 }

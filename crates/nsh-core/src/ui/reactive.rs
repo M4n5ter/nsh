@@ -309,6 +309,17 @@ impl Runtime {
         std::mem::take(&mut graph().data.emits)
     }
 
+    /// The prefix belonging to work queued before a presented input.
+    pub(crate) fn emits_len(&self) -> usize {
+        let _entered = self.enter();
+        graph().data.emits.len()
+    }
+
+    pub(crate) fn take_emits_since(&self, start: usize) -> Vec<super::once::Emitted> {
+        let _entered = self.enter();
+        graph().data.emits.split_off(start)
+    }
+
     /// The graph's slots in use.
     #[cfg(test)]
     pub(crate) fn slots_in_use(&self) -> usize {

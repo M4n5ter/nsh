@@ -23,19 +23,43 @@ use crate::{
 pub struct Listener<E: ?Sized> {
     f: Rc<dyn Fn(&E)>,
     owner: super::Owner,
+    application: bool,
 }
 
 impl<E: ?Sized + 'static> Listener<E> {
     /// A listener that does nothing (the element still listens).
     pub(crate) fn noop() -> Self {
-        Self::new(Rc::new(|_| {}))
+        let mut listener = Self::new(Rc::new(|_| {}));
+        listener.application = false;
+        listener
     }
 
     fn new(f: Rc<dyn Fn(&E)>) -> Self {
         Self {
             f,
             owner: super::Owner::current_or_detached(),
+            application: true,
         }
+    }
+
+    pub(super) fn forward(host: NodeId, event: Rc<dyn AnyEvent>) -> Listener<()> {
+        let name = event.name();
+        let mut listener = Listener::new(Rc::new(move |_: &()| {
+            super::reactive::emit(
+                host,
+                Box::new(SharedEvent {
+                    event: event.clone(),
+                    name,
+                }),
+            );
+        }));
+        listener.application = false;
+        listener
+    }
+
+    /// Whether calling this live listener enters arbitrary application code.
+    pub(crate) fn enters_application(&self) -> bool {
+        self.application && (self.owner == super::Owner::detached() || self.owner.is_live())
     }
 
     /// Calls it with `event`, under its owner; not once that owner is
@@ -55,6 +79,7 @@ impl<E: ?Sized + 'static> Listener<E> {
         Listener {
             f: Rc::new(move |event: &F| f(&*inner, event)),
             owner: self.owner,
+            application: self.application,
         }
     }
 }
@@ -62,7 +87,9 @@ impl<E: ?Sized + 'static> Listener<E> {
 impl<E: 'static> Listener<E> {
     /// This listener for events of another type, turned into `E` by `f`.
     pub fn map<F: ?Sized + 'static>(self, f: impl Fn(&F) -> E + 'static) -> Listener<F> {
-        self.wrap(move |inner, event: &F| inner(&f(event)))
+        let mut listener = self.wrap(move |inner, event: &F| inner(&f(event)));
+        listener.application = true;
+        listener
     }
 }
 
@@ -121,6 +148,7 @@ impl<E: ?Sized> Clone for Listener<E> {
         Self {
             f: self.f.clone(),
             owner: self.owner,
+            application: self.application,
         }
     }
 }
@@ -144,6 +172,28 @@ impl<E: Event> super::EventToJs for E {
 impl<E: Event> AnyEvent for E {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// A closed forwarder shares the original event without invoking its `Clone`.
+struct SharedEvent {
+    event: Rc<dyn AnyEvent>,
+    name: &'static str,
+}
+
+impl super::EventToJs for SharedEvent {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn data_js<'a>(&self, host: &'a dyn super::JsHost) -> Result<super::JsOwned<'a>, PropError> {
+        self.event.data_js(host)
+    }
+}
+
+impl AnyEvent for SharedEvent {
+    fn as_any(&self) -> &dyn Any {
+        self.event.as_any()
     }
 }
 

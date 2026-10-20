@@ -99,7 +99,7 @@ struct NodeData {
     /// The children in order (owned objects).
     children: Vec<JsValue>,
     /// Event handlers (owned).
-    handlers: Vec<(EventKind, JsValue)>,
+    handlers: Vec<Handler>,
     /// Touch and responder handlers, by `touch::TOUCH_PROPS` index (owned).
     touch: Vec<(u8, JsValue)>,
     /// Has a `panActivation`: becomes the responder when the platform
@@ -118,6 +118,13 @@ struct NodeData {
     places: bool,
     /// The node's object (not owned: the data goes with it).
     object: JsValue,
+}
+
+struct Handler {
+    event: EventKind,
+    value: JsValue,
+    /// Only the native component adapter knows which props it can read.
+    component_events: Option<Box<[&'static str]>>,
 }
 
 /// The renderer of `ctx`.
@@ -756,6 +763,26 @@ pub(crate) fn set_handler(
     set_event(ctx, p, event, f)
 }
 
+/// Installs a Rust component's adapter with the event props bound to it.
+pub(crate) fn set_component_handler(
+    ctx: *mut JsContext,
+    id: NodeId,
+    f: JsValue,
+    events: Box<[&'static str]>,
+) -> Result<(), JsValue> {
+    set_handler(ctx, id, EventKind::NativeEvent, f)?;
+    let p = dom(ctx).by_id(id);
+    if !p.is_null()
+        // SAFETY: live node data; only the installed adapter is changed.
+        && let Some(handler) = unsafe { &mut (*p).handlers }
+            .iter_mut()
+            .find(|h| h.event == EventKind::NativeEvent)
+    {
+        handler.component_events = Some(events);
+    }
+    Ok(())
+}
+
 /// Inserts `value` into `parent` before `marker` (as `insert`).
 pub(crate) fn insert_value_at(
     ctx: *mut JsContext,
@@ -821,9 +848,9 @@ unsafe extern "C" fn node_finalize(rt: *mut qjs::JSRuntime, obj: JsValue) {
             && let Some(i) = data
                 .handlers
                 .iter()
-                .position(|&(e, _)| e == EventKind::Dismiss)
+                .position(|h| h.event == EventKind::Dismiss)
         {
-            let (_, handler) = data.handlers.swap_remove(i);
+            let handler = data.handlers.swap_remove(i).value;
             let oldest = {
                 let mut dismissed = d.dismissed.borrow_mut();
                 dismissed.push((data.id, handler));
@@ -842,7 +869,7 @@ unsafe extern "C" fn node_finalize(rt: *mut qjs::JSRuntime, obj: JsValue) {
     for v in data
         .handlers
         .into_iter()
-        .map(|(_, v)| v)
+        .map(|h| h.value)
         .chain(data.touch.into_iter().map(|(_, v)| v))
         .chain(data.retained.into_iter().map(|(_, v)| v))
     {
@@ -861,8 +888,8 @@ unsafe extern "C" fn node_mark(rt: *mut qjs::JSRuntime, obj: JsValue, mark: qjs:
     for &v in &data.children {
         unsafe { qjs::JS_MarkValue(rt, v, mark) };
     }
-    for &(_, v) in &data.handlers {
-        unsafe { qjs::JS_MarkValue(rt, v, mark) };
+    for handler in &data.handlers {
+        unsafe { qjs::JS_MarkValue(rt, handler.value, mark) };
     }
     for v in data
         .touch
@@ -1299,12 +1326,19 @@ fn set_event(
     let handler =
         unsafe { qjs::JS_IsFunction(ctx, value) }.then(|| unsafe { qjs::JS_DupValue(ctx, value) });
     let handlers = unsafe { &mut (*p).handlers };
-    let at = handlers.iter().position(|&(e, _)| e == event);
+    let at = handlers.iter().position(|h| h.event == event);
     let (was, old) = match (at, handler) {
-        (Some(i), Some(h)) => (true, Some(std::mem::replace(&mut handlers[i].1, h))),
-        (Some(i), None) => (true, Some(handlers.remove(i).1)),
+        (Some(i), Some(h)) => {
+            handlers[i].component_events = None;
+            (true, Some(std::mem::replace(&mut handlers[i].value, h)))
+        }
+        (Some(i), None) => (true, Some(handlers.remove(i).value)),
         (None, Some(h)) => {
-            handlers.push((event, h));
+            handlers.push(Handler {
+                event,
+                value: h,
+                component_events: None,
+            });
             (false, None)
         }
         (None, None) => (false, None),
@@ -3044,8 +3078,27 @@ pub(crate) fn handler(ctx: *mut JsContext, id: NodeId, event: EventKind) -> Opti
     // SAFETY: live node data; a dup of the handler.
     unsafe { &(*p).handlers }
         .iter()
-        .find(|&&(e, _)| e == event)
-        .map(|&(_, h)| unsafe { qjs::JS_DupValue(ctx, h) })
+        .find(|h| h.event == event)
+        .map(|h| unsafe { qjs::JS_DupValue(ctx, h.value) })
+}
+
+/// Selects a component event before converting its data or reading props.
+/// An opaque handler may run app code for any event.
+pub(crate) fn component_handler(ctx: *mut JsContext, id: NodeId, name: &str) -> Option<JsValue> {
+    let p = dom(ctx).by_id(id);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: live node data; a dup of the selected handler.
+    let handler = unsafe { &(*p).handlers }
+        .iter()
+        .find(|h| h.event == EventKind::NativeEvent)?;
+    if let Some(events) = &handler.component_events
+        && !events.contains(&name)
+    {
+        return None;
+    }
+    Some(unsafe { qjs::JS_DupValue(ctx, handler.value) })
 }
 
 // --- The primitives as components -----------------------------------------------------
