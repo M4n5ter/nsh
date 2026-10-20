@@ -20,7 +20,7 @@ On top of `nsh`, each platform needs its own tools:
 | Linux | Linux | GTK 4.14+ (and its development packages to build the runtime) |
 | [GPUI](./gpui.md) | macOS, Windows or Linux, for that OS | A GPU (Metal, DirectX or Vulkan); on Linux, Wayland or X11 |
 
-Mac Catalyst, `nsh run`'s default on macOS, needs Xcode like iOS. Details are under [Platform tools](#platform-tools).
+The AppKit host is the default on macOS. Mac Catalyst (`--target catalyst`) needs Xcode like iOS. Details are under [Platform tools](#platform-tools).
 
 ## Installing a release
 
@@ -184,8 +184,8 @@ Building the Android runtime from a checkout (`cargo xtask android`) additionall
 
 | Command | macOS | Linux | Windows |
 |---|---|---|---|
-| `nsh init`, `nsh build`, `nsh trace`, `nsh dev`, `nsh check` | Yes | Yes | Yes |
-| `nsh run` (Mac Catalyst, the default on macOS) | Yes | No | No |
+| `nsh init`, `nsh build`, `nsh test`, `nsh dev`, `nsh check` | Yes | Yes | Yes |
+| `nsh run --target catalyst` (Mac Catalyst) | Yes | No | No |
 | `nsh run --target macos`, `nsh package --target macos` | Yes | No | No |
 | `nsh run --target linux` (the default on Linux), `nsh package --target linux` | No | Yes | No |
 | `nsh run --target windows` (the default on Windows), `nsh package --target windows` | No | No | Yes |

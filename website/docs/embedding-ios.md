@@ -27,8 +27,8 @@ nsh run my-app --target ios --device "iPhone 16 Pro"
 
 `nsh` uses a booted simulator, or boots the newest iPhone, installs the development host into it and keeps the app up
 to date as you save, with logs in the terminal. `--device` picks a simulator by name or UDID. For a quicker loop
-without a simulator, plain `nsh run` on a Mac opens the same UIKit backend in an iPhone-sized
-[Mac Catalyst](./getting-started.md#mac-catalyst-default-on-macos) window.
+without a simulator, `nsh run --target catalyst` on a Mac opens the same UIKit backend in an iPhone-sized
+[Mac Catalyst](./getting-started.md#mac-catalyst) window.
 
 ## Packaging
 
@@ -130,7 +130,7 @@ final class EmbedController: UIViewController {
         }
     }
 
-    // Let the embedded app's StatusBar decide the status bar.
+    // Let the embedded app's pages and dialogs decide the status bar.
     override var preferredStatusBarStyle: UIStatusBarStyle { NshAppView.preferredStatusBarStyle }
     override var prefersStatusBarHidden: Bool { NshAppView.prefersStatusBarHidden }
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
@@ -162,7 +162,7 @@ The complete sample, a UIKit app that shows an NSH app below its own native head
 | `loadPackage(at:trust:) async throws -> NshPackage.Info` | Verifies the package at a URL off the main thread, then runs it. Throws why it was refused; the running app stays. |
 | `connectDevServer(_ url: URL) throws` | Development: loads from a `nsh dev` server and reloads on every change. Throws with `NativeShell.xcframework`, which has no development support. |
 | `register(component:_:)` | Registers a [native component](./native-components.md). |
-| `static preferredStatusBarStyle`, `prefersStatusBarHidden`, `preferredStatusBarUpdateAnimation` | What the running apps asked for with `StatusBar`: return them from the hosting view controller's overrides. |
+| `static preferredStatusBarStyle`, `prefersStatusBarHidden`, `preferredStatusBarUpdateAnimation` | What the running apps asked for (their pages' and dialogs' `statusBar`, `nsh.json`'s default): return them from the hosting view controller's overrides. |
 
 > [!IMPORTANT]
 > `bundle.nshc` (bytecode) loads only from inside the app bundle. QuickJS does not validate bytecode, so bytecode from
@@ -277,9 +277,9 @@ updates the app in place, logs appear in the `nsh dev` terminal, and errors show
 
 - **Threads.** `NshAppView` is main-actor isolated. `NshTrust`, `NshPackage` and `NshComponentContext` are thread-safe.
   The JS engine runs on its own thread; the main thread never waits for it.
-- **Status bar.** The embedded app's `StatusBar` changes what `NshAppView.preferredStatusBarStyle` and friends return;
+- **Status bar.** The embedded app's pages and dialogs (`statusBar`) change what `NshAppView.preferredStatusBarStyle` and friends return;
   the hosting view controller must forward them, as in the example above.
-- **Safe area.** Apps use `SafeAreaView` or `useSafeAreaInsets()` from [`nsh/ui/mobile`](../components/safe-area-view.md)
+- **Safe area.** Apps use `SafeAreaView` or `safeAreaInsets()` from [`nsh/base`](../modules/nsh-base.md#safeareaview)
   as usual. An `NshAppView` placed below your own header gets the insets that apply to it, not the window's.
 - **Mac Catalyst.** The same framework works in Catalyst apps.
 

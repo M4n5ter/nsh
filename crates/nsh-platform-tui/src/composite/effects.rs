@@ -4,7 +4,7 @@
 //! into translucent edges. A bounded working grid and a separable Gaussian
 //! keep large layers and radii from making the terminal worker unbounded.
 
-use nsh_core::{Color, Filter};
+use nsh_core::{Color, Filter, Points};
 
 use crate::image::Raster;
 
@@ -71,12 +71,12 @@ fn dimensions(raster: &Raster) -> Option<(usize, usize)> {
     (w != 0 && h != 0 && w.checked_mul(h)?.checked_mul(4)? == raster.rgba.len()).then_some((w, h))
 }
 
-fn scaled(length: f32, scale: f32) -> Option<f32> {
+fn scaled(length: Points, scale: f32) -> Option<f32> {
     if !length.is_finite() || !scale.is_finite() || scale < 0.0 {
         return None;
     }
     Some(
-        (f64::from(length) * f64::from(scale)).clamp(-f64::from(f32::MAX), f64::from(f32::MAX))
+        (f64::from(length.0) * f64::from(scale)).clamp(-f64::from(f32::MAX), f64::from(f32::MAX))
             as f32,
     )
 }
@@ -336,12 +336,12 @@ mod tests {
         let mut after = before.clone();
         apply(
             &mut before,
-            &[Filter::Brightness(2.0), Filter::Blur(1.0)],
+            &[Filter::Brightness(2.0), Filter::Blur(Points(1.0))],
             1.0,
         );
         apply(
             &mut after,
-            &[Filter::Blur(1.0), Filter::Brightness(2.0)],
+            &[Filter::Blur(Points(1.0)), Filter::Brightness(2.0)],
             1.0,
         );
         assert_eq!(&before.rgba[160..164], &[41, 0, 0, 255]);
@@ -354,9 +354,9 @@ mod tests {
         apply(
             &mut image,
             &[Filter::DropShadow {
-                offset_x: 0.5,
-                offset_y: 0.0,
-                blur: 0.0,
+                offset_x: Points(0.5),
+                offset_y: Points(0.0),
+                blur: Points(0.0),
                 color: Color::rgba(0, 0, 255, 128),
             }],
             2.0,
@@ -370,9 +370,9 @@ mod tests {
         apply(
             &mut image,
             &[Filter::DropShadow {
-                offset_x: 1.0,
-                offset_y: 0.0,
-                blur: 2.0,
+                offset_x: Points(1.0),
+                offset_y: Points(0.0),
+                blur: Points(2.0),
                 color: Color::rgba(0, 0, 255, 255),
             }],
             1.0,
@@ -386,8 +386,8 @@ mod tests {
     fn large_radii_are_bounded_and_invalid_spatial_values_are_ignored() {
         let mut image = raster(1, &[[255, 0, 0, 255]]);
         let original = image.rgba.clone();
-        apply(&mut image, &[Filter::Blur(f32::NAN)], 1.0);
-        apply(&mut image, &[Filter::Blur(1.0)], f32::INFINITY);
+        apply(&mut image, &[Filter::Blur(Points(f32::NAN))], 1.0);
+        apply(&mut image, &[Filter::Blur(Points(1.0))], f32::INFINITY);
         blur(&mut image, 0.0);
         assert_eq!(image.rgba, original);
         let field = Field::blurred(&image, f64::from(f32::MAX));

@@ -3,7 +3,10 @@
 
 use std::cell::RefCell;
 
-use nsh_core::{Matrix, NodeId, Rect, TransformKind, ViewKind};
+use nsh_core::{
+    Bounds, Matrix, NodeId, Point, Points, Size, TransformKind, ViewKind,
+    geometry::{REM_SIZE, Radians, px},
+};
 
 use crate::surface::Surface;
 
@@ -106,20 +109,30 @@ impl Surface {
             let frame = self.presentation_frame(current)?;
             let style = self.animated_style(current);
             let origin = (
-                style.transform_origin.x.resolve(frame.width),
-                style.transform_origin.y.resolve(frame.height),
+                style
+                    .transform_origin
+                    .x
+                    .to_points(frame.size.width.into(), REM_SIZE)
+                    .0,
+                style
+                    .transform_origin
+                    .y
+                    .to_points(frame.size.height.into(), REM_SIZE)
+                    .0,
             );
             let mut transform = style.transform.matrix(|_| None);
             if let Some(motion) = &node.motion {
                 let extra = motion.appearance(self.now).1;
                 if extra.shift_y_fraction != 0.0 {
-                    transform =
-                        transform.mul(&translate(0.0, extra.shift_y_fraction * frame.height));
+                    transform = transform.mul(&translate(
+                        0.0,
+                        extra.shift_y_fraction * frame.size.height.0,
+                    ));
                 }
-                if extra.rotate_degrees != 0.0 {
+                if extra.rotate != Radians::ZERO {
                     transform = transform.mul(&Matrix::of(
                         TransformKind::Rotate,
-                        extra.rotate_degrees as f64,
+                        extra.rotate.to_degrees() as f64,
                     ));
                 }
                 if extra.scale != 1.0 {
@@ -129,7 +142,10 @@ impl Surface {
             }
             let step = translate(-origin.0, -origin.1)
                 .mul(&transform)
-                .mul(&translate(origin.0 + frame.x, origin.1 + frame.y));
+                .mul(&translate(
+                    origin.0 + frame.origin.x.0,
+                    origin.1 + frame.origin.y.0,
+                ));
             result = result.mul(&step);
             if node.kind == ViewKind::Modal {
                 break;
@@ -145,32 +161,34 @@ impl Surface {
                 .find(|sticky| sticky.cell == current)
                 .map(|sticky| {
                     let offset = if parent.scroll.horizontal {
-                        parent.scroll.x
+                        parent.scroll.x.0
                     } else {
-                        parent.scroll.y
+                        parent.scroll.y.0
                     };
-                    (offset - sticky.start * zoom)
-                        .clamp(0.0, ((sticky.end - sticky.start) * zoom).max(0.0))
+                    (offset - sticky.start.0 * zoom)
+                        .clamp(0.0, ((sticky.end.0 - sticky.start.0) * zoom).max(0.0))
                 })
                 .unwrap_or(0.0);
             if zoom != 1.0 {
                 result = result.mul(&Matrix::of(TransformKind::Scale, zoom as f64));
             }
             let mirror = if parent.scroll.mirrored {
-                parent_frame.width - 2.0 * frame.x * zoom - frame.width * zoom
-                    + 2.0 * parent.scroll.x
+                parent_frame.size.width.0
+                    - 2.0 * frame.origin.x.0 * zoom
+                    - frame.size.width.0 * zoom
+                    + 2.0 * parent.scroll.x.0
             } else {
                 0.0
             };
             result = result.mul(&translate(
-                center_x - parent.scroll.x
+                center_x - parent.scroll.x.0
                     + mirror
                     + if parent.scroll.horizontal {
                         sticky
                     } else {
                         0.0
                     },
-                center_y - parent.scroll.y
+                center_y - parent.scroll.y.0
                     + if parent.scroll.horizontal {
                         0.0
                     } else {
@@ -182,14 +200,14 @@ impl Surface {
         Some(result)
     }
 
-    pub(crate) fn global_frame(&self, id: NodeId) -> Option<Rect> {
+    pub(crate) fn global_frame(&self, id: NodeId) -> Option<Bounds<Points>> {
         let frame = self.presentation_frame(id)?;
         let transform = self.local_to_surface(id)?;
         let points = [
             (0.0, 0.0),
-            (frame.width, 0.0),
-            (0.0, frame.height),
-            (frame.width, frame.height),
+            (frame.size.width.0, 0.0),
+            (0.0, frame.size.height.0),
+            (frame.size.width.0, frame.size.height.0),
         ];
         let mut bounds = (
             f32::INFINITY,
@@ -206,12 +224,10 @@ impl Surface {
                 bounds.3.max(y),
             );
         }
-        Some(Rect {
-            x: bounds.0,
-            y: bounds.1,
-            width: bounds.2 - bounds.0,
-            height: bounds.3 - bounds.1,
-        })
+        Some(Bounds::new(
+            Point::new(px(bounds.0), px(bounds.1)),
+            Size::new(px(bounds.2 - bounds.0), px(bounds.3 - bounds.1)),
+        ))
     }
 
     pub(crate) fn surface_to_local(&self, id: NodeId, x: f32, y: f32) -> Option<(f32, f32)> {
@@ -242,33 +258,23 @@ mod tests {
                 },
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        x: 8.0,
-                        y: 0.0,
-                        width: 16.0,
-                        height: 16.0,
-                    },
+                    frame: Bounds::new(Point::new(px(8.0), px(0.0)), Size::new(px(16.0), px(16.0))),
                 },
             ],
         });
         {
             let _pass = GeometryCache::begin(&surface.geometry);
-            assert_eq!(surface.global_frame(2).unwrap().x, 8.0);
+            assert_eq!(surface.global_frame(2).unwrap().origin.x.0, 8.0);
         }
         surface.apply(MountBatch {
             items: vec![MountItem::Frame {
                 id: 2,
-                frame: Rect {
-                    x: 24.0,
-                    y: 0.0,
-                    width: 16.0,
-                    height: 16.0,
-                },
+                frame: Bounds::new(Point::new(px(24.0), px(0.0)), Size::new(px(16.0), px(16.0))),
             }],
         });
-        assert_eq!(surface.global_frame(2).unwrap().x, 24.0);
+        assert_eq!(surface.global_frame(2).unwrap().origin.x.0, 24.0);
         let _pass = GeometryCache::begin(&surface.geometry);
-        assert_eq!(surface.global_frame(2).unwrap().x, 24.0);
+        assert_eq!(surface.global_frame(2).unwrap().origin.x.0, 24.0);
     }
 
     #[test]
@@ -310,21 +316,17 @@ mod tests {
                 },
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        x: 40.0,
-                        y: 40.0,
-                        width: 100.0,
-                        height: 100.0,
-                    },
+                    frame: Bounds::new(
+                        Point::new(px(40.0), px(40.0)),
+                        Size::new(px(100.0), px(100.0)),
+                    ),
                 },
                 MountItem::Frame {
                     id: 4,
-                    frame: Rect {
-                        x: 20.0,
-                        y: 20.0,
-                        width: 20.0,
-                        height: 10.0,
-                    },
+                    frame: Bounds::new(
+                        Point::new(px(20.0), px(20.0)),
+                        Size::new(px(20.0), px(10.0)),
+                    ),
                 },
                 MountItem::ViewStyle {
                     id: 2,
@@ -337,8 +339,8 @@ mod tests {
             ],
         });
         let frame = surface.global_frame(4).unwrap();
-        assert!((frame.width - 20.0).abs() < 0.001);
-        assert!((frame.height - 10.0).abs() < 0.001);
+        assert!((frame.size.width.0 - 20.0).abs() < 0.001);
+        assert!((frame.size.height.0 - 10.0).abs() < 0.001);
         let center = project(&surface.local_to_surface(4).unwrap(), 10.0, 5.0).unwrap();
         assert_eq!(surface.hit_test(center.0, center.1), Some(4));
     }
@@ -347,16 +349,11 @@ mod tests {
     fn rounded_ancestor_mask_excludes_child_pointer_hits() {
         let style = ViewStyle {
             overflow_hidden: true,
-            border_radius: 32.0,
+            border_radius: px(32.0),
             ..ViewStyle::default()
         };
         let mut surface = Surface::new(10, 5, CellMetrics::default());
-        let frame = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 64.0,
-            height: 64.0,
-        };
+        let frame = Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(64.0), px(64.0)));
         surface.apply(MountBatch {
             items: vec![
                 MountItem::Create {

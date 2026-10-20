@@ -33,10 +33,11 @@ use rustc_hash::FxHashMap;
 pub use self::theme::{Theme, ThemeError};
 pub(crate) use self::utilities::{Decl, Len, Part};
 use self::{
-    theme::Tokens,
+    theme::ClassTokens,
     utilities::{Parts, touched},
 };
 use crate::{
+    geometry::{Points, Size},
     ops::ResizeMode,
     props::PointerEvents,
     style::{Color, EllipsizeMode, Style, TextShadow},
@@ -54,6 +55,14 @@ pub mod state {
     pub const DISABLED: u8 = 8;
     /// The view or a descendant has focus (`focus-within:`).
     pub const FOCUS_WITHIN: u8 = 16;
+    /// The view is selected (`selected:`): its
+    /// `accessibilityState.selected`, a `Button`'s `selected`. Set by the
+    /// core, never reported by the platform.
+    pub const SELECTED: u8 = 32;
+    /// The view is checked (`checked:`): its `accessibilityState.checked`
+    /// (a checkbox, a switch, a radio; not when mixed). Set by the core,
+    /// never reported by the platform.
+    pub const CHECKED: u8 = 64;
 }
 
 /// The view's place among its siblings (`first:`, `odd:`, ...).
@@ -117,19 +126,22 @@ pub struct ClassEnvironment {
     pub reduce_motion: bool,
 }
 
-/// What a node's classes are matched against.
-pub(crate) struct Context<'a> {
-    pub(crate) env: ClassEnvironment,
+/// What a node's classes are matched against: the core builds it per
+/// node; tools resolve classes outside a tree with one of their own.
+pub struct Context<'a> {
+    /// The appearance, platform and motion setting.
+    pub env: ClassEnvironment,
     /// The window (root view) size.
-    pub(crate) window: (f32, f32),
-    pub(crate) rtl: bool,
+    pub window: Size<Points>,
+    /// Right-to-left layout.
+    pub rtl: bool,
     /// [`state`] bits of the node.
-    pub(crate) states: u8,
+    pub states: u8,
     /// [`position`] bits of the node.
-    pub(crate) position: u8,
+    pub position: u8,
     /// [`state`] bits of the nearest ancestor group with this name (`""`
     /// for unnamed groups).
-    pub(crate) group: &'a dyn Fn(&str) -> u8,
+    pub group: &'a dyn Fn(&str) -> u8,
 }
 
 /// Conditions of one rule (all must hold).
@@ -152,6 +164,8 @@ pub(crate) struct Condition {
     position: u8,
     /// Applies to an input's placeholder.
     placeholder: bool,
+    /// Applies to the selection (and caret) of an input or selectable text.
+    selection: bool,
 }
 
 impl Condition {
@@ -162,11 +176,11 @@ impl Condition {
             || self
                 .reduce_motion
                 .is_some_and(|r| r != cx.env.reduce_motion)
-            || self.min_width.is_some_and(|w| cx.window.0 < w)
-            || self.max_width.is_some_and(|w| cx.window.0 >= w)
+            || self.min_width.is_some_and(|w| cx.window.width.0 < w)
+            || self.max_width.is_some_and(|w| cx.window.width.0 >= w)
             || self
                 .landscape
-                .is_some_and(|l| l != (cx.window.0 > cx.window.1))
+                .is_some_and(|l| l != (cx.window.width > cx.window.height))
             || cx.states & self.states != self.states
             || cx.states & self.not_states != 0
         {
@@ -181,6 +195,12 @@ impl Condition {
             return false;
         }
         true
+    }
+
+    /// Applies to a pseudo-element (`placeholder:`, `selection:`): only
+    /// its color is read.
+    fn pseudo(&self) -> bool {
+        self.placeholder || self.selection
     }
 
     /// Applies only while the view (or its group) is pressed, hovered or
@@ -245,6 +265,8 @@ pub(crate) mod rank {
     pub(crate) const FOCUS: u16 = 32;
     pub(crate) const ACTIVE: u16 = 33;
     pub(crate) const DISABLED: u16 = 35;
+    pub(crate) const SELECTED: u16 = 29;
+    pub(crate) const CHECKED: u16 = 28;
     pub(crate) const DARK: u16 = 80;
 }
 
@@ -262,6 +284,18 @@ impl Rule {
             important: false,
             theme: false,
         }
+    }
+
+    /// A state style (`activeStyle`, ...): `decls` while the node is in
+    /// `states` (and, unless `disabled`, not disabled), applied over the
+    /// inline style as `!` utilities are, ordered by `rank`.
+    pub(crate) fn state_style(states: u8, rank: u16, decls: Vec<crate::StyleDecl>) -> Self {
+        let mut rule = Self::new(states, rank, decls.into_iter().map(Decl::Style).collect());
+        if states & state::DISABLED == 0 {
+            rule.cond.not_states = state::DISABLED;
+        }
+        rule.important = true;
+        rule
     }
 
     /// [`Rule::new`], also requiring the nearest ancestor group `group`
@@ -297,6 +331,8 @@ pub struct ClassProps {
     pub selectable: Option<bool>,
     /// `placeholder:text-*` (inputs).
     pub placeholder_color: Option<Color>,
+    /// `selection:text-*` (inputs, selectable texts).
+    pub selection_color: Option<Color>,
     /// `caret-*` (inputs).
     pub caret_color: Option<Color>,
     /// `text-shadow-*` layers beyond the first (drawn as one shadow).
@@ -345,8 +381,10 @@ impl ClassList {
         self.rules.is_empty()
     }
 
-    /// Applies the matching rules to `style` and `props`.
-    pub(crate) fn apply(
+    /// Applies the rules matching `cx` to `style` and `props`, then
+    /// `inline` (the node's inline style, which only `!` utilities win
+    /// over).
+    pub fn apply(
         &self,
         cx: &Context<'_>,
         theme: &Theme,
@@ -357,7 +395,7 @@ impl ClassList {
         let mut parts = Parts::default();
         let mut important = false;
         for rule in &self.rules {
-            if rule.cond.placeholder || !rule.cond.matches(cx) {
+            if rule.cond.pseudo() || !rule.cond.matches(cx) {
                 continue;
             }
             for decl in &rule.decls {
@@ -372,7 +410,7 @@ impl ClassList {
         let mut state_background = false;
         let mut state_image = false;
         for rule in &self.rules {
-            if rule.cond.placeholder || !rule.cond.matches(cx) {
+            if rule.cond.pseudo() || !rule.cond.matches(cx) {
                 continue;
             }
             important |= rule.important;
@@ -392,14 +430,18 @@ impl ClassList {
             }
         }
         let state_color = style.view.background_color;
-        // `placeholder:` rules only carry a color.
-        for rule in self.rules.iter().filter(|r| r.cond.placeholder) {
+        // `placeholder:` and `selection:` rules only carry a color.
+        for rule in self.rules.iter().filter(|r| r.cond.pseudo()) {
             if !rule.cond.matches(cx) {
                 continue;
             }
             for decl in &rule.decls {
                 if let Some(c) = decl.text_color() {
-                    props.placeholder_color = Some(c);
+                    if rule.cond.placeholder {
+                        props.placeholder_color = Some(c);
+                    } else {
+                        props.selection_color = Some(c);
+                    }
                 }
             }
         }
@@ -415,7 +457,7 @@ impl ClassList {
             for rule in self
                 .rules
                 .iter()
-                .filter(|r| r.important && !r.cond.placeholder)
+                .filter(|r| r.important && !r.cond.pseudo())
             {
                 if rule.cond.matches(cx) {
                     for decl in &rule.decls {
@@ -450,7 +492,7 @@ impl ClassList {
 
     fn add(&mut self, rule: Rule) {
         self.deps |= rule.cond.deps();
-        self.tracked |= rule.cond.states & !state::DISABLED;
+        self.tracked |= rule.cond.states & !(state::DISABLED | state::SELECTED | state::CHECKED);
         if rule.cond.states & state::FOCUS_WITHIN != 0 {
             self.tracked |= state::FOCUS_WITHIN;
         }
@@ -499,12 +541,12 @@ impl Tailwind {
         self.cache.clear();
     }
 
-    /// Takes the tokens of component theme `theme`. Returns which classes
+    /// Takes design tokens `theme`. Returns which classes
     /// to resolve again: none ([`None`]) when the tokens did not change,
     /// those that name tokens ([`deps::THEME`]) when only their values
     /// did, else all (`u16::MAX`: unknown classes may name new ones).
-    pub(crate) fn set_tokens(&mut self, theme: &crate::ui::Theme) -> Option<u16> {
-        let tokens = Tokens::new(theme);
+    pub(crate) fn set_tokens(&mut self, theme: &crate::ui::Tokens) -> Option<u16> {
+        let tokens = ClassTokens::new(theme);
         let current = self.theme.tokens();
         if *current == tokens {
             return None;
@@ -729,6 +771,18 @@ fn variant(theme: &Theme, v: &str, cond: &mut Condition) -> Option<u16> {
             cond.placeholder = true;
             15
         }
+        "selection" => {
+            cond.selection = true;
+            16
+        }
+        "checked" => {
+            states(cond, CHECKED);
+            rank::CHECKED
+        }
+        "selected" => {
+            states(cond, SELECTED);
+            29
+        }
         "focus-within" => {
             states(cond, FOCUS_WITHIN);
             30
@@ -806,6 +860,8 @@ fn variant(theme: &Theme, v: &str, cond: &mut Condition) -> Option<u16> {
                     "focus" | "focus-visible" => FOCUSED,
                     "focus-within" => FOCUS_WITHIN,
                     "disabled" => DISABLED,
+                    "selected" => SELECTED,
+                    "checked" => CHECKED,
                     _ => return None,
                 };
                 let entry = cond.group.get_or_insert_with(|| (name.into(), 0));

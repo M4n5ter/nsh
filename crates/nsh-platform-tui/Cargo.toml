@@ -18,9 +18,8 @@ dev = ["js", "dep:nsh-dev"]
 
 [dependencies]
 nsh-core.workspace = true
-nsh-animation.workspace = true
 nsh-engine.workspace = true
-nsh-ui-mobile.workspace = true
+nsh-base.workspace = true
 nsh-dev = { workspace = true, features = ["client"], optional = true }
 ratatui.workspace = true
 ratatui-image.workspace = true

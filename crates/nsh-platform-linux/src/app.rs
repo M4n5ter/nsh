@@ -9,7 +9,10 @@ use std::{
 };
 
 use gtk4::{self as gtk, glib, prelude::*};
-use nsh_core::platform::{Appearance, Locale};
+use nsh_core::{
+    geometry::px,
+    platform::{Appearance, Locale},
+};
 use nsh_engine::{App, Bundle, ColorScheme, EngineConfig, Environment, Idiom, Limits, Os, Root};
 
 use crate::{
@@ -19,7 +22,7 @@ use crate::{
 
 static UI_SETS: RwLock<Option<Vec<nsh_core::ui::Registry>>> = RwLock::new(None);
 
-/// Sets the UI sets every engine serves (default: `nsh/ui/mobile`); an app
+/// Sets the UI sets every engine serves (default: `nsh/base`); an app
 /// with Rust components of its own calls this before [`run_app`].
 pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
     *UI_SETS.write().unwrap_or_else(|e| e.into_inner()) = Some(sets);
@@ -31,11 +34,15 @@ pub(crate) fn ui_sets() -> Vec<nsh_core::ui::Registry> {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
-        .unwrap_or_else(|| vec![nsh_ui_mobile::registry()])
+        .unwrap_or_else(|| vec![nsh_base::registry()])
 }
 
 /// What [`run_app`] runs.
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one source per view; keep the public constructor API without allocation"
+)]
 pub enum AppSource {
     /// A Rust app: its root component.
     Rust(Root),
@@ -204,17 +211,21 @@ impl AppView {
         let options = self.options.borrow();
         let config = EngineConfig {
             app,
-            viewport: nsh_core::Size::new(0.0, 0.0),
+            viewport: nsh_core::Size::new(px(0.0), px(0.0)),
             trace: options.trace,
             network: Some(crate::net::network()),
+            websocket: None,
+            filesystem: None,
             assets: Some(Arc::new(AssetReader(options.asset_base.clone()))),
             environment: self.surface.environment.get(),
-            header_heights: crate::navigation::HEADER_HEIGHTS,
+            // NSH draws no header: a page's `header` sits at its top.
+            header_heights: nsh_core::NO_NATIVE_HEADER,
             limits: options.limits,
             ui_sets: ui_sets(),
             runtime: None,
             data_dir: options.data_dir.clone().or_else(nsh_engine::data_dir),
             storage: options.storage.clone(),
+            clock: Default::default(),
         };
         crate::image::set_asset_base(&self.surface, options.asset_base.clone());
         self.surface
@@ -279,7 +290,7 @@ impl AppView {
 
 fn initial_environment() -> Environment {
     Environment {
-        window: (0.0, 0.0),
+        window: nsh_core::Size::new(nsh_core::geometry::px(0.0), nsh_core::geometry::px(0.0)),
         color_scheme: ColorScheme::Light,
         os: Os::Linux,
         idiom: Idiom::Desktop,

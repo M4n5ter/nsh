@@ -17,8 +17,8 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use nsh_core::{
-    AccessibilityActionDef, AccessibilityRole, AccessibilityState, AccessibilityValue, EventKind,
-    EventPayload, NodeId, PayloadValue, ROOT_ID, Rect, ViewKind,
+    AccessibilityActionDef, AccessibilityRole, AccessibilityState, AccessibilityValue, Bounds,
+    EventKind, EventPayload, NodeId, PayloadValue, Point, Points, ROOT_ID, ViewKind,
     access::Access,
     desktop::{DesktopCommand, MenuAction, MenuItem, MenuRole, Shortcut},
 };
@@ -585,7 +585,7 @@ pub(crate) struct MenuPopup {
     items: Arc<[MenuItem]>,
     path: Vec<usize>,
     selected: usize,
-    at: Option<(f32, f32)>,
+    at: Option<Point<Points>>,
 }
 impl MenuPopup {
     fn items(&self) -> &[MenuItem] {
@@ -604,7 +604,7 @@ pub(crate) struct SurfaceServices {
     pub(crate) enabled: bool,
     menu: Option<Arc<[MenuItem]>>,
     popup: Option<MenuPopup>,
-    pointer: Option<(f32, f32)>,
+    pointer: Option<Point<Points>>,
 }
 
 /// One accessible element in paint/tree order, scoped to the active modal.
@@ -613,7 +613,7 @@ pub struct AccessibleNode {
     /// Mounted node identifier.
     pub id: NodeId,
     /// Shared point geometry.
-    pub frame: Rect,
+    pub frame: Bounds<Points>,
     /// Semantic role, independent of terminal glyphs.
     pub role: AccessibilityRole,
     /// Accessible label, with secure input content omitted.
@@ -888,9 +888,9 @@ impl Surface {
 
     pub(crate) fn service_event(&mut self, event: &Event) -> bool {
         if let Event::Mouse(mouse) = event {
-            self.services.pointer = Some((
-                (f32::from(mouse.column) + 0.5) * self.metrics.width(),
-                (f32::from(mouse.row) + 0.5) * self.metrics.height(),
+            self.services.pointer = Some(Point::new(
+                self.metrics.width() * (f32::from(mouse.column) + 0.5),
+                self.metrics.height() * (f32::from(mouse.row) + 0.5),
             ));
         }
         if self.dialog.is_some() {
@@ -1098,10 +1098,10 @@ impl Surface {
             .min(area.height);
         let (x, y) = popup
             .at
-            .map(|(x, y)| {
+            .map(|position| {
                 (
-                    (x / self.metrics.width()).max(0.0) as u16,
-                    (y / self.metrics.height()).max(0.0) as u16,
+                    (position.x / self.metrics.width()).max(0.0) as u16,
+                    (position.y / self.metrics.height()).max(0.0) as u16,
                 )
             })
             .unwrap_or((1, 1));
@@ -1403,12 +1403,16 @@ mod tests {
                 },
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 100.0,
-                        height: 32.0,
-                    },
+                    frame: Bounds::new(
+                        nsh_core::Point::new(
+                            nsh_core::geometry::px(0.0),
+                            nsh_core::geometry::px(0.0),
+                        ),
+                        nsh_core::Size::new(
+                            nsh_core::geometry::px(100.0),
+                            nsh_core::geometry::px(32.0),
+                        ),
+                    ),
                 },
                 MountItem::Input {
                     id: 2,
@@ -1442,12 +1446,16 @@ mod tests {
                 },
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 120.0,
-                        height: 32.0,
-                    },
+                    frame: Bounds::new(
+                        nsh_core::Point::new(
+                            nsh_core::geometry::px(0.0),
+                            nsh_core::geometry::px(0.0),
+                        ),
+                        nsh_core::Size::new(
+                            nsh_core::geometry::px(120.0),
+                            nsh_core::geometry::px(32.0),
+                        ),
+                    ),
                 },
                 MountItem::InputValue {
                     id: 2,

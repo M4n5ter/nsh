@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 pub use nsh_macros::HostProps;
 
-use crate::{EdgeInsets, EventKind, style::Color, ui::TsTypes};
+use crate::{EdgeInsets, EventKind, geometry::Points, style::Color, ui::TsTypes};
 
 /// A JS value as host props read it.
 pub trait HostInput: Sized {
@@ -42,10 +42,10 @@ pub trait HostInput: Sized {
     /// Truthy, as JS sees it.
     fn truthy(&self) -> bool;
     /// The native animation node this value is (`AnimatedNode.__av`).
-    fn animated_node(&self) -> Option<nsh_animation::NodeId> {
+    fn animated_node(&self) -> Option<crate::animation::NodeId> {
         self.field("__av")
             .and_then(|v| v.as_number())
-            .map(|n| n as nsh_animation::NodeId)
+            .map(|n| n as crate::animation::NodeId)
     }
 }
 
@@ -66,7 +66,7 @@ pub trait HostList {
 /// Where decoding reports what it could not take.
 #[derive(Debug, Default)]
 pub struct HostCx {
-    /// Warnings for the app's console (`unknown accessibilityRole`).
+    /// Warnings for the app's console (`unknown role`).
     pub warnings: Vec<String>,
 }
 
@@ -175,6 +175,12 @@ impl Clamped for f32 {
     }
 }
 
+impl Clamped for Points {
+    fn clamped(self, min: Option<f64>, max: Option<f64>) -> Self {
+        Points(self.0.clamped(min, max))
+    }
+}
+
 impl Clamped for u32 {
     fn clamped(self, min: Option<f64>, max: Option<f64>) -> Self {
         let v = min.map_or(self, |m| self.max(m as u32));
@@ -201,6 +207,17 @@ impl HostValue for bool {
 impl HostValue for f32 {
     fn decode<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Self> {
         input.as_number().map(|n| n as f32)
+    }
+
+    fn ts_type(_: &mut TsTypes) -> String {
+        "number".into()
+    }
+}
+
+/// A number of points.
+impl HostValue for Points {
+    fn decode<I: HostInput>(input: &I, cx: &mut HostCx) -> Option<Self> {
+        f32::decode(input, cx).map(Points)
     }
 
     fn ts_type(_: &mut TsTypes) -> String {
@@ -294,7 +311,7 @@ impl<T: HostValue> HostValue for Vec<T> {
 /// `{ top, right, bottom, left }` (each 0 when left out).
 impl HostValue for EdgeInsets {
     fn decode<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Self> {
-        let side = |key| input.field(key).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+        let side = |key| Points(input.field(key).and_then(|v| v.as_number()).unwrap_or(0.0) as f32);
         Some(EdgeInsets {
             top: side("top"),
             right: side("right"),
@@ -407,8 +424,8 @@ export interface WebViewNavigation {
 pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
     (EventKind::Press, on::ALL, "() => void", ""),
     (EventKind::LongPress, on::ALL, "() => void", ""),
-    (EventKind::PressIn, on::ALL, "() => void", ""),
-    (EventKind::PressOut, on::ALL, "() => void", ""),
+    (EventKind::PressDown, on::ALL, "() => void", ""),
+    (EventKind::PressUp, on::ALL, "() => void", ""),
     (
         EventKind::HoverIn,
         on::ALL,
@@ -617,7 +634,7 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         EventKind::ContentSizeChange,
         on::INPUT,
         "(e: { width: number; height: number }) => void",
-        "The size of the text (at the input's width when multiline): grow a multiline input with it.",
+        "The size of the text (at the input's width when `multiline`; one empty line's while it is empty, whatever its placeholder): grow a multiline input with it.",
     ),
     (
         EventKind::Message,
@@ -638,20 +655,6 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "(e: { isBuffering: boolean }) => void",
         "",
     ),
-    (
-        EventKind::BackRequest,
-        on::SCREEN,
-        "() => void",
-        "The user tried to leave a screen with `preventBack`.",
-    ),
-    (EventKind::Dismiss, on::SCREEN | on::MODAL, "() => void", ""),
-    (
-        EventKind::RequestClose,
-        on::MODAL,
-        "() => void",
-        "The user asked to close (Android back button, iOS sheet swipe): set `visible` to false to close it.",
-    ),
-    (EventKind::Show, on::MODAL, "() => void", ""),
 ];
 
 /// The events no element's props declare: the root's (`BackHandler`,
@@ -669,6 +672,13 @@ pub const INTERNAL_EVENTS: &[EventKind] = &[
     EventKind::KeyCommand,
     EventKind::Menu,
     EventKind::ViewableItemsChanged,
+    // `NavPage`'s `onDismiss` / `onBackPress` and `Dialog`'s `onClose` /
+    // `onCancel` / `onOpenChange` / `onOpen`: the navigation's handlers
+    // (`nsh-js` `navigation.rs`), declared with its components.
+    EventKind::BackRequest,
+    EventKind::Dismiss,
+    EventKind::RequestClose,
+    EventKind::Show,
 ];
 
 /// The interfaces of the host props, by the elements their props apply
@@ -685,8 +695,8 @@ const GROUPS: &[(u32, &str, &str)] = &[
     (on::SCROLL, "Scroll", "`<Scroll>`"),
     (on::LIST, "List", "lists"),
     (on::INPUT, "Input", "`<Input>`"),
-    (on::SCREEN, "Screen", "the screens of a stack"),
-    (on::MODAL, "Modal", "modals"),
+    (on::SCREEN, "NavPage", "the pages of a `NavStack`"),
+    (on::MODAL, "Dialog", "dialogs"),
     (on::WEBVIEW, "WebView", "web views"),
     (on::VIDEO, "Video", "videos"),
     (on::INPUT_ACCESSORY, "InputAccessory", "input accessories"),
@@ -739,7 +749,7 @@ pub fn declarations() -> String {
                 if !doc.is_empty() {
                     let _ = writeln!(out, "  /** {doc} */");
                 }
-                let _ = writeln!(out, "  {}?: {handler};", kind.prop_name());
+                let _ = writeln!(out, "  {}?: {handler};", kind.handler_name());
             }
             out.push_str("}\n");
         }

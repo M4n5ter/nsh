@@ -42,7 +42,7 @@ fn arguments(args: impl IntoIterator<Item = String>) -> io::Result<(AppSource, A
                 options.asset_base = path
                     .parent()
                     .map(|dir| AssetBase::Directory(dir.join("assets")));
-                source = Some(AppSource::Bundle(bundle));
+                source = Some(AppSource::Bundle(Box::new(bundle)));
             }
             "--trace" => options.trace = true,
             "--script" => options.script = Some(args.next().ok_or_else(missing)?),

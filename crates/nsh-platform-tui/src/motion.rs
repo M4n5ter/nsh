@@ -7,28 +7,29 @@
 use std::{borrow::Cow, sync::Arc};
 
 use nsh_core::{
-    BoxShadow, Color, KeyframeAnimation, Keyframes, LayoutCurve, LayoutProperty, LayoutTransition,
-    Rect, Transform, TransitionProps, ViewStyle,
+    Bounds, BoxShadow, Color, KeyframeAnimation, Keyframes, LayoutCurve, LayoutProperty,
+    LayoutTransition, Point, Points, Size, Transform, TransitionProps, ViewStyle,
+    geometry::{Radians, deg},
 };
 
 /// Values applied after a view's own transform, around its transform origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Extra {
-    pub(crate) rotate_degrees: f32,
+    pub(crate) rotate: Radians,
     pub(crate) scale: f32,
     pub(crate) shift_y_fraction: f32,
 }
 
 impl Extra {
     pub(crate) const NONE: Self = Self {
-        rotate_degrees: 0.0,
+        rotate: Radians::ZERO,
         scale: 1.0,
         shift_y_fraction: 0.0,
     };
 
     fn combine(self, other: Self) -> Self {
         Self {
-            rotate_degrees: self.rotate_degrees + other.rotate_degrees,
+            rotate: self.rotate + other.rotate,
             scale: self.scale * other.scale,
             shift_y_fraction: self.shift_y_fraction + other.shift_y_fraction,
         }
@@ -37,7 +38,7 @@ impl Extra {
 
 /// The values visible at one instant. An idle style is borrowed without copying.
 pub(crate) struct Presentation<'a> {
-    pub(crate) frame: Rect,
+    pub(crate) frame: Bounds<Points>,
     pub(crate) style: Cow<'a, ViewStyle>,
 }
 
@@ -56,12 +57,12 @@ impl NodeMotion {
     /// An absent transition stops any previous frame track immediately.
     pub(crate) fn frame_changed(
         &mut self,
-        from: Rect,
+        from: Bounds<Points>,
         transition: Option<&LayoutTransition>,
         now: f64,
     ) {
         self.frame = transition
-            .filter(|_| from != Rect::default())
+            .filter(|_| from != Bounds::default())
             .map(|transition| FrameTrack {
                 from,
                 timing: Timing::layout(transition, now),
@@ -177,9 +178,9 @@ impl NodeMotion {
     }
 
     /// Samples geometry without copying an interpolating style.
-    pub(crate) fn frame(&self, target: Rect, now: f64) -> Rect {
+    pub(crate) fn frame(&self, target: Bounds<Points>, now: f64) -> Bounds<Points> {
         self.frame.as_ref().map_or(target, |track| {
-            lerp_rect(track.from, target, track.timing.progress(now))
+            lerp_bounds(track.from, target, track.timing.progress(now))
         })
     }
 
@@ -209,7 +210,7 @@ impl NodeMotion {
     /// Samples without changing either layout targets or animation state.
     pub(crate) fn sample<'a>(
         &self,
-        target_frame: Rect,
+        target_frame: Bounds<Points>,
         target_style: &'a ViewStyle,
         now: f64,
     ) -> Presentation<'a> {
@@ -233,7 +234,7 @@ impl NodeMotion {
 }
 
 struct FrameTrack {
-    from: Rect,
+    from: Bounds<Points>,
     timing: Timing,
 }
 
@@ -281,7 +282,7 @@ impl KeyframeRun {
         let mut extra = Extra::NONE;
         let mut opacity = 1.0;
         match animation.keyframes {
-            Keyframes::Spin => extra.rotate_degrees = 360.0 * ease(fraction),
+            Keyframes::Spin => extra.rotate = deg(360.0 * ease(fraction)),
             Keyframes::Ping => {
                 let progress = if fraction < 0.75 {
                     ease(fraction / 0.75)
@@ -446,13 +447,21 @@ fn lerp(a: f32, b: f32, progress: f32) -> f32 {
     a + (b - a) * progress
 }
 
-fn lerp_rect(a: Rect, b: Rect, progress: f32) -> Rect {
-    Rect {
-        x: lerp(a.x, b.x, progress),
-        y: lerp(a.y, b.y, progress),
-        width: lerp(a.width, b.width, progress).max(0.0),
-        height: lerp(a.height, b.height, progress).max(0.0),
-    }
+fn lerp_points(a: Points, b: Points, progress: f32) -> Points {
+    a + (b - a) * progress
+}
+
+fn lerp_bounds(a: Bounds<Points>, b: Bounds<Points>, progress: f32) -> Bounds<Points> {
+    Bounds::new(
+        Point::new(
+            lerp_points(a.origin.x, b.origin.x, progress),
+            lerp_points(a.origin.y, b.origin.y, progress),
+        ),
+        Size::new(
+            lerp_points(a.size.width, b.size.width, progress).max(Points::ZERO),
+            lerp_points(a.size.height, b.size.height, progress).max(Points::ZERO),
+        ),
+    )
 }
 
 /// Premultiplication keeps a transparent endpoint from darkening a color.
@@ -504,10 +513,10 @@ fn box_shadows(style: &ViewStyle) -> &[BoxShadow] {
 
 fn lerp_box_shadows(a: &[BoxShadow], b: &[BoxShadow], progress: f32) -> Option<Vec<BoxShadow>> {
     let empty = |other: BoxShadow| BoxShadow {
-        offset_x: 0.0,
-        offset_y: 0.0,
-        blur: 0.0,
-        spread: 0.0,
+        offset_x: Points::ZERO,
+        offset_y: Points::ZERO,
+        blur: Points::ZERO,
+        spread: Points::ZERO,
         color: Color::TRANSPARENT,
         inset: other.inset,
     };
@@ -523,10 +532,10 @@ fn lerp_box_shadows(a: &[BoxShadow], b: &[BoxShadow], progress: f32) -> Option<V
             return None;
         }
         out.push(BoxShadow {
-            offset_x: lerp(from.offset_x, to.offset_x, progress),
-            offset_y: lerp(from.offset_y, to.offset_y, progress),
-            blur: lerp(from.blur, to.blur, progress).max(0.0),
-            spread: lerp(from.spread, to.spread, progress),
+            offset_x: lerp_points(from.offset_x, to.offset_x, progress),
+            offset_y: lerp_points(from.offset_y, to.offset_y, progress),
+            blur: lerp_points(from.blur, to.blur, progress).max(Points::ZERO),
+            spread: lerp_points(from.spread, to.spread, progress),
             color: lerp_color(from.color, to.color, progress),
             inset: from.inset,
         });
@@ -577,10 +586,10 @@ fn lerp_style(
     }
     if props.has(TransitionProps::SHADOW) {
         out.shadow.color = lerp_color(from.shadow.color, to.shadow.color, p);
-        out.shadow.offset_x = lerp(from.shadow.offset_x, to.shadow.offset_x, p);
-        out.shadow.offset_y = lerp(from.shadow.offset_y, to.shadow.offset_y, p);
+        out.shadow.offset_x = lerp_points(from.shadow.offset_x, to.shadow.offset_x, p);
+        out.shadow.offset_y = lerp_points(from.shadow.offset_y, to.shadow.offset_y, p);
         out.shadow.opacity = lerp(from.shadow.opacity, to.shadow.opacity, p).clamp(0.0, 1.0);
-        out.shadow.radius = lerp(from.shadow.radius, to.shadow.radius, p).max(0.0);
+        out.shadow.radius = lerp_points(from.shadow.radius, to.shadow.radius, p).max(Points::ZERO);
         if box_shadows(from) != box_shadows(to)
             && let Some(shadows) = lerp_box_shadows(box_shadows(from), box_shadows(to), p)
         {
@@ -590,38 +599,38 @@ fn lerp_style(
         }
     }
     if props.has(TransitionProps::SHAPE) {
-        out.border_radius = lerp(from.border_radius, to.border_radius, p).max(0.0);
-        out.corner_radius =
-            std::array::from_fn(|i| match (from.corner_radius[i], to.corner_radius[i]) {
-                (None, None) => None,
-                (a, b) => Some(
-                    lerp(
-                        a.unwrap_or(from.border_radius),
-                        b.unwrap_or(to.border_radius),
-                        p,
-                    )
-                    .max(0.0),
-                ),
-            });
+        out.border_radius = lerp_points(from.border_radius, to.border_radius, p).max(Points::ZERO);
+        let (from_corners, to_corners) =
+            (from.corner_radius.to_array(), to.corner_radius.to_array());
+        out.corner_radius = std::array::from_fn(|i| match (from_corners[i], to_corners[i]) {
+            (None, None) => None,
+            (a, b) => Some(
+                lerp_points(
+                    a.unwrap_or(from.border_radius),
+                    b.unwrap_or(to.border_radius),
+                    p,
+                )
+                .max(Points::ZERO),
+            ),
+        })
+        .into();
+        let (from_widths, to_widths) =
+            (from.borders.widths.to_array(), to.borders.widths.to_array());
         out.borders.widths =
-            std::array::from_fn(|i| lerp(from.borders.widths[i], to.borders.widths[i], p).max(0.0));
-        out.outline.width = lerp(from.outline.width, to.outline.width, p).max(0.0);
+            std::array::from_fn(|i| lerp_points(from_widths[i], to_widths[i], p).max(Points::ZERO))
+                .into();
+        out.outline.width = lerp_points(from.outline.width, to.outline.width, p).max(Points::ZERO);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use nsh_core::{LayoutAnimation, TransformKind, Transition};
+    use nsh_core::{LayoutAnimation, TransformKind, Transition, geometry::px};
 
     use super::*;
 
-    fn frame(x: f32) -> Rect {
-        Rect {
-            x,
-            y: 16.0,
-            width: 80.0,
-            height: 32.0,
-        }
+    fn frame(x: f32) -> Bounds<Points> {
+        Bounds::new(Point::new(px(x), px(16.0)), Size::new(px(80.0), px(32.0)))
     }
 
     fn near(actual: f32, expected: f32) {
@@ -634,7 +643,12 @@ mod tests {
         motion.frame_changed(frame(0.0), LayoutAnimation::LINEAR.update.as_ref(), 10.0);
         let target = frame(80.0);
         near(
-            motion.sample(target, &ViewStyle::default(), 10.125).frame.x,
+            motion
+                .sample(target, &ViewStyle::default(), 10.125)
+                .frame
+                .origin
+                .x
+                .0,
             20.0,
         );
         assert!(!motion.advance(10.25));
@@ -654,10 +668,19 @@ mod tests {
         motion.frame_changed(frame(0.0), LayoutAnimation::LINEAR.update.as_ref(), 0.0);
         let presented = motion.sample(frame(80.0), &style, 0.25).frame;
         motion.frame_changed(presented, LayoutAnimation::LINEAR.update.as_ref(), 0.25);
-        near(motion.sample(frame(120.0), &style, 0.25).frame.x, 40.0);
-        near(motion.sample(frame(120.0), &style, 0.5).frame.x, 80.0);
+        near(
+            motion.sample(frame(120.0), &style, 0.25).frame.origin.x.0,
+            40.0,
+        );
+        near(
+            motion.sample(frame(120.0), &style, 0.5).frame.origin.x.0,
+            80.0,
+        );
         motion.frame_changed(frame(80.0), None, 0.5);
-        assert_eq!(motion.sample(frame(120.0), &style, 0.5).frame.x, 120.0);
+        assert_eq!(
+            motion.sample(frame(120.0), &style, 0.5).frame.origin.x.0,
+            120.0
+        );
     }
 
     #[test]
@@ -710,8 +733,8 @@ mod tests {
         let old = transition_style(0.25, Color::rgba(255, 0, 0, 255));
         let mut target = transition_style(0.75, Color::rgba(0, 0, 255, 255));
         target.transform.push(TransformKind::TranslateX, 80.0);
-        target.border_radius = 16.0;
-        target.borders.widths = [4.0; 4];
+        target.border_radius = px(16.0);
+        target.borders.widths = [px(4.0); 4].into();
         let mut motion = NodeMotion::default();
         motion.style_changed(&old, &target, 3.0);
         let first = motion.sample(frame(0.0), &target, 3.05);
@@ -719,8 +742,8 @@ mod tests {
         let middle = motion.sample(frame(0.0), &target, 3.2);
         near(middle.style.opacity, 0.5);
         assert_eq!(middle.style.background_color, Color::rgba(128, 0, 128, 255));
-        near(middle.style.border_radius, 8.0);
-        near(middle.style.borders.widths[0], 2.0);
+        near(middle.style.border_radius.0, 8.0);
+        near(middle.style.borders.widths.top.0, 2.0);
         near(middle.style.transform.ops()[0].value, 40.0);
         assert!(!motion.advance(3.3));
         assert!(!motion.active());
@@ -737,7 +760,7 @@ mod tests {
         motion.style_changed(&ViewStyle::default(), &target, 0.0);
         assert!(!motion.active());
         motion.frame_changed(
-            Rect::default(),
+            Bounds::default(),
             LayoutAnimation::LINEAR.update.as_ref(),
             0.0,
         );
@@ -758,7 +781,7 @@ mod tests {
         motion.style_changed(&ViewStyle::default(), &style, 5.0);
         near(motion.appearance(5.5).0, 0.5);
         let old = style.clone();
-        style.border_radius = 4.0;
+        style.border_radius = px(4.0);
         motion.style_changed(&old, &style, 5.5);
         near(motion.appearance(5.75).0, 0.75);
         motion.advance(6.0);
@@ -793,7 +816,7 @@ mod tests {
             ..ViewStyle::default()
         };
         motion.style_changed(&ViewStyle::default(), &style, 0.0);
-        near(motion.appearance(0.25).1.rotate_degrees, 90.0);
+        near(motion.appearance(0.25).1.rotate.to_degrees(), 90.0);
         let old = style.clone();
         style.animation = Some(KeyframeAnimation::new(Keyframes::Bounce));
         motion.style_changed(&old, &style, 1.0);
@@ -812,8 +835,8 @@ mod tests {
     #[test]
     fn easing_matches_native_graph_samples_and_springs_settle() {
         let curve = [0.25, 0.1, 0.25, 1.0];
-        let samples = nsh_animation::sample_easing(
-            nsh_animation::Easing::Bezier(curve[0], curve[1], curve[2], curve[3]),
+        let samples = nsh_core::animation::sample_easing(
+            nsh_core::animation::Easing::Bezier(curve[0], curve[1], curve[2], curve[3]),
             101,
         );
         for (index, value) in samples.iter().enumerate() {

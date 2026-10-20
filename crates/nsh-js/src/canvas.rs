@@ -52,7 +52,7 @@ pub(crate) enum Rec {
     Str(Rc<str>),
     List(Rc<Vec<Rec>>),
     /// A native animation node (`AnimatedNode.__av`).
-    Node(nsh_animation::NodeId),
+    Node(nsh_core::animation::NodeId),
 }
 
 /// A recorded list, read by index.
@@ -130,7 +130,7 @@ impl HostInput for Rec {
         }
     }
 
-    fn animated_node(&self) -> Option<nsh_animation::NodeId> {
+    fn animated_node(&self) -> Option<nsh_core::animation::NodeId> {
         match self {
             Rec::Node(id) => Some(*id),
             _ => None,
@@ -509,7 +509,7 @@ fn to_rec(ctx: *mut JsContext, v: JsValue, used: &mut Vec<JsValue>, depth: u32) 
             let mut n = 0f64;
             qjs::JS_ToFloat64(ctx, &mut n, nv);
             used.push(qjs::JS_DupValue(ctx, v));
-            return Rec::Node(n as nsh_animation::NodeId);
+            return Rec::Node(n as nsh_core::animation::NodeId);
         }
         qjs::JS_FreeValue(ctx, nv);
         if qjs::JS_IsArray(v) {
@@ -998,7 +998,7 @@ native!(
             .measurer
             .borrow()
             .as_ref()
-            .map_or(0.0, |m| m(&font, &text) as f64);
+            .map_or(0.0, |m| m(&font, &text).0 as f64);
         // SAFETY: a new object.
         unsafe {
             let o = qjs::JS_NewObject(ctx);
@@ -1048,10 +1048,11 @@ fn point_in(ctx: *mut JsContext, this: JsValue, a: &[JsValue], stroke: bool) -> 
     };
     // JS does not see animated values' current values: they count as 0.
     let slot = |_| 0.0;
+    let point = nsh_core::geometry::point(nsh_core::Points(x), nsh_core::Points(y));
     let hit = if stroke {
-        point_in_stroke(&drawing.ops, path.as_deref(), x, y, slot)
+        point_in_stroke(&drawing.ops, path.as_deref(), point, slot)
     } else {
-        point_in_path(&drawing.ops, path.as_deref(), rule, x, y, slot)
+        point_in_path(&drawing.ops, path.as_deref(), rule, point, slot)
     };
     if hit { qjs::JS_TRUE } else { qjs::JS_FALSE }
 }

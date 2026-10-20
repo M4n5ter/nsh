@@ -11,7 +11,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use nsh_core::{Color, Rect, ResizeMode, access::Access};
+use nsh_core::{
+    Color, ResizeMode,
+    access::Access,
+    geometry::{Bounds, Points, Size, point, px},
+};
 use ratatui::{buffer::Buffer, layout::Rect as Area, style::Color as TerminalColor};
 use tiny_skia as sk;
 
@@ -844,13 +848,17 @@ fn read(
 }
 
 /// The image's rectangle after applying its resize mode, before clipping.
-pub(crate) fn fitted_frame(raster: &Raster, frame: Rect, mode: ResizeMode) -> Rect {
-    let (iw, ih) = (raster.width as f32, raster.height as f32);
+pub(crate) fn fitted_frame(
+    raster: &Raster,
+    frame: Bounds<Points>,
+    mode: ResizeMode,
+) -> Bounds<Points> {
+    let (iw, ih) = (px(raster.width as f32), px(raster.height as f32));
     let (width, height) = match mode {
-        ResizeMode::Stretch => (frame.width, frame.height),
+        ResizeMode::Stretch => (frame.size.width, frame.size.height),
         ResizeMode::Center => (iw, ih),
         ResizeMode::Cover | ResizeMode::Contain => {
-            let (sx, sy) = (frame.width / iw, frame.height / ih);
+            let (sx, sy) = (frame.size.width / iw, frame.size.height / ih);
             let scale = if mode == ResizeMode::Cover {
                 sx.max(sy)
             } else {
@@ -859,12 +867,13 @@ pub(crate) fn fitted_frame(raster: &Raster, frame: Rect, mode: ResizeMode) -> Re
             (iw * scale, ih * scale)
         }
     };
-    Rect {
-        x: frame.x + (frame.width - width) * 0.5,
-        y: frame.y + (frame.height - height) * 0.5,
-        width,
-        height,
-    }
+    Bounds::new(
+        point(
+            frame.origin.x + (frame.size.width - width) * 0.5,
+            frame.origin.y + (frame.size.height - height) * 0.5,
+        ),
+        Size::new(width, height),
+    )
 }
 
 /// Composes an image into half-height terminal samples. `frame` and `clip`
@@ -872,8 +881,8 @@ pub(crate) fn fitted_frame(raster: &Raster, frame: Rect, mode: ResizeMode) -> Re
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint(
     raster: &Raster,
-    frame: Rect,
-    clip: Rect,
+    frame: Bounds<Points>,
+    clip: Bounds<Points>,
     mode: ResizeMode,
     tint: Option<Color>,
     opacity: f32,
@@ -884,8 +893,8 @@ pub(crate) fn paint(
     if raster.width == 0
         || raster.height == 0
         || raster.rgba.len() != raster.width as usize * raster.height as usize * 4
-        || frame.width <= 0.0
-        || frame.height <= 0.0
+        || frame.size.width <= Points::ZERO
+        || frame.size.height <= Points::ZERO
         || !opacity.is_finite()
         || opacity <= 0.0
     {
@@ -893,15 +902,25 @@ pub(crate) fn paint(
     }
     let (iw, ih) = (raster.width as f32, raster.height as f32);
     let dest = fitted_frame(raster, frame, mode);
-    let (w, h) = (dest.width, dest.height);
-    let left = frame.x.max(clip.x).max(dest.x).max(0.0);
-    let top = frame.y.max(clip.y).max(dest.y).max(0.0);
-    let right = (frame.x + frame.width)
-        .min(clip.x + clip.width)
-        .min(dest.x + w);
-    let bottom = (frame.y + frame.height)
-        .min(clip.y + clip.height)
-        .min(dest.y + h);
+    let (w, h) = (dest.size.width, dest.size.height);
+    let left = frame
+        .origin
+        .x
+        .max(clip.origin.x)
+        .max(dest.origin.x)
+        .max(Points::ZERO);
+    let top = frame
+        .origin
+        .y
+        .max(clip.origin.y)
+        .max(dest.origin.y)
+        .max(Points::ZERO);
+    let right = (frame.origin.x + frame.size.width)
+        .min(clip.origin.x + clip.size.width)
+        .min(dest.origin.x + w);
+    let bottom = (frame.origin.y + frame.size.height)
+        .min(clip.origin.y + clip.size.height)
+        .min(dest.origin.y + h);
     if ![left, top, right, bottom, w, h]
         .iter()
         .all(|n| n.is_finite())
@@ -949,8 +968,8 @@ pub(crate) fn paint(
                         if px < left || px >= right {
                             continue;
                         }
-                        let mut color =
-                            raster.sample((px - dest.x) / w * iw, (py - dest.y) / h * ih);
+                        let mut color = raster
+                            .sample((px - dest.origin.x) / w * iw, (py - dest.origin.y) / h * ih);
                         if let Some([r, g, b, a]) = tinted {
                             color = [
                                 r * color[3] * a,
@@ -1048,12 +1067,7 @@ mod tests {
         let area = Area::new(3, 2, 1, 1);
         let mut buffer = Buffer::empty(area);
         buffer[(3, 2)].set_bg(TerminalColor::Rgb(0, 255, 0));
-        let rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 8.0,
-            height: 16.0,
-        };
+        let rect = Bounds::new(point(px(0.0), px(0.0)), Size::new(px(8.0), px(16.0)));
         paint(
             &raster(),
             rect,
@@ -1082,12 +1096,7 @@ mod tests {
         buffer.content.iter_mut().for_each(|cell| {
             cell.set_symbol(".");
         });
-        let rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 24.0,
-            height: 16.0,
-        };
+        let rect = Bounds::new(point(px(0.0), px(0.0)), Size::new(px(24.0), px(16.0)));
         paint(
             &raster(),
             rect,
@@ -1109,16 +1118,8 @@ mod tests {
         let area = Area::new(0, 0, 1, 1);
         let mut buffer = Buffer::empty(area);
         buffer[(0, 0)].set_bg(TerminalColor::Rgb(10, 20, 30));
-        let rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 8.0,
-            height: 16.0,
-        };
-        let clip = Rect {
-            height: 8.0,
-            ..rect
-        };
+        let rect = Bounds::new(point(px(0.0), px(0.0)), Size::new(px(8.0), px(16.0)));
+        let clip = Bounds::new(rect.origin, Size::new(rect.size.width, px(8.0)));
         paint(
             &raster(),
             rect,

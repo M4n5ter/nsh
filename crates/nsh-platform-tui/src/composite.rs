@@ -9,7 +9,8 @@ mod effects;
 use std::{collections::HashMap, sync::Arc};
 
 use nsh_core::{
-    BlendMode, Color, CornerRadii, Matrix, NodeId, Rect, ResizeMode, Size, TextLayout, ViewStyle,
+    BlendMode, Bounds, Color, CornerRadii, Matrix, NodeId, Point, Points, ResizeMode, Size,
+    TextLayout, ViewStyle,
 };
 use ratatui::buffer::Buffer;
 
@@ -25,7 +26,7 @@ const MAX_PENDING: usize = 8;
 /// One immutable subtree and the already painted backdrop beneath it.
 #[derive(Clone)]
 pub(crate) struct Scene {
-    pub(crate) bounds: Rect,
+    pub(crate) bounds: Bounds<Points>,
     pub(crate) root: Layer,
     pub(crate) backdrop: Buffer,
     pub(crate) metrics: CellMetrics,
@@ -36,10 +37,10 @@ pub(crate) struct Scene {
 #[derive(Clone)]
 pub(crate) struct Layer {
     pub(crate) id: NodeId,
-    pub(crate) size: Size,
+    pub(crate) size: Size<Points>,
     /// Local point (0,0) to surface points, before any bounding rectangle.
     pub(crate) transform: Matrix,
-    pub(crate) clip: Rect,
+    pub(crate) clip: Bounds<Points>,
     pub(crate) style: ViewStyle,
     pub(crate) images: Vec<Image>,
     pub(crate) text: Option<Text>,
@@ -51,7 +52,7 @@ pub(crate) struct Layer {
 #[derive(Clone)]
 pub(crate) struct Image {
     pub(crate) raster: Arc<Raster>,
-    pub(crate) frame: Rect,
+    pub(crate) frame: Bounds<Points>,
     pub(crate) mode: ResizeMode,
     pub(crate) tint: Option<Color>,
     pub(crate) opacity: f32,
@@ -60,9 +61,9 @@ pub(crate) struct Image {
 #[derive(Clone)]
 pub(crate) struct Text {
     pub(crate) layout: TextLayout,
-    pub(crate) content: Rect,
+    pub(crate) content: Bounds<Points>,
     pub(crate) foreground: Option<Color>,
-    pub(crate) selection: Vec<(Rect, Color)>,
+    pub(crate) selection: Vec<(Bounds<Points>, Color)>,
     pub(crate) focus: bool,
 }
 
@@ -123,7 +124,7 @@ struct Entry {
 
 #[derive(Clone)]
 pub(crate) struct Frame {
-    pub(crate) bounds: Rect,
+    pub(crate) bounds: Bounds<Points>,
     pub(crate) raster: Arc<Raster>,
 }
 
@@ -301,16 +302,20 @@ pub(crate) fn rasterize(scene: &Scene, fonts: &FontCatalog) -> Result<Raster, St
 
 // Inverse perspective transforms can produce an extremely thin local
 // plane. Bound each dimension as well as area before allocating it.
-fn raster_dimensions(rect: Rect, maximum_scale: f32) -> (u32, u32, f32) {
-    let width = f64::from(rect.width);
-    let height = f64::from(rect.height);
+fn raster_dimensions(rect: Bounds<Points>, maximum_scale: f32) -> (u32, u32, f32) {
+    let width = f64::from(rect.size.width.0);
+    let height = f64::from(rect.size.height.0);
     let scale = (MAX_PIXELS as f64 / (width * height))
         .sqrt()
         .min(f64::from(MAX_SIDE) / width)
         .min(f64::from(MAX_SIDE) / height)
         .min(f64::from(maximum_scale)) as f32;
-    let width = (rect.width * scale).floor().clamp(1.0, MAX_SIDE as f32) as u32;
-    let height = (rect.height * scale).floor().clamp(1.0, MAX_SIDE as f32) as u32;
+    let width = (rect.size.width.0 * scale)
+        .floor()
+        .clamp(1.0, MAX_SIDE as f32) as u32;
+    let height = (rect.size.height.0 * scale)
+        .floor()
+        .clamp(1.0, MAX_SIDE as f32) as u32;
     // Rounding scale to f32 can add one pixel at the area limit.
     let height = height.min((MAX_PIXELS / u64::from(width)) as u32);
     (width, height, scale)
@@ -338,22 +343,24 @@ impl Context<'_> {
 
     fn point(&self, x: u32, y: u32) -> (f32, f32) {
         (
-            self.scene.bounds.x + (x as f32 + 0.5) / self.scale,
-            self.scene.bounds.y + (y as f32 + 0.5) / self.scale,
+            self.scene.bounds.origin.x.0 + (x as f32 + 0.5) / self.scale,
+            self.scene.bounds.origin.y.0 + (y as f32 + 0.5) / self.scale,
         )
     }
 
-    fn region(&self, rect: Rect) -> (u32, u32, u32, u32) {
-        let x = ((rect.x - self.scene.bounds.x) * self.scale)
+    fn region(&self, rect: Bounds<Points>) -> (u32, u32, u32, u32) {
+        let x = ((rect.origin.x.0 - self.scene.bounds.origin.x.0) * self.scale)
             .floor()
             .clamp(0.0, self.width as f32) as u32;
-        let y = ((rect.y - self.scene.bounds.y) * self.scale)
+        let y = ((rect.origin.y.0 - self.scene.bounds.origin.y.0) * self.scale)
             .floor()
             .clamp(0.0, self.height as f32) as u32;
-        let right = ((rect.x + rect.width - self.scene.bounds.x) * self.scale)
+        let right = ((rect.origin.x.0 + rect.size.width.0 - self.scene.bounds.origin.x.0)
+            * self.scale)
             .ceil()
             .clamp(0.0, self.width as f32) as u32;
-        let bottom = ((rect.y + rect.height - self.scene.bounds.y) * self.scale)
+        let bottom = ((rect.origin.y.0 + rect.size.height.0 - self.scene.bounds.origin.y.0)
+            * self.scale)
             .ceil()
             .clamp(0.0, self.height as f32) as u32;
         (x, y, right, bottom)
@@ -369,12 +376,7 @@ impl Context<'_> {
         }
         let mask = self.mask(
             layer,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: layer.size.width,
-                height: layer.size.height,
-            },
+            Bounds::new(Point::default(), layer.size),
             layer.style.radii(),
         )?;
         if let Some(effects) = &layer.style.effects
@@ -395,8 +397,8 @@ impl Context<'_> {
             }
             let mut raster = crate::text::rasterize(
                 &text.layout,
-                text.content.width,
-                text.content.height,
+                text.content.size.width,
+                text.content.size.height,
                 self.fonts,
             )?;
             if let Some(color) = text.foreground {
@@ -419,12 +421,21 @@ impl Context<'_> {
                 for run in &terminal.runs {
                     self.solid(
                         layer,
-                        Rect {
-                            x: text.content.x + run.x,
-                            y: text.content.y + run.y + self.scene.metrics.height() - 1.0,
-                            width: f32::from(run.width) * self.scene.metrics.width(),
-                            height: 1.0,
-                        },
+                        Bounds::new(
+                            Point::new(
+                                Points(text.content.origin.x.0 + run.x.0),
+                                Points(
+                                    text.content.origin.y.0
+                                        + run.y.0
+                                        + self.scene.metrics.height().0
+                                        - 1.0,
+                                ),
+                            ),
+                            Size::new(
+                                Points(f32::from(run.width) * self.scene.metrics.width().0),
+                                Points(1.0),
+                            ),
+                        ),
                         text.foreground.unwrap_or(run.style.color),
                         &mut output,
                     );
@@ -437,12 +448,7 @@ impl Context<'_> {
                 layer,
                 &Image {
                     raster: Arc::new(raster),
-                    frame: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: layer.size.width,
-                        height: layer.size.height,
-                    },
+                    frame: Bounds::new(Point::default(), layer.size),
                     mode: ResizeMode::Stretch,
                     tint: None,
                     opacity: 1.0,
@@ -468,12 +474,7 @@ impl Context<'_> {
                 layer,
                 &Image {
                     raster: Arc::new(raster),
-                    frame: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: layer.size.width,
-                        height: layer.size.height,
-                    },
+                    frame: Bounds::new(Point::default(), layer.size),
                     mode: ResizeMode::Stretch,
                     tint: None,
                     opacity: 1.0,
@@ -500,7 +501,7 @@ impl Context<'_> {
     fn mask(
         &self,
         layer: &Layer,
-        rect: Rect,
+        rect: Bounds<Points>,
         radii: CornerRadii,
     ) -> Result<tiny_skia::Mask, String> {
         let mut mask =
@@ -512,8 +513,8 @@ impl Context<'_> {
                 return Ok(mask);
             };
             let (x, y) = (
-                (x - self.scene.bounds.x) * self.scale,
-                (y - self.scene.bounds.y) * self.scale,
+                (x - self.scene.bounds.origin.x.0) * self.scale,
+                (y - self.scene.bounds.origin.y.0) * self.scale,
             );
             if first {
                 path.move_to(x, y);
@@ -540,19 +541,14 @@ impl Context<'_> {
         mask: &tiny_skia::Mask,
     ) -> Result<Option<Raster>, String> {
         let style = &layer.style;
-        let rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: layer.size.width,
-            height: layer.size.height,
-        };
+        let rect = Bounds::new(Point::default(), layer.size);
         let mut shadows = Vec::new();
         if style.shadow.is_visible() {
             shadows.push(nsh_core::BoxShadow {
                 offset_x: style.shadow.offset_x,
                 offset_y: style.shadow.offset_y,
                 blur: style.shadow.radius * 2.0,
-                spread: 0.0,
+                spread: Points::ZERO,
                 color: with_alpha(style.shadow.color, style.shadow.opacity),
                 inset: false,
             });
@@ -572,12 +568,16 @@ impl Context<'_> {
         }
         let mut output = self.blank()?;
         for shadow in shadows {
-            let shape = Rect {
-                x: shadow.offset_x - shadow.spread,
-                y: shadow.offset_y - shadow.spread,
-                width: rect.width + shadow.spread * 2.0,
-                height: rect.height + shadow.spread * 2.0,
-            };
+            let shape = Bounds::new(
+                Point::new(
+                    Points(shadow.offset_x.0 - shadow.spread.0),
+                    Points(shadow.offset_y.0 - shadow.spread.0),
+                ),
+                Size::new(
+                    Points(rect.size.width.0 + shadow.spread.0 * 2.0),
+                    Points(rect.size.height.0 + shadow.spread.0 * 2.0),
+                ),
+            );
             if !valid_rect(shape) {
                 continue;
             }
@@ -598,7 +598,7 @@ impl Context<'_> {
             }
             effects::blur(
                 &mut pixels,
-                shadow.blur.max(0.0) * 0.5 * self.scale * transform_scale(&layer.transform),
+                shadow.blur.0.max(0.0) * 0.5 * self.scale * transform_scale(&layer.transform),
             );
             // An outer shadow belongs outside the border box, including
             // when the view itself has a transparent fill.
@@ -624,18 +624,13 @@ impl Context<'_> {
         mask: &tiny_skia::Mask,
     ) -> Result<(), String> {
         let style = &layer.style;
-        let rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: layer.size.width,
-            height: layer.size.height,
-        };
+        let rect = Bounds::new(Point::default(), layer.size);
         let gradients: Vec<_> = style
             .effects
             .iter()
             .flat_map(|e| e.background_images.iter())
             .filter(|g| g.stops.len() >= 2)
-            .map(|g| (g, g.resolved_stops()))
+            .map(|g| (g, g.resolved_stops(layer.size)))
             .collect();
         let (left, top, right, bottom) =
             self.region(transformed_bounds(&layer.transform, rect).unwrap_or(self.scene.bounds));
@@ -658,8 +653,8 @@ impl Context<'_> {
                                 stops,
                                 px,
                                 py,
-                                rect.width,
-                                rect.height,
+                                rect.size.width.0,
+                                rect.size.height.0,
                             )),
                             color,
                             1.0,
@@ -685,12 +680,16 @@ impl Context<'_> {
                 .rev()
                 .filter(|s| s.inset && s.is_visible())
             {
-                let inner = Rect {
-                    x: shadow.offset_x + shadow.spread,
-                    y: shadow.offset_y + shadow.spread,
-                    width: rect.width - shadow.spread * 2.0,
-                    height: rect.height - shadow.spread * 2.0,
-                };
+                let inner = Bounds::new(
+                    Point::new(
+                        Points(shadow.offset_x.0 + shadow.spread.0),
+                        Points(shadow.offset_y.0 + shadow.spread.0),
+                    ),
+                    Size::new(
+                        Points(rect.size.width.0 - shadow.spread.0 * 2.0),
+                        Points(rect.size.height.0 - shadow.spread.0 * 2.0),
+                    ),
+                );
                 let hole =
                     self.mask(layer, inner, expanded_radii(style.radii(), -shadow.spread))?;
                 let mut pixels = self.blank()?;
@@ -708,7 +707,7 @@ impl Context<'_> {
                 }
                 effects::blur(
                     &mut pixels,
-                    shadow.blur.max(0.0) * 0.5 * self.scale * transform_scale(&layer.transform),
+                    shadow.blur.0.max(0.0) * 0.5 * self.scale * transform_scale(&layer.transform),
                 );
                 apply_mask(&mut pixels, mask);
                 composite_into(&pixels, output, 1.0, BlendMode::Normal);
@@ -718,7 +717,7 @@ impl Context<'_> {
         Ok(())
     }
 
-    fn solid(&self, layer: &Layer, rect: Rect, color: Color, output: &mut Raster) {
+    fn solid(&self, layer: &Layer, rect: Bounds<Points>, color: Color, output: &mut Raster) {
         if color.is_transparent() {
             return;
         }
@@ -761,8 +760,8 @@ impl Context<'_> {
                     continue;
                 }
                 let mut color = image.raster.sample(
-                    (px - dest.x) / dest.width * image.raster.width as f32,
-                    (py - dest.y) / dest.height * image.raster.height as f32,
+                    (px - dest.origin.x.0) / dest.size.width.0 * image.raster.width as f32,
+                    (py - dest.origin.y.0) / dest.size.height.0 * image.raster.height as f32,
                 );
                 if let Some(tint) = image.tint {
                     let tint = premul(tint);
@@ -789,19 +788,21 @@ impl Context<'_> {
     ) -> Result<(), String> {
         let borders = layer.style.borders;
         if borders.is_visible() {
-            let [top, right, bottom, left] = borders.widths.map(|w| w.max(0.0));
-            let inner = Rect {
-                x: left,
-                y: top,
-                width: (layer.size.width - left - right).max(0.0),
-                height: (layer.size.height - top - bottom).max(0.0),
-            };
+            let widths = borders.widths.to_array().map(|w| w.0.max(0.0));
+            let [top, right, bottom, left] = widths;
+            let inner = Bounds::new(
+                Point::new(Points(left), Points(top)),
+                Size::new(
+                    Points((layer.size.width.0 - left - right).max(0.0)),
+                    Points((layer.size.height.0 - top - bottom).max(0.0)),
+                ),
+            );
             let outer_radii = layer.style.radii();
             let inner_radii = CornerRadii {
-                top_left: (outer_radii.top_left - top.max(left)).max(0.0),
-                top_right: (outer_radii.top_right - top.max(right)).max(0.0),
-                bottom_right: (outer_radii.bottom_right - bottom.max(right)).max(0.0),
-                bottom_left: (outer_radii.bottom_left - bottom.max(left)).max(0.0),
+                top_left: Points((outer_radii.top_left.0 - top.max(left)).max(0.0)),
+                top_right: Points((outer_radii.top_right.0 - top.max(right)).max(0.0)),
+                bottom_right: Points((outer_radii.bottom_right.0 - bottom.max(right)).max(0.0)),
+                bottom_left: Points((outer_radii.bottom_left.0 - bottom.max(left)).max(0.0)),
                 continuous: outer_radii.continuous,
             };
             let hole = self.mask(layer, inner, inner_radii)?;
@@ -818,24 +819,23 @@ impl Context<'_> {
                     };
                     let distances = [
                         py / top.max(f32::EPSILON),
-                        (layer.size.width - px) / right.max(f32::EPSILON),
-                        (layer.size.height - py) / bottom.max(f32::EPSILON),
+                        (layer.size.width.0 - px) / right.max(f32::EPSILON),
+                        (layer.size.height.0 - py) / bottom.max(f32::EPSILON),
                         px / left.max(f32::EPSILON),
                     ];
                     let side = (0..4)
-                        .filter(|&i| borders.widths[i] > 0.0)
+                        .filter(|&i| widths[i] > 0.0)
                         .min_by(|&a, &b| distances[a].total_cmp(&distances[b]))
                         .unwrap_or(0);
                     let along = if side % 2 == 0 { px } else { py };
                     let on = match borders.style {
                         nsh_core::BorderStyle::Solid => true,
                         nsh_core::BorderStyle::Dashed => {
-                            along.rem_euclid((borders.widths[side] * 6.0).max(6.0))
-                                < (borders.widths[side] * 4.0).max(4.0)
+                            along.rem_euclid((widths[side] * 6.0).max(6.0))
+                                < (widths[side] * 4.0).max(4.0)
                         }
                         nsh_core::BorderStyle::Dotted => {
-                            along.rem_euclid((borders.widths[side] * 2.0).max(2.0))
-                                < borders.widths[side].max(1.0)
+                            along.rem_euclid((widths[side] * 2.0).max(2.0)) < widths[side].max(1.0)
                         }
                     };
                     if on {
@@ -859,29 +859,31 @@ impl Context<'_> {
         }
         let outline = layer.style.outline;
         if outline.is_visible() {
-            let outer = outline.offset + outline.width;
-            let outer_rect = Rect {
-                x: -outer,
-                y: -outer,
-                width: layer.size.width + 2.0 * outer,
-                height: layer.size.height + 2.0 * outer,
-            };
-            let inner = outline.offset;
-            let inner_rect = Rect {
-                x: -inner,
-                y: -inner,
-                width: layer.size.width + 2.0 * inner,
-                height: layer.size.height + 2.0 * inner,
-            };
+            let outer = outline.offset.0 + outline.width.0;
+            let outer_rect = Bounds::new(
+                Point::new(Points(-outer), Points(-outer)),
+                Size::new(
+                    Points(layer.size.width.0 + 2.0 * outer),
+                    Points(layer.size.height.0 + 2.0 * outer),
+                ),
+            );
+            let inner = outline.offset.0;
+            let inner_rect = Bounds::new(
+                Point::new(Points(-inner), Points(-inner)),
+                Size::new(
+                    Points(layer.size.width.0 + 2.0 * inner),
+                    Points(layer.size.height.0 + 2.0 * inner),
+                ),
+            );
             let outer = self.mask(
                 layer,
                 outer_rect,
-                expanded_radii(layer.style.radii(), outer),
+                expanded_radii(layer.style.radii(), Points(outer)),
             )?;
             let inner = self.mask(
                 layer,
                 inner_rect,
-                expanded_radii(layer.style.radii(), inner),
+                expanded_radii(layer.style.radii(), Points(inner)),
             )?;
             for y in 0..self.height {
                 for x in 0..self.width {
@@ -919,18 +921,18 @@ impl Context<'_> {
         // complete isolated layer preserves rotated, skewed and scaled
         // content rather than filtering its axis-aligned bounds.
         let corners = [
-            (self.scene.bounds.x, self.scene.bounds.y),
+            (self.scene.bounds.origin.x.0, self.scene.bounds.origin.y.0),
             (
-                self.scene.bounds.x + self.scene.bounds.width,
-                self.scene.bounds.y,
+                self.scene.bounds.origin.x.0 + self.scene.bounds.size.width.0,
+                self.scene.bounds.origin.y.0,
             ),
             (
-                self.scene.bounds.x,
-                self.scene.bounds.y + self.scene.bounds.height,
+                self.scene.bounds.origin.x.0,
+                self.scene.bounds.origin.y.0 + self.scene.bounds.size.height.0,
             ),
             (
-                self.scene.bounds.x + self.scene.bounds.width,
-                self.scene.bounds.y + self.scene.bounds.height,
+                self.scene.bounds.origin.x.0 + self.scene.bounds.size.width.0,
+                self.scene.bounds.origin.y.0 + self.scene.bounds.size.height.0,
             ),
         ];
         let mut bounds = (
@@ -950,12 +952,10 @@ impl Context<'_> {
                 bounds.3.max(y),
             );
         }
-        let rect = Rect {
-            x: bounds.0,
-            y: bounds.1,
-            width: bounds.2 - bounds.0,
-            height: bounds.3 - bounds.1,
-        };
+        let rect = Bounds::new(
+            Point::new(Points(bounds.0), Points(bounds.1)),
+            Size::new(Points(bounds.2 - bounds.0), Points(bounds.3 - bounds.1)),
+        );
         if !valid_rect(rect) {
             return Ok(());
         }
@@ -967,11 +967,11 @@ impl Context<'_> {
         };
         for y in 0..height {
             for x in 0..width {
-                let px = rect.x + (x as f32 + 0.5) / scale;
-                let py = rect.y + (y as f32 + 0.5) / scale;
+                let px = rect.origin.x.0 + (x as f32 + 0.5) / scale;
+                let py = rect.origin.y.0 + (y as f32 + 0.5) / scale;
                 if let Some((sx, sy)) = project(&layer.transform, px, py) {
-                    let sx = (sx - self.scene.bounds.x) * self.scale;
-                    let sy = (sy - self.scene.bounds.y) * self.scale;
+                    let sx = (sx - self.scene.bounds.origin.x.0) * self.scale;
+                    let sy = (sy - self.scene.bounds.origin.y.0) * self.scale;
                     if sx >= 0.0 && sy >= 0.0 && sx < self.width as f32 && sy < self.height as f32 {
                         put(&mut local, x, y, output.sample(sx, sy));
                     }
@@ -990,7 +990,10 @@ impl Context<'_> {
                     output,
                     x,
                     y,
-                    local.sample((px - rect.x) * scale, (py - rect.y) * scale),
+                    local.sample(
+                        (px - rect.origin.x.0) * scale,
+                        (py - rect.origin.y.0) * scale,
+                    ),
                 );
             }
         }
@@ -998,10 +1001,12 @@ impl Context<'_> {
     }
 
     fn clip(&self, layer: &Layer, output: &mut Raster) {
-        if layer.clip.x <= self.scene.bounds.x
-            && layer.clip.y <= self.scene.bounds.y
-            && layer.clip.x + layer.clip.width >= self.scene.bounds.x + self.scene.bounds.width
-            && layer.clip.y + layer.clip.height >= self.scene.bounds.y + self.scene.bounds.height
+        if layer.clip.origin.x.0 <= self.scene.bounds.origin.x.0
+            && layer.clip.origin.y.0 <= self.scene.bounds.origin.y.0
+            && layer.clip.origin.x.0 + layer.clip.size.width.0
+                >= self.scene.bounds.origin.x.0 + self.scene.bounds.size.width.0
+            && layer.clip.origin.y.0 + layer.clip.size.height.0
+                >= self.scene.bounds.origin.y.0 + self.scene.bounds.size.height.0
         {
             return;
         }
@@ -1019,36 +1024,36 @@ impl Context<'_> {
     }
 }
 
-pub(crate) fn rounded_contains(size: Size, radii: CornerRadii, x: f32, y: f32) -> bool {
-    if x < 0.0 || y < 0.0 || x >= size.width || y >= size.height {
+pub(crate) fn rounded_contains(size: Size<Points>, radii: CornerRadii, x: f32, y: f32) -> bool {
+    if x < 0.0 || y < 0.0 || x >= size.width.0 || y >= size.height.0 {
         return false;
     }
-    let radii = radii.fit(size.width, size.height);
+    let radii = radii.fit(size);
     if !radii.continuous {
         for (cx, cy, radius, on) in [
             (
-                radii.top_left,
-                radii.top_left,
-                radii.top_left,
-                x < radii.top_left && y < radii.top_left,
+                radii.top_left.0,
+                radii.top_left.0,
+                radii.top_left.0,
+                x < radii.top_left.0 && y < radii.top_left.0,
             ),
             (
-                size.width - radii.top_right,
-                radii.top_right,
-                radii.top_right,
-                x > size.width - radii.top_right && y < radii.top_right,
+                size.width.0 - radii.top_right.0,
+                radii.top_right.0,
+                radii.top_right.0,
+                x > size.width.0 - radii.top_right.0 && y < radii.top_right.0,
             ),
             (
-                size.width - radii.bottom_right,
-                size.height - radii.bottom_right,
-                radii.bottom_right,
-                x > size.width - radii.bottom_right && y > size.height - radii.bottom_right,
+                size.width.0 - radii.bottom_right.0,
+                size.height.0 - radii.bottom_right.0,
+                radii.bottom_right.0,
+                x > size.width.0 - radii.bottom_right.0 && y > size.height.0 - radii.bottom_right.0,
             ),
             (
-                radii.bottom_left,
-                size.height - radii.bottom_left,
-                radii.bottom_left,
-                x < radii.bottom_left && y > size.height - radii.bottom_left,
+                radii.bottom_left.0,
+                size.height.0 - radii.bottom_left.0,
+                radii.bottom_left.0,
+                x < radii.bottom_left.0 && y > size.height.0 - radii.bottom_left.0,
             ),
         ] {
             if on && radius > 0.0 && (x - cx).hypot(y - cy) > radius {
@@ -1057,15 +1062,7 @@ pub(crate) fn rounded_contains(size: Size, radii: CornerRadii, x: f32, y: f32) -
         }
         return true;
     }
-    let points = outline(
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: size.width,
-            height: size.height,
-        },
-        radii,
-    );
+    let points = outline(Bounds::new(Point::default(), size), radii);
     let mut inside = false;
     for (a, b) in points
         .iter()
@@ -1079,34 +1076,26 @@ pub(crate) fn rounded_contains(size: Size, radii: CornerRadii, x: f32, y: f32) -
     inside
 }
 
-fn outline(rect: Rect, radii: CornerRadii) -> Vec<(f32, f32)> {
+fn outline(rect: Bounds<Points>, radii: CornerRadii) -> Vec<(f32, f32)> {
     if !valid_rect(rect) {
         return Vec::new();
     }
-    let radii = radii.fit(rect.width, rect.height);
+    let radii = radii.fit(rect.size);
     let mut points = Vec::new();
     let mut at = (0.0, 0.0);
     nsh_core::shape::rounded_rect(
-        (
-            f64::from(rect.x),
-            f64::from(rect.y),
-            f64::from(rect.x + rect.width),
-            f64::from(rect.y + rect.height),
-        ),
-        [
-            (f64::from(radii.top_left), f64::from(radii.top_left)),
-            (f64::from(radii.top_right), f64::from(radii.top_right)),
-            (f64::from(radii.bottom_right), f64::from(radii.bottom_right)),
-            (f64::from(radii.bottom_left), f64::from(radii.bottom_left)),
-        ],
+        rect,
+        radii.corners().map(|&radius| Size::new(radius, radius)),
         radii.continuous,
         false,
         &mut |segment| match segment {
-            nsh_core::shape::Segment::Move(x, y) | nsh_core::shape::Segment::Line(x, y) => {
-                at = (x, y);
-                points.push((x as f32, y as f32));
+            nsh_core::shape::Segment::Move(point) | nsh_core::shape::Segment::Line(point) => {
+                at = (f64::from(point.x.0), f64::from(point.y.0));
+                points.push((point.x.0, point.y.0));
             }
-            nsh_core::shape::Segment::Cubic([x1, y1, x2, y2, x3, y3]) => {
+            nsh_core::shape::Segment::Cubic(controls) => {
+                let [(x1, y1), (x2, y2), (x3, y3)] =
+                    controls.map(|point| (f64::from(point.x.0), f64::from(point.y.0)));
                 let (x0, y0) = at;
                 for i in 1..=16 {
                     let t = f64::from(i) / 16.0;
@@ -1130,12 +1119,12 @@ fn outline(rect: Rect, radii: CornerRadii) -> Vec<(f32, f32)> {
     points
 }
 
-fn expanded_radii(radii: CornerRadii, amount: f32) -> CornerRadii {
+fn expanded_radii(radii: CornerRadii, amount: Points) -> CornerRadii {
     CornerRadii {
-        top_left: (radii.top_left + amount).max(0.0),
-        top_right: (radii.top_right + amount).max(0.0),
-        bottom_right: (radii.bottom_right + amount).max(0.0),
-        bottom_left: (radii.bottom_left + amount).max(0.0),
+        top_left: (radii.top_left + amount).max(Points::ZERO),
+        top_right: (radii.top_right + amount).max(Points::ZERO),
+        bottom_right: (radii.bottom_right + amount).max(Points::ZERO),
+        bottom_left: (radii.bottom_left + amount).max(Points::ZERO),
         continuous: radii.continuous,
     }
 }
@@ -1178,7 +1167,7 @@ fn transform_scale(matrix: &Matrix) -> f32 {
         .clamp(0.001, 1000.0)
 }
 
-fn transformed_bounds(matrix: &Matrix, rect: Rect) -> Option<Rect> {
+fn transformed_bounds(matrix: &Matrix, rect: Bounds<Points>) -> Option<Bounds<Points>> {
     let mut bounds = (
         f32::INFINITY,
         f32::INFINITY,
@@ -1186,10 +1175,13 @@ fn transformed_bounds(matrix: &Matrix, rect: Rect) -> Option<Rect> {
         f32::NEG_INFINITY,
     );
     for (x, y) in [
-        (rect.x, rect.y),
-        (rect.x + rect.width, rect.y),
-        (rect.x, rect.y + rect.height),
-        (rect.x + rect.width, rect.y + rect.height),
+        (rect.origin.x.0, rect.origin.y.0),
+        (rect.origin.x.0 + rect.size.width.0, rect.origin.y.0),
+        (rect.origin.x.0, rect.origin.y.0 + rect.size.height.0),
+        (
+            rect.origin.x.0 + rect.size.width.0,
+            rect.origin.y.0 + rect.size.height.0,
+        ),
     ] {
         let (x, y) = project(matrix, x, y)?;
         bounds = (
@@ -1199,16 +1191,17 @@ fn transformed_bounds(matrix: &Matrix, rect: Rect) -> Option<Rect> {
             bounds.3.max(y),
         );
     }
-    Some(Rect {
-        x: bounds.0,
-        y: bounds.1,
-        width: bounds.2 - bounds.0,
-        height: bounds.3 - bounds.1,
-    })
+    Some(Bounds::new(
+        Point::new(Points(bounds.0), Points(bounds.1)),
+        Size::new(Points(bounds.2 - bounds.0), Points(bounds.3 - bounds.1)),
+    ))
 }
 
-fn contains(rect: Rect, x: f32, y: f32) -> bool {
-    x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height
+fn contains(rect: Bounds<Points>, x: f32, y: f32) -> bool {
+    x >= rect.origin.x.0
+        && y >= rect.origin.y.0
+        && x < rect.origin.x.0 + rect.size.width.0
+        && y < rect.origin.y.0 + rect.size.height.0
 }
 
 fn premul(color: Color) -> [f32; 4] {
@@ -1236,12 +1229,17 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
     )
 }
 
-fn valid_rect(rect: Rect) -> bool {
-    [rect.x, rect.y, rect.width, rect.height]
-        .iter()
-        .all(|v| v.is_finite())
-        && rect.width > 0.0
-        && rect.height > 0.0
+fn valid_rect(rect: Bounds<Points>) -> bool {
+    [
+        rect.origin.x.0,
+        rect.origin.y.0,
+        rect.size.width.0,
+        rect.size.height.0,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+        && rect.size.width.0 > 0.0
+        && rect.size.height.0 > 0.0
 }
 
 fn resample(source: &Raster, destination: &mut Raster) {
@@ -1327,14 +1325,9 @@ mod tests {
     fn layer(id: NodeId, width: f32, height: f32, color: Color) -> Layer {
         Layer {
             id,
-            size: Size::new(width, height),
+            size: Size::new(Points(width), Points(height)),
             transform: Matrix::IDENTITY,
-            clip: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 8.0,
-                height: 8.0,
-            },
+            clip: Bounds::new(Point::default(), Size::new(Points(8.0), Points(8.0))),
             style: ViewStyle {
                 background_color: color,
                 ..ViewStyle::default()
@@ -1353,15 +1346,10 @@ mod tests {
             cell.set_bg(CellColor::Rgb(255, 255, 255));
         }
         Scene {
-            bounds: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 8.0,
-                height: 8.0,
-            },
+            bounds: Bounds::new(Point::default(), Size::new(Points(8.0), Points(8.0))),
             root,
             backdrop,
-            metrics: CellMetrics::new(1.0, 1.0).unwrap(),
+            metrics: CellMetrics::new(Points(1.0), Points(1.0)).unwrap(),
             font_revision: 0,
             inherited_opacity: 1.0,
         }
@@ -1383,11 +1371,7 @@ mod tests {
             (1280.0, 800.0),
         ] {
             let (width, height, scale) = raster_dimensions(
-                Rect {
-                    width,
-                    height,
-                    ..Rect::default()
-                },
+                Bounds::new(Point::default(), Size::new(Points(width), Points(height))),
                 1.0,
             );
             assert!(width > 0 && width <= MAX_SIDE);
@@ -1414,29 +1398,39 @@ mod tests {
     fn rounded_overflow_clips_descendant_pixels_and_matches_hit_geometry() {
         let mut root = layer(1, 8.0, 8.0, Color::TRANSPARENT);
         root.style.overflow_hidden = true;
-        root.style.border_radius = 4.0;
+        root.style.border_radius = Points(4.0);
         root.children.push(layer(2, 8.0, 8.0, Color(0xff00_00ff)));
         let raster = rasterize(&scene(root), &FontCatalog::default()).unwrap();
         assert_eq!(rgba(&raster, 0, 0), [255, 255, 255, 255]);
         assert_eq!(rgba(&raster, 4, 4), [255, 0, 0, 255]);
         assert!(!rounded_contains(
-            Size::new(8.0, 8.0),
-            CornerRadii::all(4.0),
+            Size::new(Points(8.0), Points(8.0)),
+            CornerRadii::all(Points(4.0)),
             0.5,
             0.5
         ));
         assert!(rounded_contains(
-            Size::new(8.0, 8.0),
-            CornerRadii::all(4.0),
+            Size::new(Points(8.0), Points(8.0)),
+            CornerRadii::all(Points(4.0)),
             4.5,
             4.5
         ));
         let continuous = CornerRadii {
             continuous: true,
-            ..CornerRadii::all(4.0)
+            ..CornerRadii::all(Points(4.0))
         };
-        assert!(!rounded_contains(Size::new(8.0, 8.0), continuous, 0.1, 0.1));
-        assert!(rounded_contains(Size::new(8.0, 8.0), continuous, 4.0, 4.0));
+        assert!(!rounded_contains(
+            Size::new(Points(8.0), Points(8.0)),
+            continuous,
+            0.1,
+            0.1
+        ));
+        assert!(rounded_contains(
+            Size::new(Points(8.0), Points(8.0)),
+            continuous,
+            4.0,
+            4.0
+        ));
     }
 
     #[test]
@@ -1451,12 +1445,7 @@ mod tests {
                 height: 1,
                 rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
             }),
-            frame: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 2.0,
-                height: 1.0,
-            },
+            frame: Bounds::new(Point::default(), Size::new(Points(2.0), Points(1.0))),
             mode: ResizeMode::Stretch,
             tint: None,
             opacity: 1.0,
@@ -1483,12 +1472,7 @@ mod tests {
                 height: 1,
                 rgba: vec![0, 255, 0, 255],
             }),
-            frame: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 2.0,
-                height: 2.0,
-            },
+            frame: Bounds::new(Point::default(), Size::new(Points(2.0), Points(2.0))),
             mode: ResizeMode::Stretch,
             tint: None,
             opacity: 1.0,
@@ -1512,7 +1496,7 @@ mod tests {
     fn backdrop_blur_samples_the_pixels_already_behind_the_group() {
         let mut root = layer(1, 8.0, 8.0, Color::TRANSPARENT);
         root.style.effects = Some(Arc::new(Effects {
-            backdrop_filters: vec![Filter::Blur(1.0)],
+            backdrop_filters: vec![Filter::Blur(Points(1.0))],
             ..Effects::default()
         }));
         let mut scene = scene(root);
@@ -1535,13 +1519,13 @@ mod tests {
         child.transform = Matrix::of(TransformKind::TranslateX, 2.0)
             .mul(&Matrix::of(TransformKind::TranslateY, 2.0));
         child.style.overflow_hidden = true;
-        child.style.border_radius = 1.0;
+        child.style.border_radius = Points(1.0);
         child.style.shadow = nsh_core::Shadow {
             color: Color::BLACK,
-            offset_x: 2.0,
-            offset_y: 0.0,
+            offset_x: Points(2.0),
+            offset_y: Points(0.0),
             opacity: 1.0,
-            radius: 0.0,
+            radius: Points(0.0),
         };
         root.children.push(child);
         let raster = rasterize(&scene(root), &FontCatalog::default()).unwrap();
@@ -1627,12 +1611,7 @@ mod tests {
             .expect("the previous complete frame must remain drawable");
         assert_eq!(
             completed.bounds,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 8.0,
-                height: 8.0
-            }
+            Bounds::new(Point::default(), Size::new(Points(8.0), Points(8.0)))
         );
         assert_eq!(rgba(&completed.raster, 0, 0), [255, 0, 0, 255]);
         assert!(cache.pending());

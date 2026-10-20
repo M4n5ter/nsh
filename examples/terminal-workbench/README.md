@@ -1,7 +1,7 @@
 # Native Shell operations workbench
 
 A dark operations console built with NSH primitives, virtualized lists,
-recorded canvas charts and mobile UI dialogs. The app includes a workspace
+recorded canvas charts and unstyled base dialogs. The app includes a workspace
 sidebar, service health metrics, a searchable fleet, a service inspector,
 an activity timeline and an interactive deployment flow. The 72 services
 are deterministic local data; all changes stay in the current session.

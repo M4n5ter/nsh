@@ -458,7 +458,7 @@ fn place(ui: &DevUi, size: (f32, f32)) {
 
 fn root_size(ui: &DevUi) -> (f32, f32) {
     let s = ui.root.state();
-    (s.frame.width, s.frame.height)
+    (s.frame.size.width.0, s.frame.size.height.0)
 }
 
 fn show_status(ui: &RefCell<DevUi>, status: Status<'_>) {

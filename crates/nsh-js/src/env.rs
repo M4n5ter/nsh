@@ -3,7 +3,7 @@
 //! reduced motion, layout direction, locale) written when the platform reports a
 //! change, read through read-only accessors; `nsh/device` (`Platform`,
 //! `PixelRatio`, `I18nManager`) and `nsh/accessibility`; the insets
-//! context screens and modals provide (`useSafeAreaInsets`).
+//! context screens and modals provide (`safeAreaInsets`).
 
 use std::{
     cell::{Cell, RefCell},
@@ -231,17 +231,17 @@ pub(crate) fn set_environment(ctx: *mut JsContext, next: &Environment) -> Result
         Some(p) => !f(p),
         None => true,
     };
-    let insets = |i: &nsh_core::platform::Insets| {
+    let insets = |i: &nsh_core::Edges<nsh_core::Points>| {
         [
-            (c"top", number(i.top)),
-            (c"right", number(i.right)),
-            (c"bottom", number(i.bottom)),
-            (c"left", number(i.left)),
+            (c"top", number(i.top.0)),
+            (c"right", number(i.right.0)),
+            (c"bottom", number(i.bottom.0)),
+            (c"left", number(i.left.0)),
         ]
     };
     let mut writes: Vec<(Part, JsValue)> = Vec::new();
     if changed(&|p| p.window == next.window) {
-        let (w, h) = next.window;
+        let (w, h) = (next.window.width.0, next.window.height.0);
         writes.push((
             Part::Window,
             object(ctx, &[(c"width", number(w)), (c"height", number(h))]),
@@ -257,9 +257,9 @@ pub(crate) fn set_environment(ctx: *mut JsContext, next: &Environment) -> Result
             object(
                 ctx,
                 &[
-                    (c"height", number(t.top)),
-                    (c"left", number(t.left)),
-                    (c"right", number(t.right)),
+                    (c"height", number(t.top.0)),
+                    (c"left", number(t.left.0)),
+                    (c"right", number(t.right.0)),
                 ],
             ),
         ));
@@ -272,7 +272,7 @@ pub(crate) fn set_environment(ctx: *mut JsContext, next: &Environment) -> Result
             object(
                 ctx,
                 &[
-                    (c"height", number(next.keyboard_height)),
+                    (c"height", number(next.keyboard_height.0)),
                     (c"duration", number(next.keyboard_duration)),
                 ],
             ),
@@ -364,9 +364,9 @@ pub(crate) fn locale(ctx: *mut JsContext) -> nsh_core::platform::Locale {
     current(ctx).locale
 }
 
-/// `useSafeAreaInsets()`: the insets of the nearest screen or modal (an
+/// `safeAreaInsets()`: the insets of the nearest screen or modal (an
 /// accessor).
-unsafe extern "C" fn use_safe_area_insets(
+unsafe extern "C" fn safe_area_insets(
     ctx: *mut JsContext,
     _this: JsValue,
     _argc: c_int,
@@ -383,7 +383,7 @@ pub(crate) fn insets_context(ctx: *mut JsContext) -> JsValue {
 }
 
 /// The values registries re-export as they are (`Registry::reexport`):
-/// the environment's accessors and hooks the mobile UI exports.
+/// the environment's accessors and hooks the UI sets export.
 pub(crate) const REEXPORTS: &[Item] = &[
     (
         "safeArea",
@@ -394,7 +394,7 @@ pub(crate) const REEXPORTS: &[Item] = &[
         ),
     ),
     (
-        "keyboard",
+        "keyboardFrame",
         Export::Value(|ctx| accessor(ctx, Part::Keyboard)),
         Ts::value(
             "Height of the software keyboard over the surface (0 when hidden) and the\nduration of its animation in seconds (reactive).",
@@ -402,11 +402,19 @@ pub(crate) const REEXPORTS: &[Item] = &[
         ),
     ),
     (
-        "useSafeAreaInsets",
-        Export::Function(use_safe_area_insets, 0),
+        "safeAreaInsets",
+        Export::Function(safe_area_insets, 0),
         Ts::function(
-            "Insets not covered by system UI or headers where this component renders:\nthe surface's safe area, a modal's, or a screen's (below its header).",
+            "Insets not covered by system UI or headers where this component renders:\nthe surface's safe area, a dialog's, or a page's (below its header).",
             &["(): Accessor<Insets>"],
+        ),
+    ),
+    (
+        "nextTick",
+        Export::Function(crate::standard::process::next_tick, 1),
+        Ts::function(
+            "Calls `callback` with `args` as a JS job, after the current one and before timers.",
+            &["<A extends unknown[]>(callback: (...args: A) => void, ...args: A): void"],
         ),
     ),
 ];

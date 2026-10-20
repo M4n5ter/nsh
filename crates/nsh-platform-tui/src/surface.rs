@@ -3,12 +3,15 @@
 
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
-use nsh_animation::{AnimationProp, AnimationValue, Graph};
 use nsh_core::{
-    AttributedText, Color, Command, Dialog, EventKind, EventMask, EventPayload, GestureValues,
-    InputConfig, ModalConfig, MountBatch, MountItem, NodeId, PayloadValue, PointerEvents, ROOT_ID,
-    Rect, ScreenConfig, ScrollBehavior, Size, StickyCell, TextLayout, Transform, ViewKind,
-    ViewProps, ViewStyle, access::Access, keymap::Keymap,
+    AttributedText, Bounds, Color, Command, Dialog, EventKind, EventMask, EventPayload,
+    GestureValues, InputConfig, ModalConfig, MountBatch, MountItem, NodeId, PayloadValue, Point,
+    PointerEvents, Points, ROOT_ID, ScreenConfig, ScrollBehavior, Size, StickyCell, TextLayout,
+    Transform, ViewKind, ViewProps, ViewStyle,
+    access::Access,
+    animation::{AnimationProp, AnimationValue, Graph},
+    geometry::{point, px},
+    keymap::Keymap,
 };
 use ratatui::{buffer::Buffer, layout::Rect as CellRect};
 
@@ -24,34 +27,32 @@ pub enum SurfaceEvent {
     /// An application event on a mounted view.
     Event(NodeId, EventKind, EventPayload),
     /// A scroll offset, with the number of core adjustments applied.
-    Scroll(NodeId, f32, f32, u32),
+    Scroll(NodeId, Point<Points>, u32),
     /// Interaction state bits requested by the mounted view.
     States(NodeId, u8),
     /// Animation completions and native value reads.
-    AnimationsFinished(Vec<nsh_animation::Finished>),
+    AnimationsFinished(Vec<nsh_core::animation::Finished>),
     /// A hosted terminal component reported its natural size in points.
-    ComponentSize(NodeId, Size),
+    ComponentSize(NodeId, Size<Points>),
     /// A terminal host operation, dispatched asynchronously by the embedding host.
     Service(crate::services::ServiceRequest),
     /// A scroll content scale, reported before its adjusted offset.
     Zoom(NodeId, f32),
     /// The independently laid out size and insets of a screen or modal.
-    RootSize(NodeId, Size, nsh_core::EdgeInsets),
-    /// The actual terminal height of a navigation header.
-    ScreenHeader(NodeId, Option<f32>),
+    RootSize(NodeId, Size<Points>, nsh_core::EdgeInsets),
 }
 
 pub(crate) struct ScrollState {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) content: Size,
+    pub(crate) x: Points,
+    pub(crate) y: Points,
+    pub(crate) content: Size<Points>,
     pub(crate) horizontal: bool,
     pub(crate) enabled: bool,
     pub(crate) shows_indicator: bool,
     pub(crate) behavior: Box<ScrollBehavior>,
     pub(crate) count: u32,
     pub(crate) sticky: Vec<StickyCell>,
-    pub(crate) scroll_value: Option<nsh_animation::NodeId>,
+    pub(crate) scroll_value: Option<nsh_core::animation::NodeId>,
     pub(crate) mirrored: bool,
     pub(crate) physics: crate::scroll::Physics,
 }
@@ -59,8 +60,8 @@ pub(crate) struct ScrollState {
 impl Default for ScrollState {
     fn default() -> Self {
         Self {
-            x: 0.0,
-            y: 0.0,
+            x: Points::ZERO,
+            y: Points::ZERO,
             content: Size::default(),
             horizontal: false,
             enabled: true,
@@ -80,15 +81,15 @@ pub(crate) struct Node {
     pub(crate) kind: ViewKind,
     pub(crate) parent: Option<NodeId>,
     pub(crate) children: Vec<NodeId>,
-    pub(crate) frame: Rect,
+    pub(crate) frame: Bounds<Points>,
     pub(crate) style: Box<ViewStyle>,
     pub(crate) props: Box<ViewProps>,
     pub(crate) events: EventMask,
     pub(crate) tracked: u8,
-    pub(crate) text: Option<(Arc<AttributedText>, TextLayout, Rect)>,
+    pub(crate) text: Option<(Arc<AttributedText>, TextLayout, Bounds<Points>)>,
     pub(crate) input: InputConfig,
     pub(crate) editor: Editor,
-    pub(crate) input_content: Rect,
+    pub(crate) input_content: Bounds<Points>,
     pub(crate) scroll: ScrollState,
     pub(crate) screen: ScreenConfig,
     pub(crate) modal: ModalConfig,
@@ -96,12 +97,12 @@ pub(crate) struct Node {
     pub(crate) drawing: Option<Arc<nsh_core::canvas::Drawing>>,
     pub(crate) image: crate::image_state::ImageState,
     pub(crate) canvas_raster: Option<Arc<Raster>>,
-    pub(crate) bindings: Vec<(AnimationProp, nsh_animation::NodeId)>,
+    pub(crate) bindings: Vec<(AnimationProp, nsh_core::animation::NodeId)>,
     pub(crate) gestures: GestureValues,
     pub(crate) canvas_args: Vec<(u16, AnimationValue)>,
     pub(crate) native: Option<Box<dyn crate::native::NativeComponent>>,
     pub(crate) media: Option<Box<crate::media::MediaState>>,
-    native_size: Option<Size>,
+    native_size: Option<Size<Points>>,
     pub(crate) motion: Option<Box<crate::motion::NodeMotion>>,
     pub(crate) delete_pending: bool,
 }
@@ -113,7 +114,7 @@ impl Node {
             kind,
             parent: None,
             children: Vec::new(),
-            frame: Rect::default(),
+            frame: Bounds::default(),
             style: Box::default(),
             props: Box::default(),
             events: EventMask::default(),
@@ -121,7 +122,7 @@ impl Node {
             text: None,
             input: InputConfig::default(),
             editor: Editor::default(),
-            input_content: Rect::default(),
+            input_content: Bounds::default(),
             scroll: ScrollState::default(),
             screen: ScreenConfig::default(),
             modal: ModalConfig::default(),
@@ -290,7 +291,7 @@ impl Surface {
     }
 
     /// The layout viewport in virtual points.
-    pub fn viewport(&self) -> Size {
+    pub fn viewport(&self) -> Size<Points> {
         self.metrics.viewport(self.columns, self.rows)
     }
 
@@ -300,12 +301,7 @@ impl Surface {
         self.rows = rows;
         let size = self.viewport();
         if let Some(root) = self.node_mut(ROOT_ID) {
-            root.frame = Rect {
-                x: 0.0,
-                y: 0.0,
-                width: size.width,
-                height: size.height,
-            };
+            root.frame = Bounds::new(Point::new(px(0.0), px(0.0)), size);
         }
     }
 
@@ -427,13 +423,13 @@ impl Surface {
     ) -> crate::native::ComponentContext {
         let frame = self.global_frame(id).unwrap_or_default();
         let clip = intersect(frame, self.clip_rect(id));
-        let cells = |rect: Rect| {
-            let left = (rect.x / self.metrics.width()).floor().max(0.0) as u16;
-            let top = (rect.y / self.metrics.height()).floor().max(0.0) as u16;
-            let right = ((rect.x + rect.width) / self.metrics.width())
+        let cells = |rect: Bounds<Points>| {
+            let left = (rect.origin.x / self.metrics.width()).floor().max(0.0) as u16;
+            let top = (rect.origin.y / self.metrics.height()).floor().max(0.0) as u16;
+            let right = ((rect.origin.x + rect.size.width) / self.metrics.width())
                 .ceil()
                 .max(0.0) as u16;
-            let bottom = ((rect.y + rect.height) / self.metrics.height())
+            let bottom = ((rect.origin.y + rect.size.height) / self.metrics.height())
                 .ceil()
                 .max(0.0) as u16;
             CellRect::new(
@@ -472,8 +468,8 @@ impl Surface {
             .and_then(|component| component.intrinsic_size())
             && size.width.is_finite()
             && size.height.is_finite()
-            && size.width > 0.0
-            && size.height > 0.0
+            && size.width > Points::ZERO
+            && size.height > Points::ZERO
             && self
                 .node(id)
                 .is_some_and(|node| node.native_size != Some(size))
@@ -607,7 +603,7 @@ impl Surface {
                                 | ViewKind::Modal
                                 | ViewKind::Stack
                                 | ViewKind::HeaderItem
-                        ) && node.frame == Rect::default())
+                        ) && node.frame == Bounds::default())
                         .then(|| layout.as_ref().and_then(|a| a.create.as_ref()))
                         .flatten();
                         if create.is_some() || node.motion.is_some() {
@@ -726,8 +722,8 @@ impl Surface {
                         .node_mut(id)
                         .map(|node| {
                             node.image.resize(Size {
-                                width: frame.width,
-                                height: frame.height,
+                                width: frame.size.width,
+                                height: frame.size.height,
                             })
                         })
                         .unwrap_or_default();
@@ -999,7 +995,7 @@ impl Surface {
         }
     }
 
-    pub(crate) fn scroll_to(&mut self, id: NodeId, x: f32, y: f32) {
+    pub(crate) fn scroll_to(&mut self, id: NodeId, x: Points, y: Points) {
         self.scroll_jump(id, x, y);
     }
 
@@ -1190,7 +1186,7 @@ impl Surface {
                 AnimationProp::BorderColor => style.borders.colors = [color; 4],
                 AnimationProp::ShadowColor => style.shadow.color = color,
                 AnimationProp::ShadowOpacity => style.shadow.opacity = value.number(),
-                AnimationProp::ShadowRadius => style.shadow.radius = value.number(),
+                AnimationProp::ShadowRadius => style.shadow.radius = px(value.number()),
                 _ => {}
             }
         }
@@ -1258,7 +1254,9 @@ impl Surface {
                     .node(child)
                     .is_some_and(|n| n.kind == ViewKind::HeaderItem)
             {
-                headers.push(child);
+                if node.screen.header_view == Some(child) {
+                    headers.push(child);
+                }
                 continue;
             }
             self.collect_layer(child, result, modals, false);
@@ -1284,13 +1282,27 @@ impl Surface {
         } else {
             None
         };
+        let mut header = None;
         for &child in &node.children {
+            if node.kind == ViewKind::Screen
+                && self
+                    .node(child)
+                    .is_some_and(|n| n.kind == ViewKind::HeaderItem)
+            {
+                if node.screen.header_view == Some(child) {
+                    header = Some(child);
+                }
+                continue;
+            }
             if top_screen.is_some_and(|top| {
                 top != child && self.node(child).is_some_and(|n| n.kind == ViewKind::Screen)
             }) {
                 continue;
             }
             self.collect_visible(child, result);
+        }
+        if let Some(header) = header {
+            self.collect_visible(header, result);
         }
     }
 
@@ -1313,48 +1325,23 @@ impl Surface {
         }
     }
 
-    pub(crate) fn presentation_frame(&self, id: NodeId) -> Option<Rect> {
+    pub(crate) fn presentation_frame(&self, id: NodeId) -> Option<Bounds<Points>> {
         let node = self.node(id)?;
         let mut frame = node.motion.as_ref().map_or(node.frame, |motion| {
             motion.sample(node.frame, &node.style, self.now).frame
         });
-        if node.kind == ViewKind::HeaderItem
-            && let Some(screen) = node
-                .parent
-                .and_then(|id| self.node(id))
-                .filter(|node| node.kind == ViewKind::Screen)
-        {
-            let height = self
-                .navigation_header(node.parent?)
-                .bar_height
-                .max(self.metrics.height());
-            frame.y = ((height - frame.height) / 2.0).max(0.0);
-            let edge = self.metrics.width();
-            frame.x = if screen.screen.right == Some(id) {
-                (screen.frame.width - frame.width - edge).max(0.0)
-            } else if screen.screen.title_view == Some(id) {
-                ((screen.frame.width - frame.width) / 2.0).max(0.0)
-            } else {
-                edge
-            };
-        }
         if node.kind == ViewKind::Modal {
             frame = self.modal_frame(id, frame);
         }
         let (x, y, _) = self.navigation_values(id);
-        frame.x += x;
-        frame.y += y;
+        frame.origin.x += px(x);
+        frame.origin.y += px(y);
         Some(frame)
     }
 
-    pub(crate) fn clip_rect(&self, id: NodeId) -> Rect {
+    pub(crate) fn clip_rect(&self, id: NodeId) -> Bounds<Points> {
         let viewport = self.viewport();
-        let mut clip = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: viewport.width,
-            height: viewport.height,
-        };
+        let mut clip = Bounds::new(Point::new(px(0.0), px(0.0)), viewport);
         if self
             .node(id)
             .is_some_and(|node| node.kind == ViewKind::Modal)
@@ -1367,9 +1354,6 @@ impl Surface {
                 break;
             };
             if (matches!(node.kind, ViewKind::Scroll | ViewKind::Stack)
-                || (node.kind == ViewKind::Modal
-                    && !node.modal.transparent
-                    && node.modal.presentation != nsh_core::ModalPresentation::FullScreen)
                 || node.style.overflow_hidden)
                 && let Some(frame) = self.global_frame(id)
             {
@@ -1406,16 +1390,13 @@ impl Surface {
                     return false;
                 }
                 if (matches!(ancestor.kind, ViewKind::Scroll | ViewKind::Stack)
-                    || (ancestor.kind == ViewKind::Modal
-                        && !ancestor.modal.transparent
-                        && ancestor.modal.presentation != nsh_core::ModalPresentation::FullScreen)
                     || ancestor.style.overflow_hidden)
                     && !self.surface_to_local(id, x, y).is_some_and(|(x, y)| {
                         self.presentation_frame(id).is_some_and(|frame| {
                             crate::composite::rounded_contains(
                                 Size {
-                                    width: frame.width,
-                                    height: frame.height,
+                                    width: frame.size.width,
+                                    height: frame.size.height,
                                 },
                                 self.animated_style(id).radii(),
                                 x,
@@ -1437,10 +1418,10 @@ impl Surface {
             let Some((local_x, local_y)) = self.surface_to_local(id, x, y) else {
                 return false;
             };
-            frame.x = -node.props.hit_slop.left;
-            frame.y = -node.props.hit_slop.top;
-            frame.width += node.props.hit_slop.left + node.props.hit_slop.right;
-            frame.height += node.props.hit_slop.top + node.props.hit_slop.bottom;
+            frame.origin.x = -node.props.hit_slop.left;
+            frame.origin.y = -node.props.hit_slop.top;
+            frame.size.width += node.props.hit_slop.left + node.props.hit_slop.right;
+            frame.size.height += node.props.hit_slop.top + node.props.hit_slop.bottom;
             contains(frame, local_x, local_y) && contains(self.clip_rect(id), x, y)
         })
     }
@@ -1491,7 +1472,7 @@ impl Surface {
             let Some(drawing) = node.drawing.clone() else {
                 continue;
             };
-            if node.frame.width <= 0.0 || node.frame.height <= 0.0 {
+            if node.frame.size.width <= Points::ZERO || node.frame.size.height <= Points::ZERO {
                 continue;
             }
             let images = drawing
@@ -1512,8 +1493,8 @@ impl Surface {
                 drawing,
                 args: node.canvas_args.clone(),
                 size: Size {
-                    width: node.frame.width,
-                    height: node.frame.height,
+                    width: node.frame.size.width,
+                    height: node.frame.size.height,
                 },
                 images,
             });
@@ -1609,7 +1590,7 @@ impl Surface {
         {
             return;
         }
-        if request.blur_radius > 0.0 {
+        if request.blur_radius > Points::ZERO {
             if !self
                 .pending_blurs
                 .iter()
@@ -1649,10 +1630,10 @@ impl Surface {
             self.emit(
                 id,
                 EventKind::Load,
-                EventPayload::Image {
-                    width: dimensions.0 as f32,
-                    height: dimensions.1 as f32,
-                },
+                EventPayload::Image(Size::new(
+                    nsh_core::geometry::DevicePixels(dimensions.0 as i32),
+                    nsh_core::geometry::DevicePixels(dimensions.1 as i32),
+                )),
             );
             self.emit(id, EventKind::LoadEnd, EventPayload::None);
         }
@@ -1863,19 +1844,20 @@ impl Surface {
     }
 }
 
-pub(crate) fn intersect(a: Rect, b: Rect) -> Rect {
-    let x = a.x.max(b.x);
-    let y = a.y.max(b.y);
-    Rect {
-        x,
-        y,
-        width: (a.x + a.width).min(b.x + b.width).max(x) - x,
-        height: (a.y + a.height).min(b.y + b.height).max(y) - y,
-    }
+pub(crate) fn intersect(a: Bounds<Points>, b: Bounds<Points>) -> Bounds<Points> {
+    let x = a.origin.x.max(b.origin.x);
+    let y = a.origin.y.max(b.origin.y);
+    Bounds::new(
+        point(x, y),
+        Size::new(
+            (a.right().min(b.right()) - x).max(Points::ZERO),
+            (a.bottom().min(b.bottom()) - y).max(Points::ZERO),
+        ),
+    )
 }
 
-pub(crate) fn contains(rect: Rect, x: f32, y: f32) -> bool {
-    x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height
+pub(crate) fn contains(rect: Bounds<Points>, x: f32, y: f32) -> bool {
+    x >= rect.origin.x.0 && y >= rect.origin.y.0 && x < rect.right().0 && y < rect.bottom().0
 }
 
 #[cfg(test)]
@@ -1884,7 +1866,13 @@ mod tests {
 
     use super::*;
 
-    fn create(surface: &mut Surface, id: NodeId, kind: ViewKind, parent: NodeId, frame: Rect) {
+    fn create(
+        surface: &mut Surface,
+        id: NodeId,
+        kind: ViewKind,
+        parent: NodeId,
+        frame: Bounds<Points>,
+    ) {
         surface.apply(MountBatch {
             items: vec![
                 MountItem::Create { id, kind },
@@ -1908,11 +1896,7 @@ mod tests {
             2,
             ViewKind::Canvas,
             ROOT_ID,
-            Rect {
-                width: 16.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(16.0), px(16.0))),
         );
         let uri: Arc<str> = "asset:/animated.gif".into();
         let animation = Arc::new(AnimatedRaster {
@@ -1989,137 +1973,138 @@ mod tests {
             2,
             ViewKind::Scroll,
             ROOT_ID,
-            Rect {
-                width: 160.0,
-                height: 80.0,
-                ..Rect::default()
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(160.0), px(80.0))),
         );
         surface.apply(MountBatch {
             items: vec![MountItem::ScrollContent {
                 id: 2,
-                size: Size::new(160.0, 800.0),
+                size: Size::new(px(160.0), px(800.0)),
             }],
         });
-        surface.scroll_to(2, 0.0, 600.0);
+        surface.scroll_to(2, px(0.0), px(600.0));
         surface.events.clear();
         surface.apply(MountBatch {
             items: vec![MountItem::ScrollContent {
                 id: 2,
-                size: Size::new(160.0, 112.0),
+                size: Size::new(px(160.0), px(112.0)),
             }],
         });
-        assert_eq!(surface.node(2).unwrap().scroll.y, 32.0);
+        assert_eq!(surface.node(2).unwrap().scroll.y, px(32.0));
         assert!(
             surface
                 .events
                 .iter()
-                .any(|event| matches!(event, SurfaceEvent::Scroll(2, 0.0, 32.0, 0)))
+                .any(|event| matches!(event, SurfaceEvent::Scroll(2, position, 0) if *position == point(px(0.0), px(32.0))))
         );
         surface.apply(MountBatch {
             items: vec![MountItem::Frame {
                 id: 2,
-                frame: Rect {
-                    width: 160.0,
-                    height: 160.0,
-                    ..Rect::default()
-                },
+                frame: Bounds::new(
+                    Point::new(px(0.0), px(0.0)),
+                    Size::new(px(160.0), px(160.0)),
+                ),
             }],
         });
-        assert_eq!(surface.node(2).unwrap().scroll.y, 0.0);
+        assert_eq!(surface.node(2).unwrap().scroll.y, px(0.0));
     }
 
     #[test]
-    fn header_slots_and_mirrored_cells_share_paint_and_hit_geometry() {
+    fn app_header_and_mirrored_cells_share_paint_and_hit_geometry() {
         let mut surface = Surface::new(20, 10, CellMetrics::default());
         create(
             &mut surface,
             2,
             ViewKind::Screen,
             ROOT_ID,
-            Rect {
-                width: 160.0,
-                height: 160.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(px(0.0), px(0.0)),
+                Size::new(px(160.0), px(160.0)),
+            ),
         );
         create(
             &mut surface,
             4,
             ViewKind::HeaderItem,
             2,
-            Rect {
-                width: 24.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(160.0), px(16.0))),
         );
         create(
             &mut surface,
             6,
-            ViewKind::HeaderItem,
-            2,
-            Rect {
-                width: 24.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            ViewKind::View,
+            4,
+            Bounds::new(
+                Point::new(px(128.0), px(0.0)),
+                Size::new(px(24.0), px(16.0)),
+            ),
         );
         surface.apply(MountBatch {
             items: vec![MountItem::ScreenConfig {
                 id: 2,
                 config: Box::new(ScreenConfig {
-                    left: Some(4),
-                    right: Some(6),
-                    header_height: 32.0,
+                    header_view: Some(4),
+                    header_height: px(32.0),
                     ..ScreenConfig::default()
                 }),
             }],
         });
-        assert_eq!(surface.global_frame(4).unwrap().x, 8.0);
-        assert_eq!(surface.global_frame(6).unwrap().x, 128.0);
+        assert_eq!(surface.global_frame(4).unwrap().origin.x, px(0.0));
+        assert_eq!(surface.global_frame(6).unwrap().origin.x, px(128.0));
         assert_eq!(surface.hit_test(132.0, 12.0), Some(6));
         create(
             &mut surface,
             8,
             ViewKind::Scroll,
             ROOT_ID,
-            Rect {
-                y: 48.0,
-                width: 160.0,
-                height: 64.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(px(0.0), px(48.0)),
+                Size::new(px(160.0), px(64.0)),
+            ),
         );
         create(
             &mut surface,
             10,
             ViewKind::View,
             8,
-            Rect {
-                x: 32.0,
-                width: 24.0,
-                height: 32.0,
-                ..Rect::default()
-            },
+            Bounds::new(Point::new(px(32.0), px(0.0)), Size::new(px(24.0), px(32.0))),
         );
         create(
             &mut surface,
             12,
             ViewKind::View,
             10,
-            Rect {
-                x: 8.0,
-                width: 8.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            Bounds::new(Point::new(px(8.0), px(0.0)), Size::new(px(8.0), px(16.0))),
         );
         surface.node_mut(8).unwrap().scroll.mirrored = true;
-        surface.node_mut(8).unwrap().scroll.x = 16.0;
-        assert_eq!(surface.global_frame(10).unwrap().x, 120.0);
-        assert_eq!(surface.global_frame(12).unwrap().x, 128.0);
+        surface.node_mut(8).unwrap().scroll.x = px(16.0);
+        assert_eq!(surface.global_frame(10).unwrap().origin.x, px(120.0));
+        assert_eq!(surface.global_frame(12).unwrap().origin.x, px(128.0));
         assert_eq!(surface.hit_test(129.0, 49.0), Some(12));
+    }
+
+    #[test]
+    fn a_dialog_page_hits_its_app_header_above_later_content() {
+        let mut surface = Surface::new(20, 10, CellMetrics::default());
+        let frame = Bounds::new(point(px(0.0), px(0.0)), Size::new(px(160.0), px(160.0)));
+        create(&mut surface, 2, ViewKind::Modal, ROOT_ID, frame);
+        create(&mut surface, 4, ViewKind::Screen, 2, frame);
+        create(&mut surface, 6, ViewKind::HeaderItem, 4, frame);
+        create(&mut surface, 8, ViewKind::View, 4, frame);
+        create(&mut surface, 10, ViewKind::HeaderItem, 4, frame);
+        surface.apply(MountBatch {
+            items: vec![MountItem::ScreenConfig {
+                id: 4,
+                config: Box::new(ScreenConfig {
+                    header_view: Some(6),
+                    left: Some(10),
+                    ..ScreenConfig::default()
+                }),
+            }],
+        });
+        surface.tick(1.0);
+        assert_eq!(surface.hit_test(4.0, 8.0), Some(6));
+        assert!(!surface.visible_ids().contains(&10));
+        assert!(!surface.paint_ids().contains(&10));
     }
 
     #[test]
@@ -2130,11 +2115,7 @@ mod tests {
             2,
             ViewKind::View,
             ROOT_ID,
-            Rect {
-                width: 32.0,
-                height: 32.0,
-                ..Rect::default()
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(32.0), px(32.0))),
         );
         let transition = LayoutTransition {
             curve: LayoutCurve::Linear,
@@ -2150,17 +2131,15 @@ mod tests {
                 }),
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        x: 80.0,
-                        width: 32.0,
-                        height: 32.0,
-                        ..Rect::default()
-                    },
+                    frame: Bounds::new(
+                        Point::new(px(80.0), px(0.0)),
+                        Size::new(px(32.0), px(32.0)),
+                    ),
                 },
             ],
         });
         surface.tick(0.5);
-        assert_eq!(surface.global_frame(2).unwrap().x, 40.0);
+        assert_eq!(surface.global_frame(2).unwrap().origin.x, px(40.0));
         assert_eq!(surface.hit_test(45.0, 8.0), Some(2));
         surface.apply(MountBatch {
             items: vec![
@@ -2251,12 +2230,7 @@ mod image_ownership_tests {
                 },
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 32.0,
-                        height: 32.0,
-                    },
+                    frame: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(32.0), px(32.0))),
                 },
                 MountItem::Image {
                     id: 2,

@@ -23,8 +23,22 @@ sudo apt-get install clang libclang-dev pkg-config libfontconfig-dev libfreetype
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good
 ```
 
-macOS needs Xcode (Metal), Windows the MSVC toolchain and LLVM as for the Windows backend (`RUST_MIN_STACK` included).
-Off the three desktops the crates are empty.
+macOS needs Xcode and its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), with which GPUI's build
+script precompiles its shaders. A Mac without it builds with the feature `runtime-shaders` (`nsh-platform-gpui`'s,
+forwarded by `nsh-gpui-host` and `nsh-gpui-app`), with which GPUI compiles the shaders when it makes a window's renderer:
+
+```sh
+cargo build --manifest-path crates/gpui/Cargo.toml --target-dir target -p nsh-gpui-host --features nsh-gpui-host/runtime-shaders
+(cd examples/embed-gpui && cargo run --features nsh-platform-gpui/runtime-shaders)
+```
+
+The CLI adds it by itself where `xcrun metal` fails (`runtime::gpui_features`): to the GPUI host and runner it builds
+in a checkout (`nsh run` / `nsh package --target gpui`) and to the GPUI workspace of an app with Rust crates
+(`.nsh/rust/gpui`), and says so in a note. Compiling them took 0.3 to 0.5 s on Apple silicon the first time a Mac saw
+their source (a new GPUI version); macOS caches the result, so later windows and starts took no measurable time.
+
+Windows needs the MSVC toolchain and LLVM as for the Windows backend (`RUST_MIN_STACK` included). Off the three
+desktops the crates are empty.
 
 The three crates are a workspace of their own, `crates/gpui` (its own `Cargo.toml`, `Cargo.lock` and the dependencies
 only they use: GPUI, wry, GStreamer, tiny-skia, ...), excluded from the main workspace, so the main workspace's builds,
@@ -59,6 +73,7 @@ Features:
 | `video` | videos with GStreamer (`native/video.rs`); without it a video is a placeholder that reports `onError` | Linux | Linux |
 | `dev` | the dev server client, log forwarding, the error overlay (`dev.rs`) | yes | no |
 | `shot` | `--script` shots on macOS and Windows through GPUI's `test-support` (`Window::render_to_image`); the tests in windows of GPUI's test platform (`tests.rs`) | macOS, Windows | no |
+| `runtime-shaders` | GPUI's Metal shaders compiled when the app starts, not by the build (`gpui_platform/runtime_shaders`): builds on a Mac without the Metal Toolchain; nothing elsewhere | the CLI's, where `xcrun metal` fails | the CLI's, where `xcrun metal` fails; never the distribution's |
 
 `shot` turns on GPUI's test support: never in the release runner. With it, the crate's tests include `tests.rs`:
 surfaces in windows of GPUI's test platform (`TestAppContext`), drawn and given GPUI's input with the engine on its
@@ -96,7 +111,7 @@ import -window root -display :170 whole.png        # the display, if the window'
   fills the space its parent gives it, reports that size to the engine, takes the pointer and keys over it
   (`events.rs`) and paints the whole tree in its `paint` (`render::draw_view`): shadows and background (`decor.rs`),
   the content clipped to the bounds (text, image, canvas), the children (clipped when the view clips), the hosted
-  items (`view::Hosted`: text editors, headers, dialogs) and the scroll indicator, then the border. Each node is an
+  items (`view::Hosted`: text editors, alerts) and the scroll indicator, then the border. Each node is an
   `NshView` (`view.rs`), a retained view the core placed at its frame, as on Windows.
 - **`DrawCx`** (`render.rs`) is the drawing state GPUI does not keep: GPUI paints primitives (quads, paths, glyphs,
   images) in window coordinates (logical pixels, which are NSH's points) with no world transform and no group
@@ -139,8 +154,9 @@ import -window root -display :170 whole.png        # the display, if the window'
   `open_app_window` opens one in a window of a running GPUI app; `run_app` runs the standalone app (one `AppView`
   filling a window, the process quits when the last window closes). `register_component` registers native
   components (GPUI elements); `set_theme` / `set_appearance` give the surface the host's theme and mode; `set_ui_sets`
-  replaces the default `nsh/ui/mobile` set for apps with Rust components of their own, and gives the host's own sets,
-  which apps reach by name (`nativeModule`, `embedding.md` "Native modules"). Several views are several
+  serves the UI sets beside the runtime's modules (`nsh/base` by default; an app with Rust components of its own passes
+  `nsh_base::registry()` and its sets), and gives the host's own sets, which apps reach by name (`nativeModule`,
+  `embedding.md` "Native modules"). Several views are several
   engines; nothing is global but the `rt` queue and the key bindings, which are per process. Windows showing surfaces
   are opened with `inactive_frame_interval: None` (GPUI draws unfocused windows at 30 fps by default); a host must set
   it in its own `WindowOptions` too. Embedding in a GPUI Kit app (one GPUI, focus and Tab, overlays, themes, frame
@@ -157,8 +173,8 @@ import -window root -display :170 whole.png        # the display, if the window'
 | Scroll views | `scroll.rs` | The Windows backend's: offsets of their own, UIKit-like deceleration, snapping, paging, sticky cells, rubber banding for touch drags (mouse drags never scroll: they are the app's), the keyboard, mirrored horizontal lists, the indicator dragged as a scroll bar, shown while the mouse moves over the view and kept on horizontal views with `showsIndicator={false}` (as on Linux); touchpad scrolls carry GPUI's phases, touchpad pinches go to pinch gestures |
 | Input | `input.rs`, `events.rs` | The Windows backend's hit testing, presses, responder and gestures, fed by GPUI's mouse, wheel and pinch events; hover and pressed states and `onHoverIn` / `onHoverOut` / `onHoverMove` (hover picked again after every batch for a still mouse), `onContextMenu` (the secondary button, which GPUI's macOS window also makes of a Control-click; a field or selectable text nearer opens its edit menu); the cursor is set from the frame (`set_cursor_style`) |
 | Text inputs | `text_input.rs` | The editor shared with the Windows backend (`text_input/model.rs`), laid out with GPUI's text system and hosted in the input's view; text arrives through GPUI's input handler (`Window::handle_input`, the `AppView` as `EntityInputHandler`), IME compositions underlined at the caret and the candidate window placed with `bounds_for_range`; the caret blinks on a timer; Cmd on macOS where Ctrl is used elsewhere |
-| Navigation, modals | `navigation.rs` | As on Windows: screens slide in and out, headers drawn natively as hosted items with a fixed height reported to the core, back natively (Escape, Alt+Left, Cmd+[ on macOS, Browser Back, the mouse's back button), sheets as cards over a scrim. GPUI has no offscreen pictures, so a departing screen or modal keeps its views (their detaching deferred) in a layer drawn moving out |
-| Dialogs, toasts | `system.rs` | Drawn in the surface as items the root hosts (the Windows backend's content dialogs), so they stay with an embedded surface and never block the main loop |
+| Navigation, dialogs | `navigation.rs` | As on Windows: pages slide in and out; NSH draws no header, a page's `header` (the app's view) is placed at its top by the core, full width, with the content below; back natively (Escape, Alt+Left, Cmd+[ on macOS, Browser Back, the mouse's back button: `onBackPress` when the app listens, then a pop unless `popOnBack` is false); dialogs are transparent layers over the window showing only the app's popup and backdrop (`presentation` is ignored). GPUI has no offscreen pictures, so a departing page or dialog keeps its views (their detaching deferred) in a layer drawn moving out |
+| Alerts (`AlertDialog`), toasts | `system.rs` | Drawn in the surface as items the root hosts (the Windows backend's content dialogs), so they stay with an embedded surface and never block the main loop |
 | Video | `native/video.rs` | Feature `video` (Linux): GStreamer `playbin` with an `appsink` of BGRA frames, each frame a `RenderImage` painted as view content (clipped, transformed at its bounds, covered like any view); `controls` draws NSH's own bar |
 | Web views | `native/web.rs` | Feature `webview`: wry. Linux: WebKitGTK 4.1 on GTK 3 (X11 only: GPUI must run on X11 or Xwayland) in a GPUI Fast native composition surface (an X11 child window) sized to the visible part of its view, GTK's loop pumped from GPUI's; macOS / Windows: wry's `WKWebView` / WebView2 child at the view's box |
 | Native components | `native.rs` | `AppView::register_component`; a component renders any GPUI or GPUI Kit element, laid out and prepainted at its box every frame, clipped to its clipping ancestors, painted where the tree draws its box; its hitboxes take the pointer there (`embedding.md`) |

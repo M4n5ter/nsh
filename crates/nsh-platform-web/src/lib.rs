@@ -25,9 +25,11 @@ mod animation;
 mod canvas;
 mod encode;
 mod ffi;
+mod filesystem;
 mod net;
 mod storage;
 mod text;
+mod websocket;
 
 use std::{
     cell::{Cell, RefCell},
@@ -35,7 +37,8 @@ use std::{
 };
 
 use nsh_core::{
-    EventKind, EventPayload, MountBatch, MountItem, PayloadValue, ROOT_ID, Size,
+    EventKind, EventPayload, MountBatch, MountItem, PayloadValue, Points, ROOT_ID, Size,
+    geometry::{DevicePixels, point, px, size},
     keymap::{Key, KeyMatch, Keymap, Keystroke, Modifiers},
 };
 use nsh_engine::{
@@ -47,8 +50,10 @@ use nsh_engine::{Bundle, BundleCode, Chunk, HotUpdate, Policy};
 
 use crate::{animation::UiAnimation, encode::Out, text::WebTextEngine};
 pub use crate::{
+    filesystem::nsh_filesystem_reply,
     net::{nsh_fetch_body_wanted, nsh_fetch_data, nsh_fetch_end, nsh_fetch_failed, nsh_fetch_head},
     storage::nsh_storage_reply,
+    websocket::{nsh_websocket_event, nsh_websocket_reply},
 };
 
 thread_local! {
@@ -74,7 +79,7 @@ thread_local! {
     /// [`nsh_key`] while a key event is being handled. Apart from [`APP`]
     /// so that matching never needs the engine.
     static KEYMAP: RefCell<Option<std::sync::Arc<Keymap>>> = const { RefCell::new(None) };
-    /// The UI sets apps import ([`set_ui_sets`]; by default the mobile UI).
+    /// The UI sets apps import ([`set_ui_sets`]; by default `nsh/base`).
     static UI_SETS: RefCell<Option<Vec<nsh_core::ui::Registry>>> = const { RefCell::new(None) };
     /// What makes the Rust app's root ([`set_root`]), for [`nsh_start_rust`].
     static ROOT: RefCell<Option<Box<dyn Fn() -> nsh_core::ui::Root>>> = const { RefCell::new(None) };
@@ -86,22 +91,22 @@ thread_local! {
 /// What [`ui_sets!`] gives.
 pub use nsh_core::ui::Registry;
 
-/// Sets the UI sets the apps started from now on serve: the mobile UI and
+/// Sets the UI sets the apps started from now on serve: `nsh/base` and
 /// an app's own Rust components (`nsh.json` `"rust"`). A runtime built for
 /// the app ([`ui_sets!`]) passes them before the page starts anything.
 pub fn set_ui_sets(sets: Vec<Registry>) {
     UI_SETS.with(|s| *s.borrow_mut() = Some(sets));
 }
 
-/// The UI sets engines serve: [`set_ui_sets`]'s, else the mobile UI.
+/// The UI sets engines serve: [`set_ui_sets`]'s, else nsh's own.
 fn ui_sets() -> Vec<Registry> {
     UI_SETS
         .with(|s| s.borrow().clone())
-        .unwrap_or_else(|| vec![nsh_ui_mobile::registry()])
+        .unwrap_or_else(|| vec![nsh_base::registry()])
 }
 
 /// Makes this module an app's web runtime that serves `$sets` (an
-/// expression giving the `Vec<Registry>` of the mobile UI and the app's own
+/// expression giving the `Vec<Registry>` of `nsh/base` and the app's own
 /// Rust components): `nsh` builds one for apps with `"rust"` in `nsh.json`.
 /// It exports `nsh_app_init`, which `nsh.js` calls once the module is
 /// instantiated.
@@ -123,7 +128,7 @@ pub fn set_root(root: impl Fn() -> nsh_core::ui::Root + 'static) {
 }
 
 /// Makes this module the web runtime of a Rust app (`nsh.json` `"root"`):
-/// it serves `$sets` (the mobile UI and the app's own set) and runs the
+/// it serves `$sets` (`nsh/base` and the app's own set) and runs the
 /// root component `$root` makes (an expression giving a
 /// [`nsh_core::ui::Root`]) when the page calls [`nsh_start_rust`]. Built
 /// without the feature `js`, the module has no QuickJS: the app is Rust
@@ -281,7 +286,7 @@ pub unsafe extern "C" fn nsh_asset_bytes(ptr: *const u8, len: usize) {
 
 fn environment(width: f32, height: f32, dark: bool, pixel_ratio: f32) -> Environment {
     Environment {
-        window: (width, height),
+        window: nsh_core::Size::new(nsh_core::Points(width), nsh_core::Points(height)),
         color_scheme: if dark {
             ColorScheme::Dark
         } else {
@@ -352,14 +357,15 @@ pub unsafe extern "C" fn nsh_environment(ptr: *const u8, len: usize) -> f64 {
         .filter(|a| a.len() == 4)
         .map(|a| [0, 1, 2, 3].map(|i| a[i].as_f64().unwrap_or(0.0) as f32))
     {
-        env.safe_area = nsh_core::platform::Insets {
+        env.safe_area = nsh_core::Edges {
             top,
             right,
             bottom,
             left,
-        };
+        }
+        .map(|&v| nsh_core::Points(v));
     }
-    env.keyboard_height = num("keyboard").unwrap_or(env.keyboard_height);
+    env.keyboard_height = Points(num("keyboard").unwrap_or(env.keyboard_height.0));
     PAGE.with(|p| p.set(Some(env)));
     send(|app| {
         let e = &mut app.environment;
@@ -500,25 +506,28 @@ fn start(code: BundleCode, width: f32, height: f32, dark: u32, pixel_ratio: f32)
 fn run(app: App, width: f32, height: f32, environment: Environment, limits: Limits) -> f64 {
     let storage =
         BASE_URL.with(|b| storage::LocalStorage::new(app.app_id(), b.borrow().as_deref()));
+    let namespace = BASE_URL.with(|b| {
+        nsh_engine::local_storage_prefix(app.app_id(), b.borrow().as_deref().unwrap_or(""))
+    });
     let config = EngineConfig {
         app,
-        viewport: Size::new(width, height),
+        viewport: Size::new(Points(width), Points(height)),
         trace: false,
         network: Some(std::sync::Arc::new(net::WebNetwork)),
+        websocket: Some(std::sync::Arc::new(websocket::BrowserWebSocket)),
         assets: Some(std::sync::Arc::new(PageAssets)),
         environment,
-        // A desktop browser's headers are as tall as the desktop backends'
-        // (`navigation::HEADER_HEIGHTS` there).
-        header_heights: if environment.idiom == Idiom::Desktop {
-            (47.0, 94.0)
-        } else {
-            (44.0, 96.0)
-        },
+        // NSH draws no header: a page's `header` sits at its top.
+        header_heights: nsh_core::NO_NATIVE_HEADER,
         limits,
         ui_sets: ui_sets(),
         runtime: None,
-        data_dir: None,
+        data_dir: Some("/app-data".into()),
+        filesystem: Some(std::sync::Arc::new(filesystem::BrowserFileSystem {
+            namespace,
+        })),
         storage: Some(std::sync::Arc::new(storage)),
+        clock: Default::default(),
     };
     let text = Rc::new(WebTextEngine::default());
     let Some(engine) = LocalEngine::start(config, text.clone(), Sink) else {
@@ -907,16 +916,16 @@ pub unsafe extern "C" fn nsh_event(
         | EventKind::ScrollBeginDrag
         | EventKind::ScrollEndDrag
         | EventKind::MomentumScrollBegin
-        | EventKind::MomentumScrollEnd => EventPayload::Scroll {
-            x: num("x"),
-            y: num("y"),
-        },
+        | EventKind::MomentumScrollEnd => {
+            EventPayload::Scroll(point(Points(num("x")), Points(num("y"))))
+        }
         // A video's and a web view's loads carry more than an image's.
         EventKind::Load if value.get("duration").is_none() && value.get("url").is_none() => {
-            EventPayload::Image {
-                width: num("width"),
-                height: num("height"),
-            }
+            // `naturalWidth` / `naturalHeight`: whole pixels.
+            EventPayload::Image(size(
+                DevicePixels(num("width") as i32),
+                DevicePixels(num("height") as i32),
+            ))
         }
         EventKind::Error => EventPayload::Error {
             message: text("message"),
@@ -924,10 +933,8 @@ pub unsafe extern "C" fn nsh_event(
         EventKind::HoverMove => {
             let flag = |k: &str| value.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
             EventPayload::Hover(nsh_core::HoverEvent {
-                location_x: num("locationX"),
-                location_y: num("locationY"),
-                page_x: num("pageX"),
-                page_y: num("pageY"),
+                location: point(Points(num("locationX")), Points(num("locationY"))),
+                page: point(Points(num("pageX")), Points(num("pageY"))),
                 modifiers: nsh_core::keymap::Modifiers {
                     ctrl: flag("ctrlKey"),
                     alt: flag("altKey"),
@@ -939,10 +946,8 @@ pub unsafe extern "C" fn nsh_event(
         EventKind::ContextMenu => {
             let flag = |k: &str| value.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
             EventPayload::ContextMenu(nsh_core::ContextMenuEvent {
-                location_x: num("locationX"),
-                location_y: num("locationY"),
-                page_x: num("pageX"),
-                page_y: num("pageY"),
+                location: point(Points(num("locationX")), Points(num("locationY"))),
+                page: point(Points(num("pageX")), Points(num("pageY"))),
                 modifiers: nsh_core::keymap::Modifiers {
                     ctrl: flag("ctrlKey"),
                     alt: flag("altKey"),
@@ -1050,10 +1055,8 @@ pub unsafe extern "C" fn nsh_touch(ptr: *const u8, len: usize) -> f64 {
                                 .collect()
                         })
                         .unwrap_or_default(),
-                    page_x: f(p, "pageX") as f32,
-                    page_y: f(p, "pageY") as f32,
-                    location_x: f(p, "x") as f32,
-                    location_y: f(p, "y") as f32,
+                    page: point(Points(f(p, "pageX") as f32), Points(f(p, "pageY") as f32)),
+                    location: point(Points(f(p, "x") as f32), Points(f(p, "y") as f32)),
                     changed: p.get("changed").and_then(|v| v.as_bool()).unwrap_or(true),
                 })
                 .collect()
@@ -1158,7 +1161,7 @@ pub extern "C" fn nsh_scroll(id: u32, x: f32, y: f32, applied: u32) -> f64 {
                 ffi::submit(&out.finish());
             }
         }
-        app.control.scroll(id, x, y, applied);
+        app.control.scroll(id, point(px(x), px(y)), applied);
     })
 }
 
@@ -1186,12 +1189,11 @@ pub extern "C" fn nsh_pan(id: u32, phase: u32, tx: f32, ty: f32, vx: f32, vy: f3
         }
         let (value_x, value_y) = app.animation.pan_values(id);
         let payload = EventPayload::Pan {
-            translation_x: tx,
-            translation_y: ty,
+            translation: point(Points(tx), Points(ty)),
             velocity_x: vx,
             velocity_y: vy,
-            value_x,
-            value_y,
+            value_x: value_x.map(Points),
+            value_y: value_y.map(Points),
         };
         match phase {
             0 => app.control.dispatch_event(id, EventKind::PanStart, payload),
@@ -1249,13 +1251,13 @@ pub extern "C" fn nsh_root_size(
 ) -> f64 {
     send(|app| {
         let insets = nsh_core::EdgeInsets {
-            top,
-            right,
-            bottom,
-            left,
+            top: Points(top),
+            right: Points(right),
+            bottom: Points(bottom),
+            left: Points(left),
         };
         app.control
-            .set_root_size(id, Size::new(width, height), insets);
+            .set_root_size(id, Size::new(Points(width), Points(height)), insets);
         let n = |v: f32| PayloadValue::Number(v as f64);
         app.control.dispatch_event(
             id,
@@ -1281,8 +1283,9 @@ pub extern "C" fn nsh_states(id: u32, states: u32) -> f64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn nsh_resize(width: f32, height: f32) -> f64 {
     send(|app| {
-        app.environment.window = (width, height);
-        app.control.resize(Size::new(width, height));
+        app.environment.window =
+            nsh_core::Size::new(nsh_core::Points(width), nsh_core::Points(height));
+        app.control.resize(Size::new(Points(width), Points(height)));
         app.control.set_environment(app.environment);
     })
 }

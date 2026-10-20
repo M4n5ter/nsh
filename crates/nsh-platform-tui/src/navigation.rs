@@ -2,13 +2,12 @@
 //!
 //! A departing root keeps its retained subtree until the transition ends.
 //! Layout targets stay unchanged: presentation shifts and opacity are sampled
-//! by both drawing and input. Modal contents are laid out at the card's size.
-
-use std::sync::Arc;
+//! by both drawing and input. Dialogs are transparent viewport-sized layers;
+//! their popup, backdrop and screen headers are rendered by the app.
 
 use nsh_core::{
-    EdgeInsets, EventKind, EventPayload, ModalAnimation, ModalConfig, ModalPresentation,
-    MountBatch, MountItem, NodeId, PayloadValue, Rect, ScreenAnimation, Size, ViewKind,
+    Bounds, EdgeInsets, EventKind, EventPayload, ModalAnimation, MountBatch, MountItem, NodeId,
+    PayloadValue, Point, Points, ScreenAnimation, Size, ViewKind, geometry::px,
 };
 
 use crate::surface::{Surface, SurfaceEvent};
@@ -24,8 +23,7 @@ pub(crate) struct Navigation {
     tracks: Vec<Option<Track>>,
     stacks: Vec<(NodeId, NodeId)>,
     modals: Vec<NodeId>,
-    reports: Vec<Option<(Size, EdgeInsets)>>,
-    headers: Vec<Option<Option<f32>>>,
+    reports: Vec<Option<(Size<Points>, EdgeInsets)>>,
     moving: Vec<NodeId>,
     presentations: Vec<NodeId>,
     gesture: Option<Gesture>,
@@ -136,16 +134,7 @@ struct Gesture {
     last_time: f64,
     velocity: f32,
     extent: f32,
-    modal: bool,
     claimed: bool,
-}
-
-/// Positions of the compact button row and optional collapsing title row.
-pub(crate) struct HeaderLayout {
-    pub(crate) height: f32,
-    pub(crate) bar_height: f32,
-    pub(crate) title_y: f32,
-    pub(crate) large: bool,
 }
 
 impl Surface {
@@ -459,45 +448,15 @@ impl Surface {
             .collect();
         for id in roots {
             let node = self.node(id).expect("navigation root collected above");
-            let (size, insets, header) = if node.kind == ViewKind::Modal {
-                let frame = self.modal_frame(id, node.frame);
-                (
-                    Size::new(frame.width, frame.height),
-                    EdgeInsets::default(),
-                    None,
-                )
+            let size = if node.kind == ViewKind::Modal {
+                self.viewport()
             } else {
-                let size = node
-                    .parent
+                node.parent
                     .and_then(|id| self.node(id))
-                    .map_or(Size::new(node.frame.width, node.frame.height), |parent| {
-                        Size::new(parent.frame.width, parent.frame.height)
-                    });
-                let config = &node.screen;
-                let height = if config.header_shown {
-                    self.metrics.height() * if config.large_title { 2.0 } else { 1.0 }
-                } else {
-                    0.0
-                };
-                let under =
-                    config.header_shown && (config.large_title || config.header_transparent);
-                let insets = EdgeInsets {
-                    top: if under { height } else { 0.0 },
-                    ..EdgeInsets::default()
-                };
-                let header = Some((config.header_shown && !under).then_some(height));
-                (size, insets, header)
+                    .map_or(node.frame.size, |parent| parent.frame.size)
             };
-            if let Some(header) = header {
-                self.navigation
-                    .headers
-                    .resize(self.navigation.headers.len().max(id as usize + 1), None);
-                if self.navigation.headers[id as usize] != Some(header) {
-                    self.navigation.headers[id as usize] = Some(header);
-                    self.events.push(SurfaceEvent::ScreenHeader(id, header));
-                }
-            }
-            if size.width <= 0.0 || size.height <= 0.0 {
+            let insets = EdgeInsets::default();
+            if size.width <= Points::ZERO || size.height <= Points::ZERO {
                 continue;
             }
             self.navigation
@@ -510,7 +469,7 @@ impl Surface {
             self.navigation.reports[id as usize] = Some((size, insets));
             self.events.push(SurfaceEvent::RootSize(id, size, insets));
             if old.is_none_or(|(_, old)| old != insets) {
-                let value = |value: f32| PayloadValue::Number(value as f64);
+                let value = |value: Points| PayloadValue::Number(value.0 as f64);
                 self.emit(
                     id,
                     EventKind::Insets,
@@ -598,9 +557,6 @@ impl Surface {
             if let Some(report) = self.navigation.reports.get_mut(id as usize) {
                 *report = None;
             }
-            if let Some(header) = self.navigation.headers.get_mut(id as usize) {
-                *header = None;
-            }
         }
         self.navigation
             .stacks
@@ -641,13 +597,16 @@ impl Surface {
             let position = track.fraction(self.now);
             match track.movement {
                 Movement::Horizontal => {
-                    result.0 += self.node(id).map_or(0.0, |node| node.frame.width) * position
+                    result.0 += self.node(id).map_or(0.0, |node| node.frame.size.width.0) * position
                 }
                 Movement::Vertical => {
                     let frame = self
                         .node(id)
-                        .map_or(Rect::default(), |node| self.modal_frame(id, node.frame));
-                    result.1 += (self.viewport().height - frame.y).max(0.0) * position;
+                        .map_or(Bounds::default(), |node| self.modal_frame(id, node.frame));
+                    result.1 += (self.viewport().height - frame.origin.y)
+                        .max(Points::ZERO)
+                        .0
+                        * position;
                 }
                 Movement::Fade => result.2 *= 1.0 - position,
             }
@@ -670,18 +629,12 @@ impl Surface {
         {
             if track.movement == Movement::Horizontal {
                 let covered = 1.0 - track.fraction(self.now);
-                result.0 -= self.node(id).map_or(0.0, |node| node.frame.width) * PARALLAX * covered;
+                result.0 -=
+                    self.node(id).map_or(0.0, |node| node.frame.size.width.0) * PARALLAX * covered;
                 result.2 *= 1.0 - DIM * covered;
             }
         }
         result
-    }
-
-    /// A sheet's backdrop fades independently from its sliding content.
-    pub(crate) fn navigation_scrim_opacity(&self, id: NodeId) -> f32 {
-        self.navigation
-            .track(id)
-            .map_or(1.0, |track| 1.0 - track.fraction(self.now))
     }
 
     /// The top screen and a transition's departing/underlying screen paint.
@@ -759,30 +712,22 @@ impl Surface {
         self.navigation_previous(screen).is_some()
     }
 
-    /// The previous screen supplies the label of the button leading back to it.
-    pub(crate) fn navigation_back_title(&self, screen: NodeId) -> Option<Arc<str>> {
-        self.node(self.navigation_previous(screen)?)?
-            .screen
-            .back_title
-            .clone()
-    }
-
     /// Goes back in the innermost active stack, then asks its modal to close.
-    /// Mounted preventBack/dismissible props decide before JS receives events.
+    /// Mounted preventBack/closeOnEscape props decide before JS receives events.
     pub(crate) fn navigation_back(&mut self) {
         let ids = self.visible_ids();
         let screen = ids.iter().rev().copied().find(|&id| {
             self.node(id)
                 .is_some_and(|node| node.kind == ViewKind::Screen)
-                && self.navigation_can_back(id)
+                && (self.navigation_can_back(id)
+                    || self.node(id).is_some_and(|node| node.screen.prevent_back))
         });
         if let Some(screen) = screen {
-            if self
+            self.emit(screen, EventKind::BackRequest, EventPayload::None);
+            if !self
                 .node(screen)
                 .is_some_and(|node| node.screen.prevent_back)
             {
-                self.emit(screen, EventKind::BackRequest, EventPayload::None);
-            } else {
                 self.navigation_pop(screen, None);
             }
             return;
@@ -795,8 +740,8 @@ impl Surface {
         }
     }
 
-    /// A scrim click or sheet gesture asks a controlled modal to close. A
-    /// dismissible modal also closes natively, then reports completion.
+    /// Escape asks a dialog to close, even when its mounted gate prevents it.
+    /// App backdrop presses remain ordinary app input, as on other desktops.
     pub(crate) fn navigation_request_close(&mut self, id: NodeId) {
         if !self
             .node(id)
@@ -804,8 +749,12 @@ impl Surface {
         {
             return;
         }
-        self.emit(id, EventKind::RequestClose, EventPayload::None);
-        if self.node(id).is_some_and(|node| node.modal.dismissible) {
+        self.emit(
+            id,
+            EventKind::RequestClose,
+            EventPayload::Map(vec![("reason", PayloadValue::Str("cancel".into()))]),
+        );
+        if self.node(id).is_some_and(|node| node.modal.close_on_escape) {
             self.navigation_pop(id, None);
         }
     }
@@ -879,74 +828,16 @@ impl Surface {
         self.reconcile_focus();
     }
 
-    /// The card's target geometry. Transparent presentations cover the viewport.
-    pub(crate) fn modal_frame(&self, id: NodeId, target: Rect) -> Rect {
-        let Some(node) = self.node(id).filter(|node| node.kind == ViewKind::Modal) else {
-            return target;
-        };
-        modal_rect(
-            node.modal,
-            self.viewport(),
-            self.metrics.width(),
-            self.metrics.height(),
-        )
-    }
-
-    /// Header buttons occupy one row; a large title gets a second row that
-    /// collapses as its nearest vertical content scrolls underneath.
-    pub(crate) fn navigation_header(&self, id: NodeId) -> HeaderLayout {
-        let Some(node) = self.node(id) else {
-            return HeaderLayout {
-                height: 0.0,
-                bar_height: 0.0,
-                title_y: 0.0,
-                large: false,
-            };
-        };
-        if !node.screen.header_shown {
-            return HeaderLayout {
-                height: 0.0,
-                bar_height: 0.0,
-                title_y: 0.0,
-                large: false,
-            };
-        }
-        let bar_height = self.metrics.height();
-        let extra = if node.screen.large_title {
-            (bar_height - self.navigation_scroll_offset(id)).clamp(0.0, bar_height)
-        } else {
-            0.0
-        };
-        HeaderLayout {
-            height: bar_height + extra,
-            bar_height,
-            title_y: extra,
-            large: extra >= bar_height * 0.5,
-        }
-    }
-
-    fn navigation_scroll_offset(&self, id: NodeId) -> f32 {
-        let mut pending = self
+    /// Dialogs cover the viewport; their appearance belongs to the app.
+    pub(crate) fn modal_frame(&self, id: NodeId, target: Bounds<Points>) -> Bounds<Points> {
+        if self
             .node(id)
-            .map_or_else(Vec::new, |node| node.children.clone());
-        let mut index = 0;
-        while index < pending.len() {
-            let Some(node) = self.node(pending[index]) else {
-                index += 1;
-                continue;
-            };
-            if node.kind == ViewKind::Scroll && !node.scroll.horizontal {
-                return (node.scroll.y + node.scroll.behavior.content_inset.top).max(0.0);
-            }
-            if !matches!(
-                node.kind,
-                ViewKind::HeaderItem | ViewKind::Screen | ViewKind::Modal
-            ) {
-                pending.extend(node.children.iter().copied());
-            }
-            index += 1;
+            .is_some_and(|node| node.kind == ViewKind::Modal)
+        {
+            Bounds::new(Point::default(), self.viewport())
+        } else {
+            target
         }
-        0.0
     }
 
     /// Starts a candidate; presses still belong to the app until a directional
@@ -957,34 +848,6 @@ impl Surface {
             return false;
         }
         let ids = self.visible_ids();
-        let modal = ids.iter().rev().copied().find(|&id| {
-            self.node(id)
-                .is_some_and(|node| node.kind == ViewKind::Modal)
-        });
-        if let Some(id) = modal
-            && let Some(node) = self.node(id)
-            && node.modal.dismissible
-            && self.navigation.track(id).is_none()
-            && !node.modal.transparent
-            && node.modal.presentation != ModalPresentation::FullScreen
-        {
-            let frame = self.modal_frame(id, node.frame);
-            if contains(frame, x, y) && y < frame.y + self.metrics.height() {
-                self.navigation.gesture = Some(Gesture {
-                    id,
-                    below: None,
-                    origin: (x, y),
-                    last: (x, y),
-                    started: self.now,
-                    last_time: self.now,
-                    velocity: 0.0,
-                    extent: (self.viewport().height - frame.y).max(self.metrics.height()),
-                    modal: true,
-                    claimed: false,
-                });
-                return true;
-            }
-        }
         for id in ids.into_iter().rev() {
             let Some(node) = self.node(id).filter(|node| node.kind == ViewKind::Screen) else {
                 continue;
@@ -1001,7 +864,7 @@ impl Surface {
             let Some(frame) = self.global_frame(id) else {
                 continue;
             };
-            if contains(frame, x, y) && x < frame.x + self.metrics.width() * 3.0 {
+            if contains(frame, x, y) && x < (frame.origin.x + self.metrics.width() * 3.0).0 {
                 self.navigation.gesture = Some(Gesture {
                     id,
                     below: Some(below),
@@ -1010,8 +873,7 @@ impl Surface {
                     started: self.now,
                     last_time: self.now,
                     velocity: 0.0,
-                    extent: frame.width.max(self.metrics.width()),
-                    modal: false,
+                    extent: frame.size.width.max(self.metrics.width()).0,
                     claimed: false,
                 });
                 return true;
@@ -1026,11 +888,7 @@ impl Surface {
             return false;
         };
         let (dx, dy) = (x - gesture.origin.0, y - gesture.origin.1);
-        let (distance, other, cell) = if gesture.modal {
-            (dy, dx.abs(), self.metrics.height())
-        } else {
-            (dx, dy.abs(), self.metrics.width())
-        };
+        let (distance, other, cell) = (dx, dy.abs(), self.metrics.width().0);
         if !gesture.claimed {
             if other > distance.max(cell) || distance < -cell {
                 return false;
@@ -1041,12 +899,8 @@ impl Surface {
             }
             gesture.claimed = true;
         }
-        let last = if gesture.modal {
-            gesture.last.1
-        } else {
-            gesture.last.0
-        };
-        let current = if gesture.modal { y } else { x };
+        let last = gesture.last.0;
+        let current = x;
         let elapsed = self.now - gesture.last_time;
         if elapsed > 0.0 {
             gesture.velocity = (current - last) / elapsed as f32;
@@ -1059,15 +913,13 @@ impl Surface {
             Some(Track {
                 movement: if self.reduce_motion {
                     Movement::Fade
-                } else if gesture.modal {
-                    Movement::Vertical
                 } else {
                     Movement::Horizontal
                 },
                 position: Position::Interactive(position),
                 below: gesture.below,
                 completion: Completion::Restore,
-                modal: gesture.modal,
+                modal: false,
             }),
         );
         self.navigation.gesture = Some(gesture);
@@ -1075,18 +927,14 @@ impl Surface {
     }
 
     /// Completes a directional gesture or returns to the current route.
-    pub(crate) fn navigation_pointer_up(&mut self, x: f32, y: f32) -> bool {
+    pub(crate) fn navigation_pointer_up(&mut self, x: f32, _y: f32) -> bool {
         let Some(gesture) = self.navigation.gesture.take() else {
             return false;
         };
         if !gesture.claimed {
             return false;
         }
-        let distance = if gesture.modal {
-            y - gesture.origin.1
-        } else {
-            x - gesture.origin.0
-        };
+        let distance = x - gesture.origin.0;
         let position = (distance / gesture.extent).clamp(0.0, 1.0);
         let elapsed = (self.now - gesture.started).max(0.001) as f32;
         let velocity = if self.now - gesture.last_time < 0.1 {
@@ -1095,10 +943,15 @@ impl Surface {
             distance / elapsed
         };
         if position >= 0.35 || (position > 0.05 && velocity > gesture.extent * 0.5) {
-            if gesture.modal {
-                self.emit(gesture.id, EventKind::RequestClose, EventPayload::None);
+            self.emit(gesture.id, EventKind::BackRequest, EventPayload::None);
+            if self
+                .node(gesture.id)
+                .is_some_and(|node| node.screen.prevent_back)
+            {
+                self.navigation_restore(gesture.id, position);
+            } else {
+                self.navigation_pop(gesture.id, Some(position));
             }
-            self.navigation_pop(gesture.id, Some(position));
         } else {
             self.navigation_restore(gesture.id, position);
         }
@@ -1149,66 +1002,19 @@ fn modal_motion(animation: ModalAnimation, reduce_motion: bool) -> Option<(Movem
     }
 }
 
-fn modal_rect(config: ModalConfig, viewport: Size, cell_width: f32, cell_height: f32) -> Rect {
-    let full = Rect {
-        x: 0.0,
-        y: 0.0,
-        width: viewport.width,
-        height: viewport.height,
-    };
-    if config.transparent || config.presentation == ModalPresentation::FullScreen {
-        return full;
-    }
-    let (max_width, max_height) = match config.presentation {
-        ModalPresentation::FullScreen => return full,
-        ModalPresentation::PageSheet => (720.0, f32::INFINITY),
-        ModalPresentation::FormSheet => (540.0, 620.0),
-    };
-    let margin_x = (viewport.width * 0.05)
-        .min(cell_width * 4.0)
-        .max(cell_width)
-        .min(viewport.width * 0.25);
-    let margin_y = (viewport.height * 0.05)
-        .min(cell_height * 2.0)
-        .max(cell_height)
-        .min(viewport.height * 0.25);
-    let snap = |value: f32, unit: f32| (value / unit).floor().max(1.0) * unit;
-    let width = snap(
-        (viewport.width - margin_x * 2.0).min(max_width).max(0.0),
-        cell_width,
-    )
-    .min(viewport.width);
-    let height = snap(
-        (viewport.height - margin_y * 2.0).min(max_height).max(0.0),
-        cell_height,
-    )
-    .min(viewport.height);
-    Rect {
-        x: ((viewport.width - width) / (2.0 * cell_width)).floor() * cell_width,
-        y: ((viewport.height - height) / (2.0 * cell_height)).floor() * cell_height,
-        width,
-        height,
-    }
-}
-
-fn contains(frame: Rect, x: f32, y: f32) -> bool {
-    x >= frame.x && y >= frame.y && x < frame.x + frame.width && y < frame.y + frame.height
+fn contains(frame: Bounds<Points>, x: f32, y: f32) -> bool {
+    frame.contains(&Point::new(px(x), px(y)))
 }
 
 #[cfg(test)]
 mod tests {
-    use nsh_core::{ROOT_ID, ScreenConfig};
+    use nsh_core::{ModalConfig, ModalPresentation, ROOT_ID, ScreenConfig};
 
     use super::*;
     use crate::CellMetrics;
 
-    fn frame() -> Rect {
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 800.0,
-            height: 640.0,
-        }
+    fn frame() -> Bounds<Points> {
+        Bounds::new(Point::default(), Size::new(px(800.0), px(640.0)))
     }
 
     fn stack() -> Surface {
@@ -1316,6 +1122,15 @@ mod tests {
     }
 
     #[test]
+    fn the_first_screen_can_request_back_without_being_popped() {
+        let mut surface = stack();
+        surface.node_mut(4).unwrap().screen.prevent_back = true;
+        surface.navigation_back();
+        assert!(!surface.node(4).unwrap().popped);
+        assert_eq!(events(&mut surface, EventKind::BackRequest), vec![4]);
+    }
+
+    #[test]
     fn native_pop_stays_visible_until_exit_finishes_and_reports_once() {
         let mut surface = stack();
         push(&mut surface, ScreenAnimation::Default);
@@ -1397,7 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn modal_lifecycle_follows_finite_fades_and_dismissible_controls() {
+    fn modal_lifecycle_follows_finite_fades_and_escape_gate() {
         let mut surface = stack();
         surface.apply(MountBatch {
             items: vec![
@@ -1409,6 +1224,7 @@ mod tests {
                     id: 8,
                     config: ModalConfig {
                         animation: ModalAnimation::Fade,
+                        close_on_escape: false,
                         ..ModalConfig::default()
                     },
                 },
@@ -1430,8 +1246,18 @@ mod tests {
         assert_eq!(events(&mut surface, EventKind::Show), vec![8]);
         surface.navigation_request_close(8);
         assert!(!surface.node(8).unwrap().popped);
-        assert_eq!(events(&mut surface, EventKind::RequestClose), vec![8]);
-        surface.node_mut(8).unwrap().modal.dismissible = true;
+        let close = surface.drain_events().find_map(|event| match event {
+            SurfaceEvent::Event(8, EventKind::RequestClose, payload) => Some(payload),
+            _ => None,
+        });
+        assert_eq!(
+            close,
+            Some(EventPayload::Map(vec![(
+                "reason",
+                PayloadValue::Str("cancel".into())
+            )]))
+        );
+        surface.node_mut(8).unwrap().modal.close_on_escape = true;
         surface.navigation_request_close(8);
         assert!(surface.node(8).unwrap().popped);
         surface.tick(0.42);
@@ -1665,45 +1491,25 @@ mod tests {
     }
 
     #[test]
-    fn sheet_geometry_is_cell_aligned_and_transparency_uses_the_viewport() {
-        let page = ModalConfig {
-            presentation: ModalPresentation::PageSheet,
-            ..ModalConfig::default()
-        };
-        let viewport = Size::new(1200.0, 800.0);
-        let frame = modal_rect(page, viewport, 8.0, 16.0);
-        assert_eq!(frame.width, 720.0);
-        assert!(frame.x > 0.0 && frame.y > 0.0);
-        assert_eq!(frame.y % 16.0, 0.0);
-        let form = modal_rect(
-            ModalConfig {
-                presentation: ModalPresentation::FormSheet,
-                ..page
-            },
-            viewport,
-            8.0,
-            16.0,
-        );
-        assert!(form.width <= 540.0 && form.height <= 620.0);
-        assert_eq!(
-            modal_rect(
-                ModalConfig {
-                    transparent: true,
-                    ..page
-                },
-                viewport,
-                8.0,
-                16.0
-            ),
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 1200.0,
-                height: 800.0
-            }
-        );
-        let small = modal_rect(page, Size::new(8.0, 16.0), 8.0, 16.0);
-        assert!(small.width > 0.0 && small.height > 0.0);
+    fn dialog_presentations_all_cover_the_viewport_without_a_native_card() {
+        let mut surface = Surface::new(150, 50, CellMetrics::default());
+        surface.apply(MountBatch {
+            items: vec![MountItem::Create {
+                id: 8,
+                kind: ViewKind::Modal,
+            }],
+        });
+        for presentation in [
+            ModalPresentation::PageSheet,
+            ModalPresentation::FormSheet,
+            ModalPresentation::FullScreen,
+        ] {
+            surface.node_mut(8).unwrap().modal.presentation = presentation;
+            assert_eq!(
+                surface.modal_frame(8, frame()),
+                Bounds::new(Point::default(), Size::new(px(1200.0), px(800.0)))
+            );
+        }
     }
 
     #[test]
@@ -1748,37 +1554,30 @@ mod tests {
     }
 
     #[test]
-    fn large_title_collapses_without_moving_header_buttons() {
+    fn native_header_options_do_not_change_screen_geometry_or_insets() {
         let mut surface = stack();
-        surface.node_mut(4).unwrap().screen.large_title = true;
         surface.apply(MountBatch {
             items: vec![
-                MountItem::Create {
-                    id: 8,
-                    kind: ViewKind::Scroll,
+                MountItem::ScreenConfig {
+                    id: 4,
+                    config: Box::new(ScreenConfig {
+                        large_title: true,
+                        header_transparent: true,
+                        header_height: px(48.0),
+                        ..ScreenConfig::default()
+                    }),
                 },
-                MountItem::Insert {
-                    parent: 4,
-                    child: 8,
-                    before: None,
+                MountItem::Frame {
+                    id: 2,
+                    frame: Bounds::new(Point::default(), Size::new(px(960.0), px(640.0))),
                 },
             ],
         });
-        let large = surface.navigation_header(4);
-        assert_eq!(
-            (large.height, large.bar_height, large.title_y, large.large),
-            (32.0, 16.0, 16.0, true)
-        );
-        surface.node_mut(8).unwrap().scroll.y = 16.0;
-        let compact = surface.navigation_header(4);
-        assert_eq!(
-            (
-                compact.height,
-                compact.bar_height,
-                compact.title_y,
-                compact.large
-            ),
-            (16.0, 16.0, 0.0, false)
-        );
+        assert!(surface.drain_events().any(|event| matches!(
+            event,
+            SurfaceEvent::RootSize(4, size, insets)
+                if size == Size::new(px(960.0), px(640.0))
+                    && insets == EdgeInsets::default()
+        )));
     }
 }

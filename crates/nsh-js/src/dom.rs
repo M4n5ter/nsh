@@ -69,7 +69,7 @@ pub(crate) struct Dom {
     rtl: Cell<Option<bool>>,
     /// The `onDismiss` handlers of modals the app removed, kept until the
     /// platform reports their dismissal, oldest first (owned): an app
-    /// removes a modal in `onRequestClose`, and the platform reports
+    /// removes a dialog in `onOpenChange` or `onCancel`, and the platform reports
     /// `onDismiss` once it has gone (after its animation).
     dismissed: RefCell<Vec<(NodeId, JsValue)>>,
     /// Whether the user's language is written right to left.
@@ -108,8 +108,8 @@ struct NodeData {
     /// Values of props that may hold native animation nodes (`style`,
     /// `pan`, ...), kept alive with the view (owned).
     retained: Vec<(&'static str, JsValue)>,
-    /// A `<Scroll>`'s content container (`contentContainerStyle` /
-    /// `contentContainerClass`), one of `children` that takes the others
+    /// A `<Scroll>`'s content container (`contentStyle` /
+    /// `contentClass`), one of `children` that takes the others
     /// ([`DETACHED`]: none).
     content: NodeId,
     /// A Rust component's view or one of its slots (`component`,
@@ -274,7 +274,7 @@ impl Dom {
 
     /// Queues the release of a collected animation node or composite (from
     /// a finalizer).
-    pub(crate) fn queue_animation_release(&self, op: nsh_animation::AnimationOp) {
+    pub(crate) fn queue_animation_release(&self, op: nsh_core::animation::AnimationOp) {
         self.shared.animation_releases.borrow_mut().push(op);
     }
 
@@ -1039,7 +1039,7 @@ fn content_of(ctx: *mut JsContext, parent: JsValue, child: JsValue) -> JsValue {
 
 /// The content container of `<Scroll>` `node` (borrowed), made on first
 /// use: a view the scroll view's children move into, styled by
-/// `contentContainerStyle` / `contentContainerClass` (React Native's
+/// `contentStyle` / `contentClass` (React Native's
 /// content container: `flexGrow: 1` with `justifyContent: "center"`
 /// centers what is shorter than the viewport and still scrolls what is
 /// longer).
@@ -1071,6 +1071,26 @@ fn scroll_content(ctx: *mut JsContext, node: JsValue) -> Result<JsValue, JsValue
     // The scroll view owns it now (as its child).
     unsafe { qjs::JS_FreeValue(ctx, content) };
     result.map(|()| content_of(ctx, node, UNDEFINED))
+}
+
+/// A state or part style prop's value (borrowed) as the core takes it:
+/// its declarations, none when it has none.
+fn part_style(
+    ctx: *mut JsContext,
+    name: &str,
+    value: JsValue,
+) -> Result<Option<std::sync::Arc<nsh_core::StylePatch>>, JsValue> {
+    // SAFETY: a context reference for the decoder, which reads a dup.
+    let cx = unsafe { Ctx::from_raw(std::ptr::NonNull::new_unchecked(ctx)) };
+    let v = unsafe { Value::from_raw(cx, qjs::JS_DupValue(ctx, value)) };
+    let mut warnings = crate::protocol::Warnings::deferred();
+    let patch = crate::protocol::style_patch(&v, &mut warnings);
+    dom(ctx).shared.warnings.borrow_mut().merge(warnings);
+    match patch {
+        Ok(patch) => Ok((!patch.is_empty()).then(|| std::sync::Arc::new(patch))),
+        Err(rquickjs::Error::Exception) => Err(qjs::JS_EXCEPTION),
+        Err(e) => Err(throw_type(ctx, &format!("nsh: prop `{name}`: {e}"))),
+    }
 }
 
 /// Removes node `child` from `parent` (nothing when it is not a child).
@@ -1192,16 +1212,41 @@ fn set_prop(
         "ios" | "android" | "desktop" | "web" => {
             return platform_props(ctx, node, name, value, prev);
         }
-        "contentContainerStyle" | "contentContainerClass"
-            if unsafe { (*p).tag } == Some(Tag::Scroll) =>
-        {
+        "contentStyle" | "contentClass" if unsafe { (*p).tag } == Some(Tag::Scroll) => {
             let content = scroll_content(ctx, node)?;
-            let name = if name == "contentContainerStyle" {
+            let name = if name == "contentStyle" {
                 "style"
             } else {
                 "class"
             };
             return set_prop(ctx, content, name, value, prev);
+        }
+        "activeStyle" | "hoverStyle" | "focusStyle" | "disabledStyle" | "selectedStyle"
+        | "checkedStyle" | "headerStyle" => {
+            let patch = part_style(ctx, name, value)?;
+            let prop = match name {
+                "activeStyle" => nsh_core::Prop::ActiveStyle(patch),
+                "hoverStyle" => nsh_core::Prop::HoverStyle(patch),
+                "focusStyle" => nsh_core::Prop::FocusStyle(patch),
+                "disabledStyle" => nsh_core::Prop::DisabledStyle(patch),
+                "selectedStyle" => nsh_core::Prop::SelectedStyle(patch),
+                "checkedStyle" => nsh_core::Prop::CheckedStyle(patch),
+                _ => nsh_core::Prop::HeaderStyle(patch),
+            };
+            return dom(ctx).push(ctx, Op::SetProp { id, prop });
+        }
+        "headerClass" | "contentClass" => {
+            // SAFETY: an inline tag check.
+            let names: Box<str> = if unsafe { qjs::JS_IsString(value) } {
+                string_arg(ctx, value).unwrap_or_default().into()
+            } else {
+                Box::default()
+            };
+            let prop = match name {
+                "headerClass" => nsh_core::Prop::HeaderClass(names),
+                _ => nsh_core::Prop::ListContentClass(names),
+            };
+            return dom(ctx).push(ctx, Op::SetProp { id, prop });
         }
         _ => {}
     }
@@ -1215,7 +1260,7 @@ fn set_prop(
     if name.len() > 2
         && name.starts_with("on")
         && name.as_bytes()[2].is_ascii_uppercase()
-        && let Some(event) = EventKind::from_prop(name)
+        && let Some(event) = EventKind::from_handler(name)
     {
         return set_event(ctx, p, event, value);
     }
@@ -1893,15 +1938,55 @@ fn memoize_run(ctx: *mut JsContext, value: JsValue) -> Option<JsValue> {
     let items = items
         .into_iter()
         .map(|v| {
-            // SAFETY: an owned value; the memo takes the function.
-            if unsafe { qjs::JS_IsFunction(ctx, v) } {
-                reactive::memo(ctx, v, false)
+            // SAFETY: a borrowed check of an owned value.
+            if unsafe { qjs::JS_IsFunction(ctx, v) } && node_ptr(ctx, v).is_null() {
+                item_memo(ctx, v)
             } else {
                 v
             }
         })
         .collect();
     Some(new_array(ctx, items))
+}
+
+/// A memo of `func` (owned), one function of an array of children, made
+/// under the running owner (owned; an exception value when it throws).
+fn item_memo(ctx: *mut JsContext, func: JsValue) -> JsValue {
+    let mut data = [func];
+    // SAFETY: the function keeps a dup of `func`, which is then freed.
+    let run = unsafe { qjs::JS_NewCFunctionData(ctx, Some(item_run), 0, 0, 1, data.as_mut_ptr()) };
+    unsafe { qjs::JS_FreeValue(ctx, func) };
+    if unsafe { qjs::JS_IsException(run) } {
+        return run;
+    }
+    // The memo takes the function.
+    reactive::memo(ctx, run, false)
+}
+
+/// A run of an [`item_memo`]: calls its function, and gives a function it
+/// returns (an `<If>` whose branch is an expression returns one) a memo of
+/// its own, under this one. Called by the array's effect instead, that
+/// function would run again, and make its nodes again, whenever any other
+/// item of the array changes; called by this memo, a change in what it
+/// reads would run this function again too (a component's `children`
+/// getter: the component made again).
+unsafe extern "C" fn item_run(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    _argc: c_int,
+    _argv: *mut JsValue,
+    _magic: c_int,
+    data: *mut JsValue,
+) -> JsValue {
+    // SAFETY: one data value (`item_memo`).
+    let r = unsafe { qjs::JS_Call(ctx, *data, UNDEFINED, 0, ptr::null_mut()) };
+    // SAFETY: inline checks of a live value.
+    if unsafe { !qjs::JS_IsException(r) && qjs::JS_IsFunction(ctx, r) }
+        && node_ptr(ctx, r).is_null()
+    {
+        return item_memo(ctx, r);
+    }
+    r
 }
 
 /// `insert(parent, value, marker)`: children before `marker` (or at the
@@ -2898,9 +2983,10 @@ unsafe extern "C" fn unmount(
     result
 }
 
-/// `setup(tailwind, theme, appearance)`: the app's Tailwind theme and the
-/// theme of the Rust components (JSON strings, or null) and its
-/// appearance (`"light"` / `"dark"`, or null), before anything renders.
+/// `setup(tailwind, theme, appearance, statusBar)`: the app's Tailwind
+/// theme and the theme of the Rust components (JSON strings, or null), its
+/// appearance (`"light"` / `"dark"`, or null) and the status bar's default
+/// (`nsh.json` `"statusBar"` as JSON, or null), before anything renders.
 unsafe extern "C" fn setup(
     ctx: *mut JsContext,
     _this: JsValue,
@@ -2916,6 +3002,21 @@ unsafe extern "C" fn setup(
         {
             return e;
         }
+    }
+    // Checked by the bundler; a hand-made bundle's wrong value is ignored.
+    let status_bar = string_arg(ctx, arg(argc, argv, 3))
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .and_then(|v| nsh_core::StatusBarSetting::from_json(&v).ok());
+    if let Some(setting) = status_bar
+        && let Err(e) = push_op(
+            ctx,
+            Op::Command {
+                id: nsh_core::ROOT_ID,
+                command: nsh_core::Command::SetStatusBar(setting),
+            },
+        )
+    {
+        return e;
     }
     let appearance =
         crate::env::parse_appearance(&string_arg(ctx, arg(argc, argv, 2)).unwrap_or_default());
@@ -3193,10 +3294,49 @@ pub(crate) const RT_EXPORTS: &[crate::modules::Item] = &[
     ("each", Export::Function(each, 3), Ts::Internal),
     ("merge", Export::Function(merge, 2), Ts::Internal),
     ("list", Export::Function(crate::list::list, 1), Ts::Internal),
-    ("setup", Export::Function(setup, 3), Ts::Internal),
+    ("setup", Export::Function(setup, 4), Ts::Internal),
     ("font", Export::Function(font, 2), Ts::Internal),
+    ("metaUrl", Export::Function(meta_url, 1), Ts::Internal),
     ("ref", Export::Function(ref_, 3), Ts::Internal),
 ];
+
+/// `metaUrl(path)`: what `import.meta.url` of the app's module `path`
+/// (relative to the app's directory) compiles to. The app's directory
+/// is a `file:` URL where the host has one (`${pluginDir}`: a local or
+/// packaged desktop app), else the page's URL (the web), else `asset:/`,
+/// whose relative URLs the app's assets resolve (packaged mobile apps,
+/// devices on the dev server).
+unsafe extern "C" fn meta_url(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    argc: c_int,
+    argv: *mut JsValue,
+) -> JsValue {
+    let Some(path) = string_arg(ctx, arg(argc, argv, 0)) else {
+        return qjs::JS_EXCEPTION;
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let located = dom(ctx)
+        .shared
+        .system_paths
+        .borrow()
+        .plugin_dir
+        .clone()
+        .and_then(|dir| url::Url::from_directory_path(dir).ok());
+    // A page has no directory of its own on disk.
+    #[cfg(target_arch = "wasm32")]
+    let located = None;
+    let base = located
+        .or_else(|| crate::web::web(ctx).base_url.clone())
+        .or_else(|| url::Url::parse("asset:/").ok());
+    let url = base
+        .and_then(|base| base.join(&path).ok())
+        .map_or_else(|| format!("asset:/{path}"), String::from);
+    match crate::web::js::string(ctx, &url) {
+        Ok(v) => v.take(),
+        Err(_) => qjs::JS_EXCEPTION,
+    }
+}
 
 /// `font(uri, family)`: what `import Inter from "./Inter.ttf"` evaluates
 /// to (its family); the host registers the font before the first frame.
@@ -3595,7 +3735,7 @@ mod tests {
         assert_eq!(reported(&host), ["1"]);
     }
 
-    /// `contentContainerStyle` moves a scroll view's children into a view
+    /// `contentStyle` moves a scroll view's children into a view
     /// it styles, whatever order props and children come in.
     #[test]
     fn scroll_content_container() {
@@ -3609,13 +3749,13 @@ mod tests {
             mount(() => {
                 const v = element("view");
                 const s = element("scroll");
-                prop(s, "contentContainerStyle", { flexGrow: 1 });
+                prop(s, "contentStyle", { flexGrow: 1 });
                 append(s, text("a"));
                 insert(s, () => (show() ? text("b") : null));
                 append(v, s);
                 const t = element("scroll");
                 append(t, text("c"));
-                prop(t, "contentContainerClass", "grow");
+                prop(t, "contentClass", "grow");
                 append(v, t);
                 return v;
             });
@@ -3726,8 +3866,8 @@ mod tests {
         assert_eq!(
             commands,
             [
-                "Command { id: 2, command: ScrollTo { x: 0.0, y: 10.0, animated: false } }",
-                "Command { id: 2, command: ScrollToIndex { index: 3, animated: true, view_position: 0.0, view_offset: 0.0 } }",
+                "Command { id: 2, command: ScrollTo { x: 0pt, y: 10pt, animated: false } }",
+                "Command { id: 2, command: ScrollToIndex { index: 3, animated: true, view_position: 0%, view_offset: 0pt } }",
                 "Command { id: 4, command: Focus }",
                 "Command { id: 4, command: SetSelection { start: 2, end: 2 } }",
             ]

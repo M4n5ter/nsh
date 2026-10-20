@@ -8,8 +8,8 @@
 use std::{borrow::Cow, sync::Arc};
 
 use nsh_core::{
-    AttributedText, EllipsizeMode, Rect, ResolvedTextStyle, Size, TextAlign, TextEngine,
-    TextLayout, TextLine, TextShadow,
+    AttributedText, Bounds, EllipsizeMode, Point, Points, ResolvedTextStyle, Size, TextAlign,
+    TextEngine, TextLayout, TextLine, TextShadow, geometry::px,
 };
 use ratatui::{
     buffer::Buffer,
@@ -58,7 +58,7 @@ struct Cluster {
     whitespace: bool,
     newline: bool,
     tab: bool,
-    attachment: Option<(usize, f32, f32)>,
+    attachment: Option<(usize, Points, Points)>,
 }
 
 impl Cluster {
@@ -88,8 +88,8 @@ pub struct PreparedText {
 /// One prepositioned grapheme; its geometry never changes during painting.
 #[derive(Debug, Clone)]
 pub(crate) struct TerminalRun {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
+    pub(crate) x: Points,
+    pub(crate) y: Points,
     pub(crate) text: String,
     pub(crate) style: ResolvedTextStyle,
     pub(crate) width: u16,
@@ -102,7 +102,7 @@ pub(crate) struct TerminalRun {
 pub(crate) struct TerminalLayout {
     pub(crate) runs: Vec<TerminalRun>,
     pub(crate) lines: Vec<TextLine>,
-    pub(crate) attachments: Vec<Option<(f32, f32)>>,
+    pub(crate) attachments: Vec<Option<Point<Points>>>,
     shadow: Option<TextShadow>,
     metrics: CellMetrics,
 }
@@ -116,9 +116,9 @@ struct Line {
     forced: bool,
 }
 
-fn available_columns(width: f32, metrics: CellMetrics) -> usize {
+fn available_columns(width: Points, metrics: CellMetrics) -> usize {
     if width.is_finite() {
-        (width.max(0.0) / metrics.width() + 0.0001).floor() as usize
+        (width.max(Points::ZERO) / metrics.width() + 0.0001).floor() as usize
     } else {
         usize::MAX
     }
@@ -161,11 +161,11 @@ fn line_geometry(
     clusters: &[Cluster],
     fallback: ResolvedTextStyle,
     metrics: CellMetrics,
-) -> (f32, f32) {
+) -> (Points, Points) {
     let attachment_height = clusters
         .iter()
         .filter_map(|c| c.attachment.map(|(_, _, h)| h))
-        .fold(0.0, f32::max);
+        .fold(Points::ZERO, Points::max);
     let requested = clusters
         .iter()
         .fold(fallback.line_height, |h, c| h.max(c.style.line_height));
@@ -326,7 +326,13 @@ impl TextEngine for TerminalTextEngine {
                 .attachments
                 .get(attachment_index)
                 .filter(|a| a.index == utf16 && grapheme == "\u{fffc}")
-                .map(|a| (attachment_index, a.width.max(0.0), a.height.max(0.0)));
+                .map(|a| {
+                    (
+                        attachment_index,
+                        a.width.max(Points::ZERO),
+                        a.height.max(Points::ZERO),
+                    )
+                });
             let tab = grapheme == "\t";
             // Only the terminal runtime may write control sequences. Stripping
             // app-supplied controls here also keeps measurement and paint equal.
@@ -393,12 +399,12 @@ impl TextEngine for TerminalTextEngine {
         }
     }
 
-    fn measure(&self, prepared: &PreparedText, max_width: Option<f32>) -> Size {
+    fn measure(&self, prepared: &PreparedText, max_width: Option<Points>) -> Size<Points> {
         let max_columns = max_width.map_or(usize::MAX, |w| available_columns(w, self.metrics));
         let lines = prepared.break_lines(max_columns);
         let shown = prepared.shown_lines(lines.len());
-        let mut width = 0.0f32;
-        let mut height = 0.0;
+        let mut width = Points::ZERO;
+        let mut height = Points::ZERO;
         for (index, line) in lines.iter().take(shown).enumerate() {
             let pieces =
                 prepared.visible_pieces(line, index + 1 == shown, shown < lines.len(), max_columns);
@@ -409,13 +415,13 @@ impl TextEngine for TerminalTextEngine {
             if prepared.no_wrap && prepared.max_lines == 0 {
                 width
             } else {
-                max_width.map_or(width, |max| width.min(max.max(0.0)))
+                max_width.map_or(width, |max| width.min(max.max(Points::ZERO)))
             },
             height,
         )
     }
 
-    fn layout(&self, prepared: &PreparedText, size: Size) -> TextLayout {
+    fn layout(&self, prepared: &PreparedText, size: Size<Points>) -> TextLayout {
         let max_columns = available_columns(size.width, self.metrics);
         let lines = prepared.break_lines(max_columns);
         let shown = prepared.shown_lines(lines.len());
@@ -431,7 +437,7 @@ impl TextEngine for TerminalTextEngine {
             shadow: prepared.shadow,
             metrics: self.metrics,
         };
-        let mut y = 0.0;
+        let mut y = Points::ZERO;
         for (index, line) in lines.iter().take(shown).enumerate() {
             let pieces =
                 prepared.visible_pieces(line, index + 1 == shown, shown < lines.len(), max_columns);
@@ -487,7 +493,8 @@ impl TextEngine for TerminalTextEngine {
                     width_columns += extra;
                 }
                 if let Some((slot, _, attachment_height)) = piece.attachment {
-                    result.attachments[slot] = Some((x, y + baseline - attachment_height));
+                    result.attachments[slot] =
+                        Some(Point::new(x, y + baseline - attachment_height));
                 } else if !piece.text.is_empty() || piece.whitespace {
                     result.runs.push(TerminalRun {
                         x,
@@ -545,7 +552,7 @@ impl TextEngine for TerminalTextEngine {
             .map_or_else(Vec::new, |l| l.lines.clone())
     }
 
-    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<Point<Points>>> {
         layout
             .downcast::<TerminalLayout>()
             .map_or_else(Vec::new, |l| l.attachments.clone())
@@ -555,7 +562,7 @@ impl TextEngine for TerminalTextEngine {
         self.fonts.register(data)
     }
 
-    fn measure_canvas(&self, font: &nsh_core::canvas::CanvasFont, text: &str) -> Option<f32> {
+    fn measure_canvas(&self, font: &nsh_core::canvas::CanvasFont, text: &str) -> Option<Points> {
         Some(self.fonts.measure(font, text))
     }
 }
@@ -565,34 +572,34 @@ impl TextEngine for TerminalTextEngine {
 /// use this surface's registered fonts and fit within the measured cell boxes.
 pub(crate) fn rasterize(
     layout: &TextLayout,
-    width: f32,
-    height: f32,
+    width: Points,
+    height: Points,
     fonts: &FontCatalog,
 ) -> Result<Raster, String> {
-    let mut pixmap = raster_pixmap(width, height)?;
+    let mut pixmap = raster_pixmap(width.0, height.0)?;
     let Some(layout) = layout.downcast::<TerminalLayout>() else {
         return Ok(Raster::from_pixmap(pixmap));
     };
     if let Some(shadow) = layout.shadow
         && !shadow.color.is_transparent()
     {
-        let mut mask = raster_pixmap(width, height)?;
+        let mut mask = raster_pixmap(width.0, height.0)?;
         for run in &layout.runs {
             let mut style = run.style;
             style.color = nsh_core::Color::rgba(255, 255, 255, (style.color.0 & 255) as u8);
             paint_raster_run(
                 &mut mask,
-                run.x,
-                run.y,
-                run.width as f32 * layout.metrics.width(),
-                layout.metrics.height(),
+                run.x.0,
+                run.y.0,
+                run.width as f32 * layout.metrics.width().0,
+                layout.metrics.height().0,
                 &run.text,
                 style,
                 fonts,
             );
         }
         let mut alpha: Vec<_> = mask.pixels().iter().map(|pixel| pixel.alpha()).collect();
-        let radius = shadow.radius.clamp(0.0, 256.0);
+        let radius = shadow.radius.0.clamp(0.0, 256.0);
         if radius > 0.0 {
             crate::canvas::blur(
                 &mut alpha,
@@ -616,17 +623,17 @@ pub(crate) fn rasterize(
             0,
             mask.as_ref(),
             &tiny_skia::PixmapPaint::default(),
-            tiny_skia::Transform::from_translate(shadow.offset_x, shadow.offset_y),
+            tiny_skia::Transform::from_translate(shadow.offset_x.0, shadow.offset_y.0),
             None,
         );
     }
     for run in &layout.runs {
         paint_raster_run(
             &mut pixmap,
-            run.x,
-            run.y,
-            run.width as f32 * layout.metrics.width(),
-            layout.metrics.height(),
+            run.x.0,
+            run.y.0,
+            run.width as f32 * layout.metrics.width().0,
+            layout.metrics.height().0,
             &run.text,
             run.style,
             fonts,
@@ -643,7 +650,7 @@ pub(crate) fn rasterize_cells(
     fonts: &FontCatalog,
 ) -> Result<Raster, String> {
     let size = metrics.viewport(buffer.area.width, buffer.area.height);
-    let mut pixmap = raster_pixmap(size.width, size.height)?;
+    let mut pixmap = raster_pixmap(size.width.0, size.height.0)?;
     for y in buffer.area.y..buffer.area.bottom() {
         for x in buffer.area.x..buffer.area.right() {
             let cell = &buffer[(x, y)];
@@ -654,10 +661,10 @@ pub(crate) fn rasterize_cells(
             };
             fill_raster_rect(
                 &mut pixmap,
-                (x - buffer.area.x) as f32 * metrics.width(),
-                (y - buffer.area.y) as f32 * metrics.height(),
-                metrics.width(),
-                metrics.height(),
+                (x - buffer.area.x) as f32 * metrics.width().0,
+                (y - buffer.area.y) as f32 * metrics.height().0,
+                metrics.width().0,
+                metrics.height().0,
                 background,
             );
         }
@@ -683,8 +690,8 @@ pub(crate) fn rasterize_cells(
                 terminal_color(cell.fg, false)
             };
             let (px, py) = (
-                (x - buffer.area.x) as f32 * metrics.width(),
-                (y - buffer.area.y) as f32 * metrics.height(),
+                (x - buffer.area.x) as f32 * metrics.width().0,
+                (y - buffer.area.y) as f32 * metrics.height().0,
             );
             let mut style = ResolvedTextStyle {
                 color,
@@ -704,20 +711,20 @@ pub(crate) fn rasterize_cells(
             style.decoration.line_through = cell.modifier.contains(Modifier::CROSSED_OUT);
             // Half blocks already represent image pixels, not font glyphs.
             let half = match text.as_str() {
-                "▀" => Some((py, metrics.height() / 2.0)),
-                "▄" => Some((py + metrics.height() / 2.0, metrics.height() / 2.0)),
-                "█" => Some((py, metrics.height())),
+                "▀" => Some((py, metrics.height().0 / 2.0)),
+                "▄" => Some((py + metrics.height().0 / 2.0, metrics.height().0 / 2.0)),
+                "█" => Some((py, metrics.height().0)),
                 _ => None,
             };
             if let Some((top, height)) = half {
-                fill_raster_rect(&mut pixmap, px, top, metrics.width(), height, style.color);
+                fill_raster_rect(&mut pixmap, px, top, metrics.width().0, height, style.color);
             } else {
                 paint_raster_run(
                     &mut pixmap,
                     px,
                     py,
-                    columns as f32 * metrics.width(),
-                    metrics.height(),
+                    columns as f32 * metrics.width().0,
+                    metrics.height().0,
                     &text,
                     style,
                     fonts,
@@ -829,12 +836,12 @@ fn paint_raster_run(
         }
     }
     let decoration = style.decoration_color.unwrap_or(style.color);
-    let thickness = style.decoration_thickness.unwrap_or(1.0).max(0.5);
+    let thickness = style.decoration_thickness.unwrap_or(px(1.0)).0.max(0.5);
     if style.decoration.underline {
         fill_raster_rect(
             pixmap,
             x,
-            (baseline + style.underline_offset.unwrap_or(1.0)).min(y + height - thickness),
+            (baseline + style.underline_offset.unwrap_or(px(1.0)).0).min(y + height - thickness),
             width,
             thickness,
             decoration,
@@ -1052,8 +1059,8 @@ pub(crate) fn style_for_terminal(style: ResolvedTextStyle) -> Style {
 /// Draws an already measured layout inside a point clip and an embedded cell area.
 pub(crate) fn render_text(
     layout: &TextLayout,
-    origin: (f32, f32),
-    clip: Rect,
+    origin: Point<Points>,
+    clip: Bounds<Points>,
     opacity: f32,
     metrics: CellMetrics,
     area: CellRect,
@@ -1068,8 +1075,8 @@ pub(crate) fn render_text(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_text_filtered(
     layout: &TextLayout,
-    origin: (f32, f32),
-    clip: Rect,
+    origin: Point<Points>,
+    clip: Bounds<Points>,
     opacity: f32,
     foreground: Option<nsh_core::Color>,
     filter: Option<&[f32; 20]>,
@@ -1083,7 +1090,7 @@ pub(crate) fn render_text_filtered(
     if let Some(shadow) = layout.shadow {
         // The finite cell kernel preserves shadow offsets and soft edges while
         // bounding redraw cost for very large app-supplied blur radii.
-        let radius = shadow.radius.max(0.0);
+        let radius = shadow.radius.max(Points::ZERO);
         let columns = (radius / metrics.width()).ceil().min(4.0) as i32;
         let rows = (radius / metrics.height()).ceil().min(4.0) as i32;
         let softness = 1.0 / (1.0 + radius / metrics.height());
@@ -1091,11 +1098,11 @@ pub(crate) fn render_text_filtered(
             for column in -columns..=columns {
                 let dx = column as f32 * metrics.width();
                 let dy = row as f32 * metrics.height();
-                let distance = dx.hypot(dy);
+                let distance = px(dx.0.hypot(dy.0));
                 if distance > radius && (row != 0 || column != 0) {
                     continue;
                 }
-                let fade = if radius > 0.0 {
+                let fade = if radius > Points::ZERO {
                     (-distance / radius * 2.0).exp()
                 } else {
                     1.0
@@ -1105,9 +1112,9 @@ pub(crate) fn render_text_filtered(
                         .runs
                         .iter()
                         .map(|run| (run, filter_color(shadow.color, filter))),
-                    (
-                        origin.0 + shadow.offset_x + dx,
-                        origin.1 + shadow.offset_y + dy,
+                    Point::new(
+                        origin.x + shadow.offset_x + dx,
+                        origin.y + shadow.offset_y + dy,
                     ),
                     clip,
                     opacity * softness * fade,
@@ -1156,8 +1163,8 @@ pub(crate) fn filter_color(color: nsh_core::Color, matrix: Option<&[f32; 20]>) -
 
 fn paint_runs<'a>(
     runs: impl Iterator<Item = (&'a TerminalRun, nsh_core::Color)>,
-    origin: (f32, f32),
-    clip: Rect,
+    origin: Point<Points>,
+    clip: Bounds<Points>,
     opacity: f32,
     metrics: CellMetrics,
     area: CellRect,
@@ -1168,16 +1175,17 @@ fn paint_runs<'a>(
         if color.is_transparent() || run.width == 0 {
             continue;
         }
-        let px = origin.0 + run.x;
-        let py = origin.1 + run.y;
+        let px = origin.x + run.x;
+        let py = origin.y + run.y;
         let column = (px / metrics.width()).floor() as i32;
         let row = (py / metrics.height()).floor() as i32;
         let x = area.x as i32 + column;
         let y = area.y as i32 + row;
-        if column < (clip.x / metrics.width()).floor() as i32
-            || row < (clip.y / metrics.height()).floor() as i32
-            || row >= ((clip.y + clip.height) / metrics.height()).floor() as i32
-            || column + run.width as i32 > ((clip.x + clip.width) / metrics.width()).floor() as i32
+        if column < (clip.origin.x / metrics.width()).floor() as i32
+            || row < (clip.origin.y / metrics.height()).floor() as i32
+            || row >= ((clip.origin.y + clip.size.height) / metrics.height()).floor() as i32
+            || column + run.width as i32
+                > ((clip.origin.x + clip.size.width) / metrics.width()).floor() as i32
             || x < bounds.x as i32
             || y < bounds.y as i32
             || y >= bounds.bottom() as i32
@@ -1223,7 +1231,7 @@ mod tests {
     fn layout(value: &AttributedText, columns: u16) -> (TerminalTextEngine, TextLayout) {
         let engine = TerminalTextEngine::default();
         let prepared = engine.prepare(value);
-        let result = engine.layout(&prepared, Size::new(columns as f32 * 8.0, 1000.0));
+        let result = engine.layout(&prepared, Size::new(px(columns as f32 * 8.0), px(1000.0)));
         (engine, result)
     }
 
@@ -1242,8 +1250,11 @@ mod tests {
         let engine = TerminalTextEngine::default();
         let value = text("A中👩‍💻e\u{301}");
         let prepared = engine.prepare(&value);
-        assert_eq!(engine.measure(&prepared, None), Size::new(48.0, 16.0));
-        let result = engine.layout(&prepared, Size::new(48.0, 16.0));
+        assert_eq!(
+            engine.measure(&prepared, None),
+            Size::new(px(48.0), px(16.0))
+        );
+        let result = engine.layout(&prepared, Size::new(px(48.0), px(16.0)));
         let runs = &result.downcast::<TerminalLayout>().unwrap().runs;
         assert_eq!(
             runs.iter().map(|r| r.width).collect::<Vec<_>>(),
@@ -1263,15 +1274,15 @@ mod tests {
         let before = engine.measure(&engine.prepare(&value), None);
         engine
             .register_font(include_bytes!(
-                "../../../examples/gallery/fonts/Pacifico-Regular.ttf"
+                "../../../api/cases/layout/fonts/Pacifico-Regular.ttf"
             ))
             .unwrap();
         assert_eq!(engine.measure(&engine.prepare(&value), None), before);
-        assert_eq!(before.width, 24.0);
+        assert_eq!(before.width, px(24.0));
         let font = nsh_core::canvas::CanvasFont::parse("24px Pacifico").unwrap();
         let width = nsh_core::canvas::measure_line(&engine, &font, "WWW");
-        assert_eq!(width, fonts.shape(&font, "WWW").width);
-        assert!((width - before.width).abs() > 1.0);
+        assert_eq!(width, px(fonts.shape(&font, "WWW").width));
+        assert!((width - before.width).abs() > px(1.0));
     }
 
     #[test]
@@ -1300,7 +1311,7 @@ mod tests {
         );
         assert_eq!(
             lines.iter().map(|l| l.y).collect::<Vec<_>>(),
-            [0.0, 16.0, 32.0, 48.0]
+            [px(0.0), px(16.0), px(32.0), px(48.0)]
         );
     }
 
@@ -1322,7 +1333,10 @@ mod tests {
         let (engine, result) = layout(&text("hello world"), 5);
         let lines = engine.lines(&result);
         assert_eq!(lines.len(), 2);
-        assert_eq!((lines[0].start, lines[0].end, lines[0].width), (0, 6, 40.0));
+        assert_eq!(
+            (lines[0].start, lines[0].end, lines[0].width),
+            (0, 6, px(40.0))
+        );
         assert_eq!((lines[1].start, lines[1].end), (6, 11));
     }
 
@@ -1348,21 +1362,21 @@ mod tests {
         let mut value = text("a\nb");
         value.max_lines = 1;
         let prepared = engine.prepare(&value);
-        for constraint in [None, Some(80.0)] {
+        for constraint in [None, Some(px(80.0))] {
             let measured = engine.measure(&prepared, constraint);
-            assert_eq!(measured, Size::new(16.0, 16.0));
+            assert_eq!(measured, Size::new(px(16.0), px(16.0)));
             let result = engine.layout(&prepared, measured);
             assert_eq!(rendered(&result), "a…");
             assert_eq!(engine.lines(&result)[0].width, measured.width);
         }
         for mode in [EllipsizeMode::Head, EllipsizeMode::Middle] {
             let mut value = text("abcd\n");
-            value.push_attachment(8.0, 48.0, ResolvedTextStyle::default());
+            value.push_attachment(Size::new(px(8.0), px(48.0)), ResolvedTextStyle::default());
             value.max_lines = 1;
             value.ellipsize = mode;
             let prepared = engine.prepare(&value);
-            let measured = engine.measure(&prepared, Some(32.0));
-            assert_eq!(measured, Size::new(32.0, 48.0));
+            let measured = engine.measure(&prepared, Some(px(32.0)));
+            assert_eq!(measured, Size::new(px(32.0), px(48.0)));
             let result = engine.layout(&prepared, measured);
             assert_eq!(engine.lines(&result)[0].height, measured.height);
             assert!(engine.attachments(&result)[0].is_some());
@@ -1372,9 +1386,9 @@ mod tests {
     #[test]
     fn attachments_keep_their_original_slots_after_truncation() {
         let mut value = text("ab");
-        value.push_attachment(16.0, 16.0, ResolvedTextStyle::default());
+        value.push_attachment(Size::new(px(16.0), px(16.0)), ResolvedTextStyle::default());
         value.push("cd", ResolvedTextStyle::default());
-        value.push_attachment(8.0, 16.0, ResolvedTextStyle::default());
+        value.push_attachment(Size::new(px(8.0), px(16.0)), ResolvedTextStyle::default());
         value.max_lines = 1;
         value.ellipsize = EllipsizeMode::Head;
         let (engine, result) = layout(&value, 4);
@@ -1387,17 +1401,23 @@ mod tests {
     fn inline_attachments_share_the_text_baseline_in_whole_rows() {
         let engine = TerminalTextEngine::default();
         let mut value = text("a");
-        value.push_attachment(16.0, 16.0, ResolvedTextStyle::default());
+        value.push_attachment(Size::new(px(16.0), px(16.0)), ResolvedTextStyle::default());
         let prepared = engine.prepare(&value);
-        assert_eq!(engine.measure(&prepared, None), Size::new(24.0, 16.0));
-        let result = engine.layout(&prepared, Size::new(32.0, 16.0));
-        assert_eq!(engine.attachments(&result), [Some((8.0, 0.0))]);
-        value.attachments[0].height = 32.0;
+        assert_eq!(
+            engine.measure(&prepared, None),
+            Size::new(px(24.0), px(16.0))
+        );
+        let result = engine.layout(&prepared, Size::new(px(32.0), px(16.0)));
+        assert_eq!(
+            engine.attachments(&result),
+            [Some(Point::new(px(8.0), px(0.0)))]
+        );
+        value.attachments[0].height = px(32.0);
         let (_, result) = layout(&value, 4);
         let result = result.downcast::<TerminalLayout>().unwrap();
-        assert_eq!(result.attachments, [Some((8.0, 0.0))]);
-        assert_eq!(result.runs[0].y, 16.0);
-        assert_eq!(result.lines[0].height, 32.0);
+        assert_eq!(result.attachments, [Some(Point::new(px(8.0), px(0.0)))]);
+        assert_eq!(result.runs[0].y, px(16.0));
+        assert_eq!(result.lines[0].height, px(32.0));
     }
 
     #[test]
@@ -1407,15 +1427,15 @@ mod tests {
         let (_, result) = layout(&value, 5);
         let layout = result.downcast::<TerminalLayout>().unwrap();
         assert_eq!(rendered(&result), "גבא");
-        assert_eq!(layout.runs[0].x, 16.0);
+        assert_eq!(layout.runs[0].x, px(16.0));
     }
 
     #[test]
     fn auto_direction_is_resolved_for_each_paragraph() {
         let (_, result) = layout(&text("abc\nאבג"), 5);
         let layout = result.downcast::<TerminalLayout>().unwrap();
-        assert_eq!(layout.lines[0].x, 0.0);
-        assert_eq!(layout.lines[1].x, 16.0);
+        assert_eq!(layout.lines[0].x, px(0.0));
+        assert_eq!(layout.lines[1].x, px(16.0));
     }
 
     #[test]
@@ -1426,13 +1446,8 @@ mod tests {
         let mut buffer = Buffer::empty(CellRect::new(4, 2, 6, 2));
         render_text(
             &result,
-            (0.0, 0.0),
-            Rect {
-                x: 8.0,
-                y: 0.0,
-                width: 16.0,
-                height: 16.0,
-            },
+            Point::new(px(0.0), px(0.0)),
+            Bounds::new(Point::new(px(8.0), px(0.0)), Size::new(px(16.0), px(16.0))),
             1.0,
             CellMetrics::default(),
             CellRect::new(4, 2, 6, 2),
@@ -1454,13 +1469,8 @@ mod tests {
             .set_style(Style::default().add_modifier(Modifier::BOLD));
         render_text(
             &result,
-            (12.0, 0.0),
-            Rect {
-                x: 12.0,
-                y: 0.0,
-                width: 12.0,
-                height: 16.0,
-            },
+            Point::new(px(12.0), px(0.0)),
+            Bounds::new(Point::new(px(12.0), px(0.0)), Size::new(px(12.0), px(16.0))),
             1.0,
             CellMetrics::default(),
             buffer.area,
@@ -1476,21 +1486,16 @@ mod tests {
         let mut value = text("x");
         value.shadow = Some(TextShadow {
             color: nsh_core::Color::rgba(0, 0, 255, 255),
-            offset_x: 8.0,
-            offset_y: 0.0,
-            radius: 0.0,
+            offset_x: px(8.0),
+            offset_y: px(0.0),
+            radius: px(0.0),
         });
         let (_, result) = layout(&value, 3);
         let mut buffer = Buffer::empty(CellRect::new(0, 0, 3, 1));
         render_text(
             &result,
-            (0.0, 0.0),
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 24.0,
-                height: 16.0,
-            },
+            Point::new(px(0.0), px(0.0)),
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(24.0), px(16.0))),
             1.0,
             CellMetrics::default(),
             buffer.area,
@@ -1508,9 +1513,9 @@ mod tests {
         value.spans[0].style.color = nsh_core::Color::rgba(255, 0, 0, 255);
         value.shadow = Some(TextShadow {
             color: nsh_core::Color::rgba(0, 0, 255, 255),
-            offset_x: 8.0,
-            offset_y: 0.0,
-            radius: 0.0,
+            offset_x: px(8.0),
+            offset_y: px(0.0),
+            radius: px(0.0),
         });
         let (_, result) = layout(&value, 3);
         let mut buffer = Buffer::empty(CellRect::new(0, 0, 3, 1));
@@ -1520,13 +1525,8 @@ mod tests {
         let filter = nsh_core::compose_color_matrices(&[nsh_core::Filter::Invert(1.0)]).unwrap();
         render_text_filtered(
             &result,
-            (0.0, 0.0),
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 24.0,
-                height: 16.0,
-            },
+            Point::new(px(0.0), px(0.0)),
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(24.0), px(16.0))),
             0.5,
             None,
             Some(&filter),
@@ -1551,7 +1551,7 @@ mod tests {
         let runs = &result.downcast::<TerminalLayout>().unwrap().runs;
         assert_eq!(runs[1].text, "   ");
         let cjk = runs.iter().find(|run| run.text == "中").unwrap();
-        assert_eq!(cjk.x, 32.0);
+        assert_eq!(cjk.x, px(32.0));
         assert_eq!(cjk.style, style);
         assert!(!rendered(&result).contains('\u{202e}'));
     }
@@ -1561,13 +1561,19 @@ mod tests {
         let engine = TerminalTextEngine::default();
         let value = text("中a\n");
         let prepared = engine.prepare(&value);
-        assert_eq!(engine.measure(&prepared, Some(0.0)), Size::new(0.0, 48.0));
+        assert_eq!(
+            engine.measure(&prepared, Some(px(0.0))),
+            Size::new(px(0.0), px(48.0))
+        );
         let mut value = text("abcde");
         value.no_wrap = true;
         let prepared = engine.prepare(&value);
-        assert_eq!(engine.measure(&prepared, Some(16.0)), Size::new(40.0, 16.0));
-        let result = engine.layout(&prepared, Size::new(16.0, 16.0));
+        assert_eq!(
+            engine.measure(&prepared, Some(px(16.0))),
+            Size::new(px(40.0), px(16.0))
+        );
+        let result = engine.layout(&prepared, Size::new(px(16.0), px(16.0)));
         assert_eq!(rendered(&result), "abcde");
-        assert_eq!(engine.lines(&result)[0].width, 40.0);
+        assert_eq!(engine.lines(&result)[0].width, px(40.0));
     }
 }

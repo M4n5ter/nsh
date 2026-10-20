@@ -1,4 +1,4 @@
-//! `nsh`, the command line tool. It links the mobile UI; an app with Rust
+//! `nsh`, the command line tool. It links `nsh/base`; an app with Rust
 //! components of its own (`nsh.json` `"rust"`) is known to it by the
 //! description its describe program prints (`rust_app.rs`), and runs in the
 //! hosts and runners built for it.
@@ -15,7 +15,7 @@ mod run;
 mod runtime;
 mod rust_app;
 mod sign;
-mod trace;
+mod test;
 mod tui;
 mod ui;
 mod web;
@@ -27,20 +27,21 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 
+use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
 use nsh_core::ui::{Registry, description::SetDescription};
 
-/// The UI sets this command line links: the mobile UI.
+/// The UI sets this command line links: `nsh/base`.
 pub(crate) fn own_sets() -> &'static [Registry] {
     static OWN: OnceLock<Vec<Registry>> = OnceLock::new();
-    OWN.get_or_init(|| vec![nsh_ui_mobile::registry()])
+    OWN.get_or_init(|| vec![nsh_base::registry()])
 }
 
 /// The UI sets of the command's app, as data ([`set_app_sets`]).
 static UI_SETS: RwLock<Option<Arc<[SetDescription]>>> = RwLock::new(None);
 
 /// The UI sets the hosts serve, as data: what bundles import natively,
-/// what bytecode links against, what `.nsh/types` declares. The mobile UI,
+/// what bytecode links against, what `.nsh/types` declares. `nsh/base`,
 /// then an app's own sets ([`set_app_sets`]).
 pub(crate) fn ui_sets() -> Arc<[SetDescription]> {
     if let Some(sets) = &*UI_SETS.read().unwrap_or_else(|e| e.into_inner()) {
@@ -51,7 +52,7 @@ pub(crate) fn ui_sets() -> Arc<[SetDescription]> {
     sets
 }
 
-/// Makes [`ui_sets`] the mobile UI and `app`, the sets of the app's crates
+/// Makes [`ui_sets`] `nsh/base` and `app`, the sets of the app's crates
 /// (described again after a change to its Rust code).
 pub(crate) fn set_app_sets(app: Vec<SetDescription>) {
     let sets: Arc<[SetDescription]> = own_sets()
@@ -118,50 +119,29 @@ enum Command {
         #[arg(long)]
         split: bool,
     },
-    /// Run an app headless (a Rust app: its root) and print the mount
-    /// instructions and timings.
-    Trace {
-        /// The entry module, or the app's directory (default: the current one),
-        /// whose `App.tsx` is the entry.
+    /// Run an app's tests headless: its test files (`*.test.tsx`,
+    /// `*.test.ts`, importing `nsh/test`), each test opening the app on an
+    /// engine of its own; or, given the app's entry, open it and take the
+    /// steps standard input gives (`await app.press("Add")`).
+    Test {
+        /// A test file, a directory whose test files to run (default: the
+        /// current one), or an app's entry.
         #[arg(default_value = ".")]
+        path: PathBuf,
+        /// The entry of the app `path` is part of (set from it).
+        #[arg(skip)]
         entry: PathBuf,
-        /// Number of taps to send to the first pressable view (without
-        /// `--tap`).
-        #[arg(long, default_value_t = 2)]
-        taps: u32,
-        /// Tap a view (repeatable, in order): `id:<testID>`,
-        /// `label:<accessibilityLabel>`, `text:<text>`, `view:<id>`, or a
-        /// bare string matched as a testID, a label, then a text. A match
-        /// that is not pressable taps its nearest pressable ancestor.
-        #[arg(long, value_name = "SELECTOR")]
-        tap: Vec<String>,
-        /// Idle time before tapping, in milliseconds: the app must render
-        /// nothing for this long (at most 10 s). The default lets the
-        /// engine's idle GC run first, so retention bugs show up.
-        #[arg(long, default_value_t = 1200)]
-        idle_ms: u64,
-        /// Run timers and animations this long before the first tap and
-        /// after each one, in milliseconds, instead of waiting until the
-        /// app is idle.
-        #[arg(long, value_name = "MS")]
-        wait: Option<u64>,
-        /// Keep running this long after the last tap, in milliseconds.
-        #[arg(long, value_name = "MS", default_value_t = 0)]
-        duration: u64,
-        /// Simulated safe area insets in points: `top,right,bottom,left`
-        /// (or one value for all four), e.g. `47,0,34,0`.
-        #[arg(long, value_name = "INSETS", value_parser = nsh_engine::headless::parse_insets)]
-        safe_area: Option<nsh_engine::Insets>,
-        /// Scroll the first scroll view / list by this many points, in
-        /// 10 pt frames, and print each frame's batch.
+        /// Run only the tests whose name contains this.
         #[arg(long)]
-        scroll: Option<f32>,
-        /// Viewport width in points.
-        #[arg(long, default_value_t = 390.0)]
-        width: f32,
-        /// Viewport height in points.
-        #[arg(long, default_value_t = 844.0)]
-        height: f32,
+        filter: Option<String>,
+        /// Print every mount batch of the apps the tests open, under the
+        /// step it came in, and the time of every commit.
+        #[arg(long)]
+        trace: bool,
+        /// Also write the results to this file as a JUnit XML report, the
+        /// format CI services read.
+        #[arg(long, value_name = "FILE")]
+        junit: Option<PathBuf>,
     },
     /// Type check an app with TypeScript's native compiler (TypeScript 7,
     /// downloaded once from the npm registry; no Node needed).
@@ -177,7 +157,7 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Serve an app to dev hosts (simulators, devices) and push rebuilds.
+    /// Run an app in this system’s native host with hot reload.
     Dev {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.
@@ -197,16 +177,23 @@ enum Command {
         /// alone runs with. Without it the app runs on its own, with none.
         #[arg(long, value_name = "LIMITS", num_args = 0..=1, default_missing_value = "", value_parser = parse_limits)]
         limits: Option<nsh_core::js::HostLimits>,
+        /// Where to run; defaults to this system's native desktop host.
+        #[arg(long, value_enum, default_value_t = run::Target::native())]
+        target: run::Target,
+        /// iOS simulator to use (name or UDID).
+        #[arg(long)]
+        device: Option<String>,
+        /// Serve hot reload to hosts you start yourself.
+        #[arg(long, conflicts_with_all = ["target", "device"])]
+        server_only: bool,
     },
     /// Package an installable app from the prebuilt runtime (no Rust
     /// needed). Metadata comes from `nsh.json` next to the entry, overridden
     /// by the flags below.
     Package(Box<PackageArgs>),
-    /// Like `dev`, and also run the app in a development host: the Mac
-    /// Catalyst app (default on macOS), the macOS (AppKit) app, the Linux
-    /// app (default on Linux), the Windows app (default on Windows), the
-    /// GPUI app (on any of the three), an iOS simulator, an Android device
-    /// or emulator, a browser, or the terminal.
+    /// Run an app in a development host with hot reload. Defaults to
+    /// AppKit on macOS, GTK on Linux and Win32 on Windows; select mobile
+    /// hosts, Mac Catalyst, GPUI, a browser or the terminal with --target.
     Run {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.
@@ -423,7 +410,7 @@ impl Command {
     fn entry_mut(&mut self) -> Option<&mut PathBuf> {
         match self {
             Command::Build { entry, .. }
-            | Command::Trace { entry, .. }
+            | Command::Test { entry, .. }
             | Command::Check { entry, .. }
             | Command::Dev { entry, .. }
             | Command::Run { entry, .. }
@@ -478,24 +465,36 @@ fn no_limits_for_rust(
 }
 
 fn run(mut command: Command) -> anyhow::Result<()> {
-    let mut types = !matches!(command, Command::Trace { .. });
+    let mut types = true;
+    // The app a test's path is part of.
+    if let Command::Test { path, entry, .. } = &mut command {
+        *path = dunce::canonicalize(&*path).with_context(|| format!("{}", path.display()))?;
+        *entry = test::app_entry(path)?;
+    }
     if let Some(entry) = command.entry_mut() {
         *entry = entry::resolve(entry)?;
         // A Rust app has no TypeScript to declare things for.
         types &= !rust_app::is_root(entry);
     }
-    // A Rust app (`nsh.json` "root") has no bundle: it is built, traced,
+    // A Rust app (`nsh.json` "root") has no bundle: it is built, tested,
     // run and packaged.
     let rust_command = matches!(
         command,
-        Command::Build { .. } | Command::Trace { .. } | Command::Package(_) | Command::Run { .. }
+        Command::Build { .. }
+            | Command::Test { .. }
+            | Command::Package(_)
+            | Command::Run { .. }
+            | Command::Dev {
+                server_only: false,
+                ..
+            }
     );
     if let Some(entry) = command.entry_mut()
         && rust_app::is_root(entry)
         && !rust_command
     {
         anyhow::bail!(
-            "{} declares a Rust app (\"root\"): it is built with `nsh build`, traced with `nsh trace`, \
+            "{} declares a Rust app (\"root\"): it is built with `nsh build`, tested with `nsh test`, \
              run with `nsh run` and packaged with `nsh package`; the other commands take a TSX entry",
             ui::path(entry)
         );
@@ -566,42 +565,43 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             release,
             split,
         } => build::build(&entry, &out, release, split),
-        Command::Trace {
-            entry,
-            taps,
-            tap,
-            idle_ms,
-            wait,
-            duration,
-            safe_area,
-            scroll,
-            width,
-            height,
-        } => trace::trace(
-            &entry,
-            nsh_engine::headless::TraceOptions {
-                taps,
-                tap,
-                idle_ms,
-                wait,
-                duration,
-                scroll,
-                width,
-                height,
-                safe_area: safe_area.unwrap_or_default(),
-            },
-        ),
         Command::Check { entry, tsc, args } => check::check(&entry, tsc.as_deref(), &args),
+        Command::Test {
+            path,
+            entry,
+            filter,
+            trace,
+            junit,
+        } => test::test(&path, &entry, filter, trace, junit.as_deref()),
         Command::Dev {
             entry,
             port,
             release,
             limits,
+            target,
+            device,
+            server_only,
         } => {
             no_limits_for_rust(&entry, limits)?;
-            let session = dev::DevSession::start(&entry, port, release, limits)?;
-            session.print_urls();
-            session.watch(|| Ok(false))
+            if server_only {
+                let session = dev::DevSession::start(&entry, port, release, limits)?;
+                session.print_urls();
+                session.watch(|| Ok(false))
+            } else {
+                run::run(
+                    &entry,
+                    port,
+                    release,
+                    run::HostFlags {
+                        limits,
+                        trace: false,
+                        fps: false,
+                    },
+                    target,
+                    device.as_deref(),
+                    run::HostWindow::default(),
+                )
+            }
         }
         Command::Package(args) => {
             let PackageArgs {
@@ -720,5 +720,65 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             packages,
             out,
         } => sign::revoke_list(&root, extend.as_deref(), sequence, &keys, &packages, &out),
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Command, run::Target};
+
+    #[test]
+    fn dev_and_run_default_to_this_systems_desktop_host() {
+        let expected = if cfg!(target_os = "macos") {
+            Target::Macos
+        } else if cfg!(target_os = "linux") {
+            Target::Linux
+        } else if cfg!(windows) {
+            Target::Windows
+        } else {
+            Target::Web
+        };
+        for command in ["dev", "run"] {
+            let cli = Cli::try_parse_from(["nsh", command]).unwrap();
+            let target = match cli.command {
+                Command::Dev {
+                    target,
+                    server_only: false,
+                    ..
+                }
+                | Command::Run { target, .. } => target,
+                _ => panic!("expected a host command"),
+            };
+            assert_eq!(target, expected);
+        }
+    }
+
+    #[test]
+    fn mobile_hosts_are_selected_explicitly() {
+        for command in ["dev", "run"] {
+            for (value, expected) in [("ios", Target::Ios), ("android", Target::Android)] {
+                let cli = Cli::try_parse_from(["nsh", command, "--target", value]).unwrap();
+                let target = match cli.command {
+                    Command::Dev { target, .. } | Command::Run { target, .. } => target,
+                    _ => panic!("expected a host command"),
+                };
+                assert_eq!(target, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn dev_can_serve_hosts_started_separately() {
+        let cli = Cli::try_parse_from(["nsh", "dev", "--server-only"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Dev {
+                server_only: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["nsh", "dev", "--server-only", "--target", "ios"]).is_err());
     }
 }

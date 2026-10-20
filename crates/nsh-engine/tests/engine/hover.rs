@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Receiver;
 use nsh_core::{
     ApproxTextEngine, EventKind, EventMask, EventPayload, HoverEvent, MountBatch, MountItem,
-    NodeId, Size, keymap::Modifiers,
+    NodeId, Size, geometry::px, keymap::Modifiers,
 };
 use nsh_engine::{Bundle, Engine, EngineConfig};
 
@@ -45,7 +45,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry: dir.join("App.tsx"),
         minify: false,
-        ui_sets: vec![nsh_ui_mobile::registry().into()],
+        ui_sets: vec![nsh_base::registry().into()],
         split: false,
     })
     .unwrap();
@@ -54,17 +54,20 @@ fn start() -> (Engine, Receiver<MountBatch>) {
     let config = EngineConfig {
         // SAFETY: compiled just now by this runtime.
         app: nsh_engine::App::Js(unsafe { Bundle::bytecode(bytecode) }),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
+        websocket: None,
+        filesystem: None,
         assets: None,
         environment: Default::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
         data_dir: None,
         storage: None,
+        clock: Default::default(),
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -147,10 +150,8 @@ fn hover_handlers_are_in_the_event_masks_and_hear_their_events() {
     until_log(&rx, "log in outer|in inner");
     let at = |x: f32, shift: bool| {
         EventPayload::Hover(HoverEvent {
-            location_x: x,
-            location_y: 2.0,
-            page_x: x + 10.0,
-            page_y: 12.0,
+            location: nsh_core::geometry::point(px(x), px(2.0)),
+            page: nsh_core::geometry::point(px(x + 10.0), px(12.0)),
             modifiers: Modifiers {
                 shift,
                 ..Default::default()

@@ -43,10 +43,12 @@ use std::{
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime};
 use nsh_core::{
-    Command, Dialog, DialogButtonStyle, EventKind, EventPayload, NodeId, PayloadValue, ROOT_ID,
-    Rect, platform::clipboard,
+    Bounds, Command, Dialog, DialogButtonStyle, EventKind, EventPayload, NodeId, PayloadValue,
+    Points, ROOT_ID,
+    geometry::{Point, Size, px},
+    platform::clipboard,
 };
-use nsh_engine::{ColorScheme, Environment, Idiom, Insets, Locale, Os};
+use nsh_engine::{ColorScheme, Edges, Environment, Idiom, Locale, Os};
 use objc2::{
     MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
@@ -280,8 +282,8 @@ fn update(surface: &Surface) {
     env.os = Os::MacOs;
     env.os_version = os_version();
     env.idiom = Idiom::Desktop;
-    env.safe_area = Insets::default();
-    env.keyboard_height = 0.0;
+    env.safe_area = Edges::default();
+    env.keyboard_height = px(0.0);
     surface.set_environment(env);
 }
 
@@ -301,10 +303,10 @@ fn follow_background(surface: &Surface) {
         .and_then(|top| {
             let root = surface.root.state().frame;
             let s = top.state();
-            let fills = s.frame.x <= 0.0
-                && s.frame.y <= 0.0
-                && s.frame.x + s.frame.width >= root.width
-                && s.frame.y + s.frame.height >= root.height;
+            let fills = s.frame.origin.x.0 <= 0.0
+                && s.frame.origin.y.0 <= 0.0
+                && s.frame.origin.x.0 + s.frame.size.width.0 >= root.size.width.0
+                && s.frame.origin.y.0 + s.frame.size.height.0 >= root.size.height.0;
             let color = s.background();
             (fills && color.0 & 0xff == 0xff).then_some(color)
         });
@@ -389,9 +391,17 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
         Command::ReadClipboardFiles { id } => read_clipboard_files(surface, *id),
         Command::Back => crate::navigation::default_back(surface),
         Command::ExitApp => {
-            if let Some(window) = surface.root.ns().window() {
-                window.close();
-            }
+            // Closing calls the window delegate synchronously, which stops
+            // the surface and clears its mounter. Wait until this batch has
+            // released the mounter's mutable borrow.
+            let key = surface.key();
+            DispatchQueue::main().exec_async(move || {
+                if let Some(surface) = Surface::with_key(key)
+                    && let Some(window) = surface.root.ns().window()
+                {
+                    window.close();
+                }
+            });
         }
         // The status bar is a phone's; layout animations arrive as mount
         // items.
@@ -532,15 +542,9 @@ fn show_dialog(surface: &Rc<Surface>, dialog: &Dialog) {
         (None, Some(message)) => alert.setMessageText(&NSString::from_str(message)),
         (None, None) => {}
     }
-    let ok = [nsh_core::DialogButton {
-        text: "OK".to_owned(),
-        style: DialogButtonStyle::Default,
-    }];
-    let buttons = if dialog.buttons.is_empty() {
-        &ok[..]
-    } else {
-        &dialog.buttons[..]
-    };
+    // `AlertDialog` always brings the app's actions (it rejects none): no
+    // label of NSH's own.
+    let buttons = &dialog.buttons[..];
     let cancel = buttons
         .iter()
         .position(|b| b.style == DialogButtonStyle::Cancel);
@@ -668,7 +672,7 @@ fn show_toast(surface: &Rc<Surface>, text: &str, long: bool) {
         label,
     };
     let env = surface.environment.get();
-    place_toast(&toast, env.window.0, env.window.1);
+    place_toast(&toast, env.window.width.0, env.window.height.0);
     SYSTEM.with(|s| s.borrow_mut().toasts.push(toast));
     let fade_in = if env.reduce_motion { 0.0 } else { FADE_IN };
     fade(surface, &view, 1.0, fade_in, || {});
@@ -714,11 +718,15 @@ fn place_toast(toast: &Toast, width: f32, height: f32) {
     let (bw, bh) = (w + 32.0, h + 18.0);
     toast.root.set_native(
         &toast.view,
-        Rect {
-            x: ((width - bw) / 2.0).round(),
-            y: height - 64.0 - bh,
-            width: bw,
-            height: bh,
+        Bounds {
+            origin: Point {
+                x: Points(((width - bw) / 2.0).round()),
+                y: Points(height - 64.0 - bh),
+            },
+            size: Size {
+                width: Points(bw),
+                height: Points(bh),
+            },
         },
     );
 }

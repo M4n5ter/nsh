@@ -12,7 +12,11 @@ use std::{
     },
 };
 
-use nsh_core::{FontVariant, canvas::CanvasFont};
+use nsh_core::{
+    FontVariant,
+    canvas::CanvasFont,
+    geometry::{Points, px},
+};
 use tiny_skia as sk;
 use unicode_bidi::{BidiInfo, Level};
 use unicode_segmentation::UnicodeSegmentation;
@@ -116,8 +120,8 @@ impl FontCatalog {
         shaped
     }
 
-    pub(crate) fn measure(&self, font: &CanvasFont, text: &str) -> f32 {
-        self.shape(font, text).width
+    pub(crate) fn measure(&self, font: &CanvasFont, text: &str) -> Points {
+        px(self.shape(font, text).width)
     }
 }
 
@@ -237,7 +241,7 @@ impl ShapeKey {
     fn new(font: &CanvasFont, text: &str) -> Self {
         Self {
             font: FontKey::new(font),
-            size: font.size.to_bits(),
+            size: font.size.0.to_bits(),
             variant: font.variant.0,
             text: text.to_owned(),
         }
@@ -425,7 +429,7 @@ impl Fonts {
         let bidi = BidiInfo::new(&text, None);
         let features = font_features(font.variant);
         let size = if font.size.is_finite() {
-            font.size.max(0.1)
+            font.size.0.max(0.1)
         } else {
             14.0
         };
@@ -778,7 +782,7 @@ fn font_features(variant: FontVariant) -> Vec<rustybuzz::Feature> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const PACIFICO: &[u8] = include_bytes!("../../../examples/gallery/fonts/Pacifico-Regular.ttf");
+    const PACIFICO: &[u8] = include_bytes!("../../../api/cases/layout/fonts/Pacifico-Regular.ttf");
 
     fn with_tables(additional: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
         let count = u16::from_be_bytes(PACIFICO[4..6].try_into().unwrap()) as usize;
@@ -854,12 +858,12 @@ mod tests {
         let first = empty_catalog();
         let second = empty_catalog();
         let font = CanvasFont::parse("24px Pacifico").unwrap();
-        assert_eq!(first.measure(&font, "Native Shell"), 0.0);
+        assert_eq!(first.measure(&font, "Native Shell"), Points::ZERO);
         first.register(PACIFICO).unwrap();
         let width = first.measure(&font, "Native Shell");
-        assert!(width > 0.0);
+        assert!(width > Points::ZERO);
         assert_eq!(first.revision(), 1);
-        assert_eq!(second.measure(&font, "Native Shell"), 0.0);
+        assert_eq!(second.measure(&font, "Native Shell"), Points::ZERO);
         assert_eq!(second.revision(), 0);
         let shared = first.clone();
         assert_eq!(shared.measure(&font, "Native Shell"), width);
@@ -880,7 +884,7 @@ mod tests {
                 .iter()
                 .any(|paint| matches!(paint, GlyphPaint::Path(_, None)))
         );
-        assert!((fonts.measure(&large, "office AV") - shaped.width * 2.0).abs() < 0.001);
+        assert!((fonts.measure(&large, "office AV") - px(shaped.width * 2.0)).abs() < px(0.001));
         assert!(shaped.width > 0.0 && shaped.ascent > 0.0);
         assert!(fonts.register(b"invalid").is_err());
         assert_eq!(fonts.revision(), 1);
@@ -937,7 +941,7 @@ mod tests {
         assert_eq!((transform.tx, transform.ty), (0.0, -1.0));
         let original = empty_catalog();
         original.register(PACIFICO).unwrap();
-        assert_eq!(shaped.width, original.measure(&font, "a"));
+        assert_eq!(px(shaped.width), original.measure(&font, "a"));
         let drawing = nsh_core::canvas::Drawing {
             ops: vec![
                 nsh_core::canvas::CanvasOp::Font(font),
@@ -951,7 +955,8 @@ mod tests {
             slots: Vec::new(),
         };
         let raster =
-            crate::canvas::rasterize(&drawing, &[], 32.0, 32.0, &HashMap::new(), &fonts).unwrap();
+            crate::canvas::rasterize(&drawing, &[], px(32.0), px(32.0), &HashMap::new(), &fonts)
+                .unwrap();
         assert_eq!(&raster.rgba[(19 * 32 + 4) * 4..][..4], [255, 0, 0, 255]);
         assert_eq!(&raster.rgba[(19 * 32 + 5) * 4..][..4], [0, 0, 255, 255]);
     }

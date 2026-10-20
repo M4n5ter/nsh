@@ -1,8 +1,8 @@
 import { computed, Input, mount, signal, View } from "nsh";
+import { Dialog } from "nsh/base";
 import { Canvas } from "nsh/canvas";
 import { windowSize } from "nsh/device";
 import { List } from "nsh/list";
-import { Modal } from "nsh/ui/mobile";
 import { initialActivity, sections, services, type Activity, type Filter, type Section } from "./data";
 import { Action, Label, Metric, palette as p, Progress, Sparkline } from "./ui";
 import { EffectsInspector, RunbookInspector } from "./inspectors";
@@ -69,7 +69,7 @@ function Workbench() {
               <View style={{ height: 32 }}>
                 <View
                   testID={`nav-${item().id}`}
-                  accessibilityRole="button"
+                  role="button"
                   accessibilityLabel={`Open ${item().label}`}
                   onPress={() => changeSection(item().id)}
                   style={{ height: 16, paddingHorizontal: 8, flexDirection: "row", gap: 8, backgroundColor: section() === item().id ? p.selected : "transparent" }}
@@ -115,9 +115,8 @@ function Workbench() {
                 autoFocus
                 value={query()}
                 placeholder="Name, region, owner..."
-                placeholderTextColor={p.faint}
-                onChangeText={(value) => query.set(value)}
-                style={{ flex: 1, minWidth: 0, height: 16, paddingHorizontal: 8, backgroundColor: p.raised, color: p.ink, fontSize: 14, lineHeight: 16 }}
+                onChange={(value) => query.set(value)}
+                style={{ flex: 1, minWidth: 0, height: 16, paddingHorizontal: 8, backgroundColor: p.raised, color: p.ink, placeholderColor: p.faint, fontSize: 14, lineHeight: 16 }}
               />
               <Each of={["all", "healthy", "degraded"] as const}>
                 {(choice) => <Action testID={`filter-${choice()}`} label={choice() === "all" ? "All" : choice() === "healthy" ? "Healthy" : "Degraded"} active={filter() === choice()} onPress={() => filter.set(choice())} />}
@@ -135,12 +134,12 @@ function Workbench() {
               each={rows()}
               estimatedItemSize={32}
               style={{ flex: 1, minHeight: 0 }}
-              ListEmptyComponent={<View style={{ padding: 16 }}><Label color={p.ink}>No matching services</Label><Label>Try another name or clear the search.</Label></View>}
+              empty={<View style={{ padding: 16 }}><Label color={p.ink}>No matching services</Label><Label>Try another name or clear the search.</Label></View>}
             >
               {(service) => (
                 <View
                   testID={`service-${service().id}`}
-                  accessibilityRole="button"
+                  role="button"
                   accessibilityLabel={`Inspect ${service().name}`}
                   onPress={() => { selected.set(service().id); notice.set(`Inspecting ${service().name} · ${service().location}`); }}
                   style={{ height: 32, paddingHorizontal: 8, flexDirection: "row", gap: 8, backgroundColor: current().id === service().id ? p.selected : service().id % 2 ? p.page : p.sidebar }}
@@ -247,20 +246,20 @@ function Workbench() {
         <If when={inspector()}><Label color={p.faint}>Tab focus · Ctrl+Q quit</Label></If>
       </View>
 
-      <Modal visible={deployOpen()} transparent animationType="fade" onRequestClose={() => deployOpen.set(false)}>
+      <Dialog open={deployOpen()} animation="fade" onOpenChange={(open) => deployOpen.set(open)} style={{ flex: 1 }}>
         <View style={{ flex: 1, padding: 16, alignItems: "center", justifyContent: "center", backgroundColor: "#02060dcc" }}>
           <View style={{ width: 448, maxWidth: "100%", padding: 16, gap: 16, backgroundColor: p.panel }}>
             <Label strong color={p.mint}>Deploy service</Label>
             <Label color={p.ink}>{`${current().name} → v2.19.0`}</Label>
             <View><Label color={p.blue}>Preflight checks passed</Label><Label>{`${current().region} · ${current().replicas} replicas`}</Label><Label>Rolling update / one replica at a time</Label></View>
-            <View><Label color={p.faint}>Release note</Label><Input testID="release-note" accessibilityLabel="Release note" value={releaseNote()} onChangeText={(value) => releaseNote.set(value)} style={{ height: 16, paddingHorizontal: 8, fontSize: 14, lineHeight: 16, color: p.ink, backgroundColor: p.raised }} /></View>
+            <View><Label color={p.faint}>Release note</Label><Input testID="release-note" accessibilityLabel="Release note" value={releaseNote()} onChange={(value) => releaseNote.set(value)} style={{ height: 16, paddingHorizontal: 8, fontSize: 14, lineHeight: 16, color: p.ink, backgroundColor: p.raised }} /></View>
             <View style={{ height: 16, flexDirection: "row", justifyContent: "flex-end", gap: 16 }}>
               <Action label="Cancel" testID="cancel-deploy" accessibilityLabel="Cancel deployment" onPress={() => deployOpen.set(false)} />
               <Action label="Queue deployment" testID="confirm-deploy" accessibilityLabel="Confirm deployment" primary onPress={confirmDeployment} />
             </View>
           </View>
         </View>
-      </Modal>
+      </Dialog>
     </View>
   );
 }

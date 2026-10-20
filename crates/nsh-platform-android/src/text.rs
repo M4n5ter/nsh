@@ -10,7 +10,9 @@ use jni::{
     signature::{Primitive, ReturnType},
     sys::jvalue,
 };
-use nsh_core::{AttributedText, EllipsizeMode, Size, TextAlign, TextEngine, TextLayout};
+use nsh_core::{
+    AttributedText, EllipsizeMode, Points, Size, TextAlign, TextEngine, TextLayout, geometry::px,
+};
 
 use crate::java::{java, with_env};
 
@@ -101,12 +103,12 @@ impl TextEngine for AndroidTextEngine {
                 s.background.map_or(0, |b| b.node as i32),
             ]);
             floats.extend_from_slice(&[
-                s.font_size,
-                s.line_height,
-                s.letter_spacing,
-                s.decoration_thickness.unwrap_or(0.0),
-                s.underline_offset.unwrap_or(f32::NAN),
-                s.background.map_or(0.0, |b| b.radius),
+                s.font_size.0,
+                s.line_height.0,
+                s.letter_spacing.0,
+                s.decoration_thickness.map_or(0.0, |t| t.0),
+                s.underline_offset.map_or(f32::NAN, |o| o.0),
+                s.background.map_or(0.0, |b| b.radius.0),
             ]);
         }
         // Alignment, writing direction (0 from the content, 1 left to
@@ -134,7 +136,7 @@ impl TextEngine for AndroidTextEngine {
         let attachments: Vec<f32> = text
             .attachments
             .iter()
-            .flat_map(|a| [a.index as f32, a.width, a.height])
+            .flat_map(|a| [a.index as f32, a.width.0, a.height.0])
             .collect();
         Prepared(with_env(|env| {
             let j = java();
@@ -162,9 +164,9 @@ impl TextEngine for AndroidTextEngine {
                 JValue::Float(density).as_jni(),
                 // Shadow behind the block: color 0 means none.
                 JValue::Int(shadow.map_or(0, |s| argb(s.color))).as_jni(),
-                JValue::Float(shadow.map_or(0.0, |s| s.offset_x)).as_jni(),
-                JValue::Float(shadow.map_or(0.0, |s| s.offset_y)).as_jni(),
-                JValue::Float(shadow.map_or(0.0, |s| s.radius)).as_jni(),
+                JValue::Float(shadow.map_or(0.0, |s| s.offset_x.0)).as_jni(),
+                JValue::Float(shadow.map_or(0.0, |s| s.offset_y.0)).as_jni(),
+                JValue::Float(shadow.map_or(0.0, |s| s.radius.0)).as_jni(),
                 JValue::Object(&attachment_array).as_jni(),
             ];
             // SAFETY: the method id and argument types match the signature
@@ -182,15 +184,15 @@ impl TextEngine for AndroidTextEngine {
         }))
     }
 
-    fn measure(&self, prepared: &Prepared, max_width: Option<f32>) -> Size {
+    fn measure(&self, prepared: &Prepared, max_width: Option<Points>) -> Size<Points> {
         let Some(obj) = &prepared.0 else {
-            return Size::new(0.0, 0.0);
+            return Size::new(px(0.0), px(0.0));
         };
         let packed = with_env(|env| {
             let j = java();
             let args: [jvalue; 2] = [
                 JValue::Object(obj.as_obj()).as_jni(),
-                JValue::Float(max_width.unwrap_or(f32::NAN)).as_jni(),
+                JValue::Float(max_width.map_or(f32::NAN, |m| m.0)).as_jni(),
             ];
             // SAFETY: matches the signature checked in `java::init`.
             unsafe {
@@ -206,17 +208,17 @@ impl TextEngine for AndroidTextEngine {
         // Two f32 bit patterns: width high, height low.
         let width = f32::from_bits((packed as u64 >> 32) as u32);
         let height = f32::from_bits(packed as u64 as u32);
-        Size::new(width, height)
+        Size::new(Points(width), Points(height))
     }
 
-    fn layout(&self, prepared: &Prepared, size: Size) -> TextLayout {
+    fn layout(&self, prepared: &Prepared, size: Size<Points>) -> TextLayout {
         let layout = prepared.0.as_ref().and_then(|obj| {
             with_env(|env| {
                 let j = java();
                 let args: [jvalue; 3] = [
                     JValue::Object(obj.as_obj()).as_jni(),
-                    JValue::Float(size.width).as_jni(),
-                    JValue::Float(size.height).as_jni(),
+                    JValue::Float(size.width.0).as_jni(),
+                    JValue::Float(size.height.0).as_jni(),
                 ];
                 // SAFETY: matches the signature checked in `java::init`.
                 let layout = unsafe {
@@ -271,19 +273,19 @@ impl TextEngine for AndroidTextEngine {
                 text: String::new(),
                 start: v[0] as u32,
                 end: v[1] as u32,
-                x: v[2],
-                y: v[3],
-                width: v[4],
-                height: v[5],
-                ascender: v[6],
-                descender: v[7],
-                cap_height: v[8],
-                x_height: v[9],
+                x: px(v[2]),
+                y: px(v[3]),
+                width: px(v[4]),
+                height: px(v[5]),
+                ascender: px(v[6]),
+                descender: px(v[7]),
+                cap_height: px(v[8]),
+                x_height: px(v[9]),
             })
             .collect()
     }
 
-    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<nsh_core::Point<Points>>> {
         let Some(AndroidLayout(obj)) = layout.downcast::<AndroidLayout>() else {
             return Vec::new();
         };
@@ -313,7 +315,7 @@ impl TextEngine for AndroidTextEngine {
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|&[x, y]| (!x.is_nan()).then_some((x, y)))
+            .map(|&[x, y]| (!x.is_nan()).then_some(nsh_core::geometry::point(px(x), px(y))))
             .collect()
     }
 

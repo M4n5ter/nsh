@@ -3,7 +3,10 @@
 //! calls and display link ticks. Views are identified by their `tag` (the node id).
 
 use dispatch2::DispatchQueue;
-use nsh_core::{EventKind, EventPayload, KeyboardTaps, NodeId, SubmitBehavior};
+use nsh_core::{
+    EventKind, EventPayload, KeyboardTaps, NodeId, SubmitBehavior,
+    geometry::{point, px},
+};
 use nsh_engine::EngineControl;
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
@@ -286,7 +289,7 @@ define_class!(
             let applied = self.ivars().scrolls_applied.borrow().get(&id).copied().unwrap_or(0);
             self.ivars()
                 .control
-                .scroll(id, offset.x as f32, offset.y as f32, applied);
+                .scroll(id, point(px(offset.x as f32), px(offset.y as f32)), applied);
             self.with_mounter(move |m| m.scrolled(id, offset));
         }
 
@@ -306,7 +309,7 @@ define_class!(
             let applied = self.ivars().scrolls_applied.borrow().get(&id).copied().unwrap_or(0);
             self.ivars()
                 .control
-                .scroll(id, offset.x as f32, offset.y as f32, applied);
+                .scroll(id, point(px(offset.x as f32), px(offset.y as f32)), applied);
         }
 
         #[unsafe(method(scrollViewDidEndZooming:withView:atScale:))]
@@ -601,10 +604,10 @@ impl EventTarget {
         self.dispatch(
             scroll.tag() as NodeId,
             event,
-            EventPayload::Scroll {
-                x: offset.x as f32,
-                y: offset.y as f32,
-            },
+            EventPayload::Scroll(nsh_core::geometry::point(
+                nsh_core::Points(offset.x as f32),
+                nsh_core::Points(offset.y as f32),
+            )),
         );
     }
 

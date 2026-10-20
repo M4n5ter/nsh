@@ -17,7 +17,7 @@ pub fn main() -> ExitCode {
         let (dir, options) = setup()?;
         // SAFETY: this bytecode is a resource of the app's own package.
         let bundle = unsafe { nsh_platform_tui::Bundle::read_trusted(&dir.join("bundle.nshc")) }?;
-        nsh_platform_tui::run_app(AppSource::Bundle(bundle), options)
+        nsh_platform_tui::run_app(AppSource::Bundle(Box::new(bundle)), options)
     })())
 }
 

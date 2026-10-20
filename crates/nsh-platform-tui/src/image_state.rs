@@ -4,7 +4,11 @@
 
 use std::sync::Arc;
 
-use nsh_core::{ImageOptions, ImageSource, Rect, ResizeMode, Size, access::Access};
+use nsh_core::{
+    ImageOptions, ImageSource, ResizeMode,
+    access::Access,
+    geometry::{Bounds, Points, Size, point, px},
+};
 
 use crate::image::{AnimatedRaster, Raster, fitted_frame};
 
@@ -23,8 +27,8 @@ pub(crate) struct ImageRequest {
     pub(crate) role: ImageRole,
     pub(crate) source: ImageSource,
     pub(crate) revision: u64,
-    pub(crate) blur_radius: f32,
-    pub(crate) size: Size,
+    pub(crate) blur_radius: Points,
+    pub(crate) size: Size<Points>,
     pub(crate) mode: ResizeMode,
 }
 
@@ -47,37 +51,42 @@ impl ImageRequest {
         let Some(raster) = image.frames.first() else {
             return (0.0, 0.0);
         };
-        if self.blur_radius <= 0.0 {
+        if self.blur_radius <= Points::ZERO {
             return (0.0, 0.0);
         }
         let natural = self
             .source
             .size
-            .filter(|&(w, h)| w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0)
-            .unwrap_or((raster.width as f32, raster.height as f32));
+            .filter(|size| {
+                size.width.is_finite()
+                    && size.height.is_finite()
+                    && size.width > Points::ZERO
+                    && size.height > Points::ZERO
+            })
+            .unwrap_or_else(|| Size::new(px(raster.width as f32), px(raster.height as f32)));
         let size = if self.mode == ResizeMode::Center {
             natural
         } else {
-            let frame = Rect {
-                x: 0.0,
-                y: 0.0,
-                width: if self.size.width > 0.0 {
-                    self.size.width
-                } else {
-                    natural.0
-                },
-                height: if self.size.height > 0.0 {
-                    self.size.height
-                } else {
-                    natural.1
-                },
-            };
-            let fitted = fitted_frame(raster, frame, self.mode);
-            (fitted.width, fitted.height)
+            let frame = Bounds::new(
+                point(Points::ZERO, Points::ZERO),
+                Size::new(
+                    if self.size.width > Points::ZERO {
+                        self.size.width
+                    } else {
+                        natural.width
+                    },
+                    if self.size.height > Points::ZERO {
+                        self.size.height
+                    } else {
+                        natural.height
+                    },
+                ),
+            );
+            fitted_frame(raster, frame, self.mode).size
         };
         (
-            self.blur_radius * raster.width as f32 / size.0.max(f32::MIN_POSITIVE),
-            self.blur_radius * raster.height as f32 / size.1.max(f32::MIN_POSITIVE),
+            self.blur_radius / size.width.max(px(f32::MIN_POSITIVE)) * raster.width as f32,
+            self.blur_radius / size.height.max(px(f32::MIN_POSITIVE)) * raster.height as f32,
         )
     }
 }
@@ -123,7 +132,7 @@ pub(crate) struct ImageState {
     source: Option<ImageSource>,
     mode: ResizeMode,
     options: ImageOptions,
-    size: Size,
+    size: Size<Points>,
     revision: u64,
     main: Option<Loaded>,
     placeholder: Option<Loaded>,
@@ -147,7 +156,7 @@ impl ImageState {
         mut options: ImageOptions,
         now: f64,
     ) -> Vec<ImageRequest> {
-        options.blur_radius = positive(options.blur_radius);
+        options.blur_radius = positive_points(options.blur_radius);
         options.fade_ms = options.fade_ms.map(positive);
         if source.is_some() || options.placeholder.is_some() {
             self.owner.get_or_insert_with(|| Arc::new(()));
@@ -155,7 +164,7 @@ impl ImageState {
         let changed = source != self.source;
         let placeholder_changed = options.placeholder != self.options.placeholder;
         let blur_changed = options.blur_radius != self.options.blur_radius;
-        let geometry_changed = mode != self.mode && options.blur_radius > 0.0;
+        let geometry_changed = mode != self.mode && options.blur_radius > Points::ZERO;
         if changed || placeholder_changed || blur_changed || geometry_changed {
             self.revision = self.revision.wrapping_add(1);
         }
@@ -195,11 +204,11 @@ impl ImageState {
     /// Image blur is specified in points; changing the fitted dimensions
     /// therefore needs a new pixel-space blur variant, while sharp images
     /// retain their shared raster through resize.
-    pub(crate) fn resize(&mut self, size: Size) -> Vec<ImageRequest> {
-        let size = Size::new(positive(size.width), positive(size.height));
+    pub(crate) fn resize(&mut self, size: Size<Points>) -> Vec<ImageRequest> {
+        let size = Size::new(positive_points(size.width), positive_points(size.height));
         if self.size != size {
             self.size = size;
-            if self.options.blur_radius > 0.0 {
+            if self.options.blur_radius > Points::ZERO {
                 self.revision = self.revision.wrapping_add(1);
                 self.main_pending = self.source.is_some();
                 self.placeholder_pending = self.options.placeholder.is_some()
@@ -458,6 +467,13 @@ impl ImageState {
 fn elapsed(started: f64, now: f64) -> u64 {
     ((now - started).max(0.0) * 1000.0) as u64
 }
+fn positive_points(value: Points) -> Points {
+    if value.is_finite() {
+        value.max(Points::ZERO)
+    } else {
+        Points::ZERO
+    }
+}
 fn positive(value: f32) -> f32 {
     if value.is_finite() {
         value.max(0.0)
@@ -566,13 +582,13 @@ mod tests {
     #[test]
     fn blur_resize_rejects_stale_variants_and_uses_display_pixel_scale() {
         let mut state = ImageState::default();
-        state.resize(Size::new(20.0, 10.0));
+        state.resize(Size::new(px(20.0), px(10.0)));
         let request = state
             .update(
                 Some(source("asset:/main")),
                 ResizeMode::Stretch,
                 ImageOptions {
-                    blur_radius: 4.0,
+                    blur_radius: px(4.0),
                     ..Default::default()
                 },
                 0.0,
@@ -588,11 +604,11 @@ mod tests {
             plays: 1,
         });
         assert_eq!(request.blur_radii(&raw), (8.0, 16.0));
-        let resized = state.resize(Size::new(40.0, 20.0));
+        let resized = state.resize(Size::new(px(40.0), px(20.0)));
         assert!(!state.accepts(&request));
         assert_eq!(resized[0].blur_radii(&raw), (4.0, 8.0));
         assert!(state.install(&resized[0], raw, 0.1));
-        assert!(state.resize(Size::new(40.0, 20.0)).is_empty());
+        assert!(state.resize(Size::new(px(40.0), px(20.0))).is_empty());
     }
 
     #[test]

@@ -20,7 +20,7 @@ NSH 的所有操作都通过一个命令 `nsh` 完成：打包和编译应用、
 | Linux | Linux | GTK 4.14+（构建运行时还需要它的开发包） |
 | [GPUI](./gpui.md) | macOS、Windows 或 Linux，为该系统打包 | GPU（Metal、DirectX 或 Vulkan）；Linux 上需要 Wayland 或 X11 |
 
-macOS 上 `nsh run` 的默认目标 Mac Catalyst 和 iOS 一样需要 Xcode。详见[平台工具](#平台工具)。
+macOS 上的默认目标为 AppKit。Mac Catalyst（`--target catalyst`）和 iOS 一样需要 Xcode。详见[平台工具](#平台工具)。
 
 ## 安装发布版本
 
@@ -185,8 +185,8 @@ sdkmanager "platforms;android-35" "build-tools;35.0.1" "platform-tools"
 
 | 命令 | macOS | Linux | Windows |
 |---|---|---|---|
-| `nsh init`, `nsh build`, `nsh trace`, `nsh dev`, `nsh check` | 可以 | 可以 | 可以 |
-| `nsh run`（Mac Catalyst，macOS 上的默认目标） | 可以 | 不可以 | 不可以 |
+| `nsh init`, `nsh build`, `nsh test`, `nsh dev`, `nsh check` | 可以 | 可以 | 可以 |
+| `nsh run --target catalyst`（Mac Catalyst） | 可以 | 不可以 | 不可以 |
 | `nsh run --target macos`, `nsh package --target macos` | 可以 | 不可以 | 不可以 |
 | `nsh run --target linux`（Linux 上的默认目标）, `nsh package --target linux` | 不可以 | 可以 | 不可以 |
 | `nsh run --target windows`（Windows 上的默认目标）, `nsh package --target windows` | 不可以 | 不可以 | 可以 |

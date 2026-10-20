@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-use nsh_core::{Color, NodeId, Rect, ResizeMode};
+use nsh_core::{Bounds, Color, NodeId, Points, ResizeMode};
 use ratatui::{
     buffer::{Buffer, CellDiffOption},
     layout::{Rect as CellRect, Size},
@@ -79,8 +79,8 @@ impl ImageProtocol {
 pub(crate) struct Request {
     raster: Arc<Raster>,
     config: ImageProtocol,
-    frame: Rect,
-    clip: Rect,
+    frame: Bounds<Points>,
+    clip: Bounds<Points>,
     mode: ResizeMode,
     tint: Option<Color>,
     opacity: f32,
@@ -114,8 +114,8 @@ impl Request {
     pub(crate) fn capture(
         raster: Arc<Raster>,
         config: ImageProtocol,
-        frame: Rect,
-        clip: Rect,
+        frame: Bounds<Points>,
+        clip: Bounds<Points>,
         mode: ResizeMode,
         tint: Option<Color>,
         opacity: f32,
@@ -133,15 +133,25 @@ impl Request {
             return None;
         }
         let dest = fitted_frame(&raster, frame, mode);
-        let left = frame.x.max(clip.x).max(dest.x).max(0.0);
-        let top = frame.y.max(clip.y).max(dest.y).max(0.0);
-        let right = (frame.x + frame.width)
-            .min(clip.x + clip.width)
-            .min(dest.x + dest.width);
-        let bottom = (frame.y + frame.height)
-            .min(clip.y + clip.height)
-            .min(dest.y + dest.height);
-        if ![left, top, right, bottom, dest.width, dest.height]
+        let left = frame
+            .origin
+            .x
+            .max(clip.origin.x)
+            .max(dest.origin.x)
+            .max(Points::ZERO);
+        let top = frame
+            .origin
+            .y
+            .max(clip.origin.y)
+            .max(dest.origin.y)
+            .max(Points::ZERO);
+        let right = (frame.origin.x + frame.size.width)
+            .min(clip.origin.x + clip.size.width)
+            .min(dest.origin.x + dest.size.width);
+        let bottom = (frame.origin.y + frame.size.height)
+            .min(clip.origin.y + clip.size.height)
+            .min(dest.origin.y + dest.size.height);
+        if ![left, top, right, bottom, dest.size.width, dest.size.height]
             .iter()
             .all(|n| n.is_finite())
             || right <= left
@@ -227,14 +237,24 @@ impl Request {
             return Err("terminal image protocol exceeds 8 million pixels".into());
         }
         let dest = fitted_frame(&self.raster, self.frame, self.mode);
-        let left = self.frame.x.max(self.clip.x).max(dest.x);
-        let top = self.frame.y.max(self.clip.y).max(dest.y);
-        let right = (self.frame.x + self.frame.width)
-            .min(self.clip.x + self.clip.width)
-            .min(dest.x + dest.width);
-        let bottom = (self.frame.y + self.frame.height)
-            .min(self.clip.y + self.clip.height)
-            .min(dest.y + dest.height);
+        let left = self
+            .frame
+            .origin
+            .x
+            .max(self.clip.origin.x)
+            .max(dest.origin.x);
+        let top = self
+            .frame
+            .origin
+            .y
+            .max(self.clip.origin.y)
+            .max(dest.origin.y);
+        let right = (self.frame.origin.x + self.frame.size.width)
+            .min(self.clip.origin.x + self.clip.size.width)
+            .min(dest.origin.x + dest.size.width);
+        let bottom = (self.frame.origin.y + self.frame.size.height)
+            .min(self.clip.origin.y + self.clip.size.height)
+            .min(dest.origin.y + dest.size.height);
         let tint = self.tint.map(|color| {
             let (r, g, b, a) = color.to_f64();
             [r as f32, g as f32, b as f32, a as f32]
@@ -254,8 +274,8 @@ impl Request {
                 let mut source = [0.0; 4];
                 if px >= left && px < right && py >= top && py < bottom {
                     source = self.raster.sample(
-                        (px - dest.x) / dest.width * self.raster.width as f32,
-                        (py - dest.y) / dest.height * self.raster.height as f32,
+                        (px - dest.origin.x) / dest.size.width * self.raster.width as f32,
+                        (py - dest.origin.y) / dest.size.height * self.raster.height as f32,
                     );
                     if let Some([r, g, b, a]) = tint {
                         source = [
@@ -509,6 +529,7 @@ impl Images {
 
 #[cfg(test)]
 mod tests {
+    use nsh_core::geometry::{point, px};
     use ratatui::style::Color as CellColor;
 
     use super::*;
@@ -526,18 +547,14 @@ mod tests {
                 rgba: vec![255, 0, 0, 128],
             }),
             ImageProtocol::new(kind, 8, 16).unwrap(),
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 16.0,
-                height: 32.0,
-            },
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 16.0,
-                height: 32.0,
-            },
+            Bounds::new(
+                point(px(0.0), px(0.0)),
+                nsh_core::Size::new(px(16.0), px(32.0)),
+            ),
+            Bounds::new(
+                point(px(0.0), px(0.0)),
+                nsh_core::Size::new(px(16.0), px(32.0)),
+            ),
             ResizeMode::Stretch,
             None,
             0.5,
@@ -553,7 +570,7 @@ mod tests {
     #[test]
     fn protocol_pixels_compose_tint_opacity_clipping_and_embedding_origin() {
         let mut request = request(ProtocolType::Iterm2);
-        request.clip.height = 8.0;
+        request.clip.size.height = px(8.0);
         request.tint = Some(Color(0x0000_ffff));
         let image = request.pixels().unwrap().into_rgba8();
         assert_eq!(image.dimensions(), (16, 32));

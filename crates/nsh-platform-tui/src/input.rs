@@ -9,6 +9,7 @@ use crossterm::event::{
 use nsh_core::{
     EventKind, EventPayload, NodeId, PayloadValue, PointerEvents, ROOT_ID, SubmitBehavior,
     TouchEvent, TouchPhase, TouchPoint, ViewKind,
+    geometry::{point, px},
     keymap::{Key, KeyMatch, Keystroke, Modifiers},
     tailwind::state,
 };
@@ -416,8 +417,8 @@ impl Surface {
                 && [
                     EventKind::Press,
                     EventKind::LongPress,
-                    EventKind::PressIn,
-                    EventKind::PressOut,
+                    EventKind::PressDown,
+                    EventKind::PressUp,
                 ]
                 .into_iter()
                 .any(|e| n.events.contains(e))
@@ -475,9 +476,9 @@ impl Surface {
             if node.kind != ViewKind::Scroll || !node.scroll.enabled {
                 continue;
             }
-            let (x, y) = (node.scroll.x, node.scroll.y);
+            let (x, y) = (node.scroll.x.0, node.scroll.y.0);
             let mirrored = node.scroll.mirrored;
-            let viewport = (node.frame.width, node.frame.height);
+            let viewport = (node.frame.size.width.0, node.frame.size.height.0);
             let (Some(matrix), Some(target)) =
                 (self.local_to_surface(id), self.presentation_frame(id))
             else {
@@ -485,9 +486,9 @@ impl Surface {
             };
             let points = [
                 (0.0, 0.0),
-                (target.width, 0.0),
-                (0.0, target.height),
-                (target.width, target.height),
+                (target.size.width.0, 0.0),
+                (0.0, target.size.height.0),
+                (target.size.width.0, target.size.height.0),
             ];
             let mut bounds = (
                 f32::INFINITY,
@@ -519,7 +520,7 @@ impl Surface {
                 (bounds.1 + (bounds.3 - bounds.1).min(viewport.1) - viewport.1).max(0.0)
             };
             if dx != 0.0 || dy != 0.0 {
-                self.scroll_to(scroll, x + if mirrored { -dx } else { dx }, y + dy);
+                self.scroll_to(scroll, px(x + if mirrored { -dx } else { dx }), px(y + dy));
             }
         }
     }
@@ -868,9 +869,9 @@ impl Surface {
 
     fn activate(&mut self, id: NodeId) {
         self.set_pressed(Some(id));
-        self.emit_if(id, EventKind::PressIn, EventPayload::None);
+        self.emit_if(id, EventKind::PressDown, EventPayload::None);
         self.emit_if(id, EventKind::Press, EventPayload::None);
-        self.emit_if(id, EventKind::PressOut, EventPayload::None);
+        self.emit_if(id, EventKind::PressUp, EventPayload::None);
         self.set_pressed(None);
     }
 
@@ -955,9 +956,11 @@ impl Surface {
             let Some(matrix) = self.local_to_surface(id) else {
                 return false;
             };
-            let Some(center) =
-                crate::geometry::project(&matrix, node.frame.width * 0.5, node.frame.height * 0.5)
-            else {
+            let Some(center) = crate::geometry::project(
+                &matrix,
+                node.frame.size.width.0 * 0.5,
+                node.frame.size.height.0 * 0.5,
+            ) else {
                 return false;
             };
             if key.code == KeyCode::Char('0') {
@@ -975,15 +978,15 @@ impl Surface {
                 center.1,
             );
         }
-        let (x, y) = (node.scroll.x, node.scroll.y);
-        let (width, height) = (node.frame.width, node.frame.height);
+        let (x, y) = (node.scroll.x.0, node.scroll.y.0);
+        let (width, height) = (node.frame.size.width.0, node.frame.size.height.0);
         let (content_w, content_h) = (
-            node.scroll.content.width * node.scroll.physics.zoom,
-            node.scroll.content.height * node.scroll.physics.zoom,
+            node.scroll.content.width.0 * node.scroll.physics.zoom,
+            node.scroll.content.height.0 * node.scroll.physics.zoom,
         );
         let horizontal = node.scroll.horizontal;
-        let step_x = self.metrics.width() * 3.0 * if node.scroll.mirrored { -1.0 } else { 1.0 };
-        let step_y = self.metrics.height();
+        let step_x = self.metrics.width().0 * 3.0 * if node.scroll.mirrored { -1.0 } else { 1.0 };
+        let step_y = self.metrics.height().0;
         let (x, y) = match key.code {
             KeyCode::Up => (x, y - step_y),
             KeyCode::Down => (x, y + step_y),
@@ -1003,7 +1006,8 @@ impl Surface {
         true
     }
 
-    fn user_scroll(&mut self, id: NodeId, mut x: f32, mut y: f32) {
+    fn user_scroll(&mut self, id: NodeId, x: f32, y: f32) {
+        let (mut x, mut y) = (px(x), px(y));
         if let Some(node) = self.node(id) {
             if node.scroll.horizontal {
                 x = node
@@ -1012,8 +1016,8 @@ impl Surface {
                     .snap_target(
                         node.scroll.x,
                         x,
-                        (x - node.scroll.x).signum(),
-                        node.frame.width,
+                        (x - node.scroll.x).0.signum(),
+                        node.frame.size.width,
                         node.scroll.content.width * node.scroll.physics.zoom,
                     )
                     .unwrap_or(x);
@@ -1024,8 +1028,8 @@ impl Surface {
                     .snap_target(
                         node.scroll.y,
                         y,
-                        (y - node.scroll.y).signum(),
-                        node.frame.height,
+                        (y - node.scroll.y).0.signum(),
+                        node.frame.size.height,
                         node.scroll.content.height * node.scroll.physics.zoom,
                     )
                     .unwrap_or(y);
@@ -1033,10 +1037,7 @@ impl Surface {
         }
         self.scroll_to(id, x, y);
         if let Some(node) = self.node(id) {
-            let payload = EventPayload::Scroll {
-                x: node.scroll.x,
-                y: node.scroll.y,
-            };
+            let payload = EventPayload::Scroll(point(node.scroll.x, node.scroll.y));
             self.emit_if(id, EventKind::ScrollEnd, payload);
         }
     }
@@ -1068,8 +1069,8 @@ impl Surface {
             self.dialog_mouse(mouse);
             return steps;
         }
-        let x = (mouse.column as f32 + 0.5) * self.metrics.width();
-        let y = (mouse.row as f32 + 0.5) * self.metrics.height();
+        let x = (mouse.column as f32 + 0.5) * self.metrics.width().0;
+        let y = (mouse.row as f32 + 0.5) * self.metrics.height().0;
         let hit = self.hit_test(x, y);
         self.set_hover(hit);
         let native = self
@@ -1135,10 +1136,10 @@ impl Surface {
         let Some(node) = self.node(id) else {
             return 0;
         };
-        let (mut x, mut y) = (node.scroll.x, node.scroll.y);
+        let (mut x, mut y) = (node.scroll.x.0, node.scroll.y.0);
         let horizontal = node.scroll.horizontal || mouse.modifiers.contains(KeyModifiers::SHIFT);
-        let horizontal_step = self.metrics.width() * 3.0 * f32::from(steps);
-        let vertical_step = self.metrics.height() * 3.0 * f32::from(steps);
+        let horizontal_step = self.metrics.width().0 * 3.0 * f32::from(steps);
+        let vertical_step = self.metrics.height().0 * 3.0 * f32::from(steps);
         let physical_step = horizontal_step * if node.scroll.mirrored { -1.0 } else { 1.0 };
         match mouse.kind {
             MouseEventKind::ScrollLeft => x -= physical_step,
@@ -1154,16 +1155,13 @@ impl Surface {
     }
 
     fn mouse_event(&mut self, mouse: MouseEvent) -> bool {
-        let x = (mouse.column as f32 + 0.5) * self.metrics.width();
-        let y = (mouse.row as f32 + 0.5) * self.metrics.height();
+        let x = (mouse.column as f32 + 0.5) * self.metrics.width().0;
+        let y = (mouse.row as f32 + 0.5) * self.metrics.height().0;
         if self.dialog.is_some() {
             return self.dialog_mouse(mouse);
         }
         let hit = self.hit_test(x, y);
         self.set_hover(hit);
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.navigation_click(x, y) {
-            return true;
-        }
         if let Some((id, button)) = self
             .pointer
             .as_ref()
@@ -1343,7 +1341,7 @@ impl Surface {
                 });
                 self.set_pressed(pressable);
                 if let Some(id) = pressable {
-                    self.emit_if(id, EventKind::PressIn, EventPayload::None);
+                    self.emit_if(id, EventKind::PressDown, EventPayload::None);
                 }
                 self.raw_touch(TouchPhase::Start, x, y, None);
                 true
@@ -1367,7 +1365,7 @@ impl Surface {
                         if let Some(id) =
                             self.pointer.as_ref().and_then(|pointer| pointer.pressable)
                         {
-                            self.emit_if(id, EventKind::PressOut, EventPayload::None);
+                            self.emit_if(id, EventKind::PressUp, EventPayload::None);
                         }
                         self.set_pressed(None);
                         self.drag_input = None;
@@ -1408,7 +1406,7 @@ impl Surface {
                     self.pan_event(id, EventKind::PanEnd, &pointer, x, y);
                 }
                 if let Some(id) = pointer.pressable {
-                    self.emit_if(id, EventKind::PressOut, EventPayload::None);
+                    self.emit_if(id, EventKind::PressUp, EventPayload::None);
                     let released_inside = pointer.link.map_or_else(
                         || self.ancestors(hit.unwrap_or(ROOT_ID)).contains(&id),
                         |link| {
@@ -1455,56 +1453,6 @@ impl Surface {
         true
     }
 
-    fn navigation_click(&mut self, x: f32, y: f32) -> bool {
-        let ids = self.visible_ids();
-        if let Some(modal) = ids.iter().rev().copied().find(|id| {
-            self.node(*id).is_some_and(|node| {
-                node.kind == ViewKind::Modal
-                    && !node.modal.transparent
-                    && node.modal.presentation != nsh_core::ModalPresentation::FullScreen
-            })
-        }) && let (Some(point), Some(frame)) = (
-            self.surface_to_local(modal, x, y),
-            self.presentation_frame(modal),
-        ) && (point.0 < 0.0
-            || point.1 < 0.0
-            || point.0 >= frame.width
-            || point.1 >= frame.height)
-        {
-            self.cancel_pointer();
-            self.navigation_request_close(modal);
-            return true;
-        }
-        for id in ids.into_iter().rev() {
-            let Some(node) = self.node(id) else { continue };
-            if node.kind != ViewKind::Screen
-                || !node.screen.header_shown
-                || !node.screen.back_visible
-                || node.screen.left.is_some()
-                || !self.navigation_can_back(id)
-            {
-                continue;
-            }
-            let Some((x, y)) = self.surface_to_local(id, x, y) else {
-                continue;
-            };
-            let width = self.navigation_back_title(id).map_or(4, |title| {
-                unicode_width::UnicodeWidthStr::width(title.as_ref())
-            });
-            let end = (width + 3).min(19) as f32 * self.metrics.width();
-            if x >= self.metrics.width()
-                && x < end
-                && y >= 0.0
-                && y < self.navigation_header(id).bar_height
-            {
-                self.cancel_pointer();
-                self.back();
-                return true;
-            }
-        }
-        false
-    }
-
     fn place_caret(&mut self, id: NodeId, x: f32, y: f32, extend: bool) {
         if self.node(id).is_some_and(|n| n.kind == ViewKind::Text) {
             if let Some(offset) = self.text_offset_at(id, x, y)
@@ -1534,9 +1482,9 @@ impl Surface {
         };
         let (origin_row, origin_col) =
             crate::render::input_scroll(node, self.focus == Some(id), cols, rows);
-        let row = ((y / self.metrics.height()).floor() as i64 - geometry.row).max(0) as usize
+        let row = ((y / self.metrics.height().0).floor() as i64 - geometry.row).max(0) as usize
             + origin_row;
-        let col = ((x / self.metrics.width()).floor() as i64 - geometry.column).max(0) as usize
+        let col = ((x / self.metrics.width().0).floor() as i64 - geometry.column).max(0) as usize
             + origin_col;
         let offsets = crate::render::input_line_offsets(node, self.focus == Some(id), cols);
         let col = col.saturating_sub(offsets.get(row).copied().unwrap_or(0));
@@ -1551,15 +1499,15 @@ impl Surface {
         let node = self.node(id)?;
         if self.composite_ancestor(id) {
             let mut frame = self.presentation_frame(id)?;
-            frame.x = 0.0;
-            frame.y = 0.0;
+            frame.origin.x.0 = 0.0;
+            frame.origin.y.0 = 0.0;
             let area = ratatui::layout::Rect::new(
                 0,
                 0,
-                (frame.width / self.metrics.width())
+                (frame.size.width.0 / self.metrics.width().0)
                     .ceil()
                     .clamp(1.0, u16::MAX as f32) as u16,
-                (frame.height / self.metrics.height())
+                (frame.size.height.0 / self.metrics.height().0)
                     .ceil()
                     .clamp(1.0, u16::MAX as f32) as u16,
             );
@@ -1581,10 +1529,10 @@ impl Surface {
 
     fn text_link_at(&self, id: NodeId, x: f32, y: f32) -> Option<NodeId> {
         let (run, x, y) = self.text_run_at(id, x, y)?;
-        if x < run.x
-            || x >= run.x + run.width as f32 * self.metrics.width()
-            || y < run.y
-            || y >= run.y + self.metrics.height()
+        if x < run.x.0
+            || x >= run.x.0 + run.width as f32 * self.metrics.width().0
+            || y < run.y.0
+            || y >= run.y.0 + self.metrics.height().0
         {
             return None;
         }
@@ -1595,7 +1543,7 @@ impl Surface {
     fn text_offset_at(&self, id: NodeId, x: f32, y: f32) -> Option<u32> {
         let (run, x, _) = self.text_run_at(id, x, y)?;
         let (text, _, _) = self.node(id)?.text.as_ref()?;
-        let right = x >= run.x + run.width as f32 * self.metrics.width() * 0.5;
+        let right = x >= run.x.0 + run.width as f32 * self.metrics.width().0 * 0.5;
         let rtl = text.writing_direction.unwrap_or(text.rtl);
         Some(if right != rtl { run.end } else { run.start })
     }
@@ -1612,29 +1560,32 @@ impl Surface {
         let (frame, x, y) = if self.composite_ancestor(id) {
             let (x, y) = self.surface_to_local(id, x, y)?;
             let mut frame = self.presentation_frame(id)?;
-            frame.x = 0.0;
-            frame.y = 0.0;
+            frame.origin.x.0 = 0.0;
+            frame.origin.y.0 = 0.0;
             (frame, x, y)
         } else {
             (self.global_frame(id)?, x, y)
         };
-        let sx = if node.frame.width > 0.0 {
-            frame.width / node.frame.width
+        let sx = if node.frame.size.width.0 > 0.0 {
+            frame.size.width.0 / node.frame.size.width.0
         } else {
             1.0
         };
-        let sy = if node.frame.height > 0.0 {
-            frame.height / node.frame.height
+        let sy = if node.frame.size.height.0 > 0.0 {
+            frame.size.height.0 / node.frame.size.height.0
         } else {
             1.0
         };
-        let origin = (frame.x + content.x * sx, frame.y + content.y * sy);
-        let column = (x / self.metrics.width()).floor();
-        let row = (y / self.metrics.height()).floor();
+        let origin = (
+            frame.origin.x.0 + content.origin.x.0 * sx,
+            frame.origin.y.0 + content.origin.y.0 * sy,
+        );
+        let column = (x / self.metrics.width().0).floor();
+        let row = (y / self.metrics.height().0).floor();
         let run_position = |run: &crate::text::TerminalRun| {
             (
-                ((origin.0 + run.x) / self.metrics.width()).floor(),
-                ((origin.1 + run.y) / self.metrics.height()).floor(),
+                ((origin.0 + run.x.0) / self.metrics.width().0).floor(),
+                ((origin.1 + run.y.0) / self.metrics.height().0).floor(),
             )
         };
         let run = layout.runs.iter().min_by(|a, b| {
@@ -1653,8 +1604,8 @@ impl Surface {
         let (left, top) = run_position(run);
         Some((
             run,
-            run.x + (column - left + 0.5) * self.metrics.width(),
-            run.y + (row - top + 0.5) * self.metrics.height(),
+            run.x.0 + (column - left + 0.5) * self.metrics.width().0,
+            run.y.0 + (row - top + 0.5) * self.metrics.height().0,
         ))
     }
 
@@ -1793,10 +1744,8 @@ impl Surface {
             id: 0,
             target: pointer.target,
             path,
-            page_x: x,
-            page_y: y,
-            location_x: location.0,
-            location_y: location.1,
+            page: point(px(x), px(y)),
+            location: point(px(location.0), px(location.1)),
             changed: true,
         };
         let event = TouchEvent {
@@ -1817,7 +1766,7 @@ impl Surface {
             return;
         };
         let (dx, dy) = (x - pointer.origin.0, y - pointer.origin.1);
-        if dx.hypot(dy) > self.metrics.width().min(self.metrics.height()) {
+        if dx.hypot(dy) > self.metrics.width().0.min(self.metrics.height().0) {
             pointer.moved = true;
             self.set_pressed(None);
         }
@@ -1830,13 +1779,13 @@ impl Surface {
             let decision = self.node(id).map_or(Some(false), |n| {
                 n.props.pan_activation.map_or_else(
                     || {
-                        if dx.hypot(dy) > nsh_core::PanActivation::MIN_DISTANCE {
+                        if dx.hypot(dy) > nsh_core::PanActivation::MIN_DISTANCE.0 {
                             Some(true)
                         } else {
                             None
                         }
                     },
-                    |gate| gate.decide(dx, dy),
+                    |gate| gate.decide(px(dx), px(dy)),
                 )
             });
             match decision {
@@ -1880,12 +1829,11 @@ impl Surface {
             id,
             kind,
             EventPayload::Pan {
-                translation_x: dx,
-                translation_y: dy,
+                translation: point(px(dx), px(dy)),
                 velocity_x: dx / elapsed,
                 velocity_y: dy / elapsed,
-                value_x: gestures.pan_x.map(|_| pointer.pan_base.0 + dx),
-                value_y: gestures.pan_y.map(|_| pointer.pan_base.1 + dy),
+                value_x: gestures.pan_x.map(|_| px(pointer.pan_base.0 + dx)),
+                value_y: gestures.pan_y.map(|_| px(pointer.pan_base.1 + dy)),
             },
         );
     }
@@ -1915,7 +1863,7 @@ impl Surface {
                 self.end_scroll_drag(id, true);
             }
             if let Some(id) = pointer.pressable {
-                self.emit_if(id, EventKind::PressOut, EventPayload::None);
+                self.emit_if(id, EventKind::PressUp, EventPayload::None);
             }
             if let Some(id) = pointer.pan {
                 self.pan_event(
@@ -2011,6 +1959,8 @@ fn keystroke(event: KeyEvent) -> Option<Keystroke> {
 
 #[cfg(test)]
 mod tests {
+    use nsh_core::{Bounds, Point, Size};
+
     use super::*;
 
     #[test]
@@ -2035,17 +1985,15 @@ mod tests {
     }
 
     fn create(id: NodeId, kind: ViewKind, parent: NodeId, y: f32) -> Vec<nsh_core::MountItem> {
-        use nsh_core::{MountItem, Rect};
+        use nsh_core::MountItem;
         vec![
             MountItem::Create { id, kind },
             MountItem::Frame {
                 id,
-                frame: Rect {
-                    x: 0.0,
-                    y,
-                    width: 160.0,
-                    height: 32.0,
-                },
+                frame: Bounds::new(
+                    Point::new(px(0.0), (y).into()),
+                    Size::new(px(160.0), px(32.0)),
+                ),
             },
             MountItem::Insert {
                 parent,
@@ -2061,17 +2009,12 @@ mod tests {
         let mut items = create(2, ViewKind::Input, ROOT_ID, 0.0);
         items.push(MountItem::InputContent {
             id: 2,
-            content: nsh_core::Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 160.0,
-                height: 32.0,
-            },
+            content: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(160.0), px(32.0))),
         });
         items.extend(create(4, ViewKind::View, ROOT_ID, 48.0));
         items.push(MountItem::Events {
             id: 4,
-            events: mask(&[EventKind::Press, EventKind::PressIn, EventKind::PressOut]),
+            events: mask(&[EventKind::Press, EventKind::PressDown, EventKind::PressUp]),
         });
         surface.apply(MountBatch { items });
         surface.events.clear();
@@ -2279,7 +2222,7 @@ mod tests {
         let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
         items.push(MountItem::ScrollContent {
             id: 2,
-            size: Size::new(160.0, 1000.0),
+            size: Size::new(px(160.0), px(1000.0)),
         });
         surface.apply(MountBatch { items });
         surface.node_mut(2).unwrap().scroll.count = 3;
@@ -2290,18 +2233,18 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         }));
-        assert_eq!(surface.node(2).unwrap().scroll.y, 48.0);
+        assert_eq!(surface.node(2).unwrap().scroll.y.0, 48.0);
         assert!(
             surface
                 .events
                 .iter()
-                .any(|event| matches!(event, SurfaceEvent::Scroll(2, 0.0, 48.0, 3)))
+                .any(|event| matches!(event, SurfaceEvent::Scroll(2, offset, 3) if *offset == point(px(0.0),px(48.0))))
         );
         let scroll = &mut surface.node_mut(2).unwrap().scroll;
-        scroll.content.width = 1000.0;
+        scroll.content.width.0 = 1000.0;
         scroll.horizontal = true;
         scroll.mirrored = true;
-        scroll.x = 100.0;
+        scroll.x.0 = 100.0;
         let wheel = |kind| {
             Event::Mouse(MouseEvent {
                 kind,
@@ -2311,15 +2254,15 @@ mod tests {
             })
         };
         surface.handle_event(wheel(MouseEventKind::ScrollRight));
-        assert_eq!(surface.node(2).unwrap().scroll.x, 76.0);
+        assert_eq!(surface.node(2).unwrap().scroll.x.0, 76.0);
         surface.handle_event(wheel(MouseEventKind::ScrollDown));
-        assert_eq!(surface.node(2).unwrap().scroll.x, 100.0);
+        assert_eq!(surface.node(2).unwrap().scroll.x.0, 100.0);
         key(&mut surface, KeyCode::Left, KeyModifiers::NONE);
-        assert_eq!(surface.node(2).unwrap().scroll.x, 124.0);
+        assert_eq!(surface.node(2).unwrap().scroll.x.0, 124.0);
         key(&mut surface, KeyCode::Home, KeyModifiers::NONE);
-        assert_eq!(surface.node(2).unwrap().scroll.x, 0.0);
+        assert_eq!(surface.node(2).unwrap().scroll.x.0, 0.0);
         key(&mut surface, KeyCode::End, KeyModifiers::NONE);
-        assert_eq!(surface.node(2).unwrap().scroll.x, 840.0);
+        assert_eq!(surface.node(2).unwrap().scroll.x.0, 840.0);
     }
 
     #[test]
@@ -2331,7 +2274,7 @@ mod tests {
         for id in [2, 4] {
             items.push(MountItem::ScrollContent {
                 id,
-                size: Size::new(160.0, 1000.0),
+                size: Size::new(px(160.0), px(1000.0)),
             });
         }
         surface.apply(MountBatch { items });
@@ -2356,24 +2299,26 @@ mod tests {
         assert_eq!(surface.hovered, None);
         assert_eq!(surface.events.len(), 0);
         assert_eq!(surface.handle_wheel(mouse, 3), 3);
-        assert_eq!(surface.node(2).unwrap().scroll.y, 144.0);
-        assert_eq!(surface.node(4).unwrap().scroll.y, 0.0);
+        assert_eq!(surface.node(2).unwrap().scroll.y.0, 144.0);
+        assert_eq!(surface.node(4).unwrap().scroll.y.0, 0.0);
         let offsets: Vec<_> = surface
             .events
             .iter()
             .filter_map(|event| match event {
-                SurfaceEvent::Scroll(id, x, y, count) => Some((*id, *x, *y, *count)),
+                SurfaceEvent::Scroll(id, offset, count) => {
+                    Some((*id, offset.x.0, offset.y.0, *count))
+                }
                 _ => None,
             })
             .collect();
         assert_eq!(offsets, [(2, 0.0, 144.0, 0)]);
 
-        surface.node_mut(2).unwrap().scroll.y = 0.0;
+        surface.node_mut(2).unwrap().scroll.y.0 = 0.0;
         surface.events.clear();
         assert_eq!(surface.handle_wheel(mouse, 1), 1);
         assert!(surface.handle_event(Event::Mouse(mouse)));
-        assert_eq!(surface.node(2).unwrap().scroll.y, 48.0);
-        assert_eq!(surface.node(4).unwrap().scroll.y, 48.0);
+        assert_eq!(surface.node(2).unwrap().scroll.y.0, 48.0);
+        assert_eq!(surface.node(4).unwrap().scroll.y.0, 48.0);
     }
 
     #[test]
@@ -2383,7 +2328,7 @@ mod tests {
         let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
         items.push(MountItem::ScrollContent {
             id: 2,
-            size: Size::new(1000.0, 1000.0),
+            size: Size::new(px(1000.0), px(1000.0)),
         });
         surface.apply(MountBatch { items });
         let mouse = MouseEvent {
@@ -2393,11 +2338,11 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         let scroll = &mut surface.node_mut(2).unwrap().scroll;
-        scroll.x = 100.0;
+        scroll.x.0 = 100.0;
         scroll.horizontal = true;
         scroll.mirrored = true;
         assert_eq!(surface.handle_wheel(mouse, 3), 3);
-        assert_eq!(surface.node(2).unwrap().scroll.x, 28.0);
+        assert_eq!(surface.node(2).unwrap().scroll.x.0, 28.0);
         assert_eq!(
             surface.handle_wheel(
                 MouseEvent {
@@ -2409,7 +2354,7 @@ mod tests {
             ),
             2
         );
-        assert_eq!(surface.node(2).unwrap().scroll.x, 76.0);
+        assert_eq!(surface.node(2).unwrap().scroll.x.0, 76.0);
         let behavior = &mut surface.node_mut(2).unwrap().scroll.behavior;
         behavior.min_zoom = 0.5;
         behavior.max_zoom = 2.0;
@@ -2457,7 +2402,7 @@ mod tests {
         items.extend(create(4, ViewKind::View, 2, 0.0));
         items.push(MountItem::ScrollContent {
             id: 2,
-            size: Size::new(160.0, 1000.0),
+            size: Size::new(px(160.0), px(1000.0)),
         });
         surface.apply(MountBatch { items });
         surface.node_mut(4).unwrap().native = Some(Box::new(Wheel));
@@ -2474,7 +2419,7 @@ mod tests {
             ),
             1
         );
-        assert_eq!(surface.node(2).unwrap().scroll.y, 0.0);
+        assert_eq!(surface.node(2).unwrap().scroll.y.0, 0.0);
         let native: Vec<_> = surface
             .events
             .iter()
@@ -2507,8 +2452,7 @@ mod tests {
         use std::sync::Arc;
 
         use nsh_core::{
-            AttributedText, MountBatch, MountItem, Rect, ResolvedTextStyle, Size, TextEngine,
-            TextLink,
+            AttributedText, MountBatch, MountItem, ResolvedTextStyle, Size, TextEngine, TextLink,
         };
         let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
         let mut text = AttributedText {
@@ -2524,18 +2468,13 @@ mod tests {
         });
         let engine = crate::TerminalTextEngine::default();
         let prepared = engine.prepare(&text);
-        let layout = engine.layout(&prepared, Size::new(160.0, 32.0));
+        let layout = engine.layout(&prepared, Size::new(px(160.0), px(32.0)));
         let mut items = create(2, ViewKind::Text, ROOT_ID, 0.0);
         items.push(MountItem::Text {
             id: 2,
             text: Arc::new(text),
             layout,
-            content: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 160.0,
-                height: 32.0,
-            },
+            content: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(160.0), px(32.0))),
         });
         surface.apply(MountBatch { items });
         let mouse = |kind, column| {
@@ -2601,7 +2540,7 @@ mod tests {
         );
         surface.apply(MountBatch {
             items: vec![
-                MountItem::Animation(nsh_animation::AnimationOp::CreateValue {
+                MountItem::Animation(nsh_core::animation::AnimationOp::CreateValue {
                     node: 11,
                     value: 5.0,
                 }),
@@ -2697,9 +2636,9 @@ mod tests {
     fn transformed_inputs_report_local_caret_touch_and_pan_coordinates() {
         let mut surface = form();
         let origin = nsh_core::TransformOrigin {
-            x: nsh_core::OriginLen::Px(0.0),
-            y: nsh_core::OriginLen::Px(0.0),
-            z: 0.0,
+            x: px(0.0).into(),
+            y: px(0.0).into(),
+            z: px(0.0),
         };
         let node = surface.node_mut(2).unwrap();
         node.style.transform_origin = origin;
@@ -2715,7 +2654,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         assert_eq!(surface.node(2).unwrap().editor.selection(), (2, 2));
-        assert!(surface.events.iter().any(|event|matches!(event,SurfaceEvent::Event(ROOT_ID,EventKind::Touch,EventPayload::Touch(touch)) if touch.phase==TouchPhase::Start && (touch.points[0].location_x-18.0).abs()<0.001 && (touch.points[0].location_y-4.0).abs()<0.001)));
+        assert!(surface.events.iter().any(|event|matches!(event,SurfaceEvent::Event(ROOT_ID,EventKind::Touch,EventPayload::Touch(touch)) if touch.phase==TouchPhase::Start && (touch.points[0].location.x.0-18.0).abs()<0.001 && (touch.points[0].location.y.0-4.0).abs()<0.001)));
         surface.cancel_pointer();
         let node = surface.node_mut(4).unwrap();
         node.style.transform_origin = origin;
@@ -2725,7 +2664,7 @@ mod tests {
         node.events = mask(&[EventKind::PanStart, EventKind::PanEnd]);
         node.gestures.pan_x = Some(11);
         surface.animation.apply(
-            nsh_animation::AnimationOp::CreateValue {
+            nsh_core::animation::AnimationOp::CreateValue {
                 node: 11,
                 value: 5.0,
             },
@@ -2745,7 +2684,7 @@ mod tests {
     }
 
     #[test]
-    fn native_header_back_click_honors_prevent_back_before_javascript() {
+    fn keyboard_back_honors_prevent_back_before_javascript() {
         use nsh_core::{MountBatch, MountItem};
         let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
         let mut items = create(2, ViewKind::Stack, ROOT_ID, 0.0);
@@ -2761,12 +2700,7 @@ mod tests {
         surface.apply(MountBatch { items });
         surface.tick(1.0);
         surface.events.clear();
-        surface.handle_event(Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 1,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }));
+        key(&mut surface, KeyCode::Esc, KeyModifiers::NONE);
         assert!(
             surface
                 .events

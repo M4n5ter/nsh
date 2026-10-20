@@ -2,7 +2,7 @@
 //! dragging. Offsets stay in virtual points; terminal cells only determine
 //! pointer hit areas and the minimum useful movement.
 
-use nsh_core::{EventKind, EventPayload, KeyboardDismissMode, NodeId, ViewKind};
+use nsh_core::{EventKind, EventPayload, KeyboardDismissMode, NodeId, Point, Points, ViewKind};
 
 use crate::surface::{Node, Surface, SurfaceEvent};
 
@@ -102,16 +102,16 @@ impl Physics {
 
 fn target(node: &Node) -> Target {
     Target {
-        x: node.scroll.x,
-        y: node.scroll.y,
+        x: node.scroll.x.0,
+        y: node.scroll.y.0,
         zoom: node.scroll.physics.zoom,
     }
 }
 
 fn limits(node: &Node, zoom: f32, refreshing: bool) -> ((f32, f32), (f32, f32)) {
     let inset = node.scroll.behavior.content_inset;
-    let min_x = -inset.left;
-    let min_y = -inset.top
+    let min_x = -inset.left.0;
+    let min_y = -inset.top.0
         - if refreshing && !node.scroll.horizontal {
             REFRESH_SPACE
         } else {
@@ -120,11 +120,13 @@ fn limits(node: &Node, zoom: f32, refreshing: bool) -> ((f32, f32), (f32, f32)) 
     (
         (
             min_x,
-            (node.scroll.content.width * zoom - node.frame.width + inset.right).max(min_x),
+            (node.scroll.content.width.0 * zoom - node.frame.size.width.0 + inset.right.0)
+                .max(min_x),
         ),
         (
             min_y,
-            (node.scroll.content.height * zoom - node.frame.height + inset.bottom).max(min_y),
+            (node.scroll.content.height.0 * zoom - node.frame.size.height.0 + inset.bottom.0)
+                .max(min_y),
         ),
     )
 }
@@ -173,10 +175,7 @@ impl Surface {
             self.emit(
                 id,
                 kind,
-                EventPayload::Scroll {
-                    x: value.x,
-                    y: value.y,
-                },
+                EventPayload::Scroll(Point::new(Points(value.x), Points(value.y))),
             );
         }
     }
@@ -198,8 +197,8 @@ impl Surface {
             value
         };
         let zoom_changed = (node.scroll.physics.zoom - value.zoom).abs() > f32::EPSILON;
-        node.scroll.x = value.x;
-        node.scroll.y = value.y;
+        node.scroll.x = Points(value.x);
+        node.scroll.y = Points(value.y);
         node.scroll.physics.zoom = value.zoom;
         let reported = clamp(node, value, false);
         let (count, binding, horizontal) = (
@@ -221,8 +220,11 @@ impl Surface {
                 self.events.push(SurfaceEvent::AnimationsFinished(finished));
             }
         }
-        self.events
-            .push(SurfaceEvent::Scroll(id, reported.x, reported.y, count));
+        self.events.push(SurfaceEvent::Scroll(
+            id,
+            Point::new(Points(reported.x), Points(reported.y)),
+            count,
+        ));
     }
 
     fn interrupt_scroll(&mut self, id: NodeId) {
@@ -235,7 +237,8 @@ impl Surface {
     }
 
     /// Immediate local scrolling does not acknowledge a core command.
-    pub(crate) fn scroll_jump(&mut self, id: NodeId, x: f32, y: f32) {
+    pub(crate) fn scroll_jump(&mut self, id: NodeId, x: Points, y: Points) {
+        let (x, y) = (x.0, y.0);
         self.interrupt_scroll(id);
         let Some(node) = self.node(id) else { return };
         self.write_scroll(
@@ -251,7 +254,8 @@ impl Surface {
 
     /// Core corrections move the current gesture and its destination with
     /// the content, rather than ending a list's animated follow operation.
-    pub(crate) fn adjust_scroll(&mut self, id: NodeId, dx: f32, dy: f32) {
+    pub(crate) fn adjust_scroll(&mut self, id: NodeId, dx: Points, dy: Points) {
+        let (dx, dy) = (dx.0, dy.0);
         let Some(node) = self.node_mut(id) else {
             return;
         };
@@ -264,14 +268,15 @@ impl Surface {
             drag.from.1 += dy;
         }
         let value = Target {
-            x: node.scroll.x + dx,
-            y: node.scroll.y + dy,
+            x: node.scroll.x.0 + dx,
+            y: node.scroll.y.0 + dy,
             zoom: node.scroll.physics.zoom,
         };
         self.write_scroll(id, value, false);
     }
 
-    pub(crate) fn scroll_command(&mut self, id: NodeId, x: f32, y: f32, animated: bool) {
+    pub(crate) fn scroll_command(&mut self, id: NodeId, x: Points, y: Points, animated: bool) {
+        let (x, y) = (x.0, y.0);
         if !x.is_finite() || !y.is_finite() {
             return;
         }
@@ -342,7 +347,7 @@ impl Surface {
             return;
         }
         let mut value = target(node);
-        let lead = -node.scroll.behavior.content_inset.top;
+        let lead = -node.scroll.behavior.content_inset.top.0;
         if refreshing && value.y <= lead + 0.5 {
             value.y = lead - REFRESH_SPACE;
         } else if !refreshing && value.y < lead {
@@ -376,8 +381,10 @@ impl Surface {
         {
             let scale = to.zoom.clamp(min, max);
             if (scale - to.zoom).abs() > f32::EPSILON {
-                to.x = (to.x + node.frame.width * 0.5) / to.zoom * scale - node.frame.width * 0.5;
-                to.y = (to.y + node.frame.height * 0.5) / to.zoom * scale - node.frame.height * 0.5;
+                to.x = (to.x + node.frame.size.width.0 * 0.5) / to.zoom * scale
+                    - node.frame.size.width.0 * 0.5;
+                to.y = (to.y + node.frame.size.height.0 * 0.5) / to.zoom * scale
+                    - node.frame.size.height.0 * 0.5;
                 to.zoom = scale;
                 let to = clamp(node, to, node.scroll.physics.refreshing);
                 let from = target(node);
@@ -415,8 +422,8 @@ impl Surface {
         if node.scroll.behavior.center_content {
             (
                 zoom,
-                ((node.frame.width - node.scroll.content.width * zoom) * 0.5).max(0.0),
-                ((node.frame.height - node.scroll.content.height * zoom) * 0.5).max(0.0),
+                ((node.frame.size.width.0 - node.scroll.content.width.0 * zoom) * 0.5).max(0.0),
+                ((node.frame.size.height.0 - node.scroll.content.height.0 * zoom) * 0.5).max(0.0),
             )
         } else {
             (zoom, 0.0, 0.0)
@@ -427,7 +434,7 @@ impl Surface {
         &mut self,
         id: NodeId,
         scale: f32,
-        center: Option<(f32, f32)>,
+        center: Option<Point<Points>>,
         animated: bool,
     ) {
         let Some(node) = self.node(id) else { return };
@@ -438,15 +445,15 @@ impl Surface {
         let max = node.scroll.behavior.max_zoom.max(min);
         let scale = scale.clamp(min, max);
         let (_, cx, cy) = self.scroll_content_transform(id);
-        let center = center.unwrap_or((
-            (node.scroll.x + node.frame.width * 0.5 - cx) / node.scroll.physics.zoom,
-            (node.scroll.y + node.frame.height * 0.5 - cy) / node.scroll.physics.zoom,
+        let center = center.map(|point| (point.x.0, point.y.0)).unwrap_or((
+            (node.scroll.x.0 + node.frame.size.width.0 * 0.5 - cx) / node.scroll.physics.zoom,
+            (node.scroll.y.0 + node.frame.size.height.0 * 0.5 - cy) / node.scroll.physics.zoom,
         ));
         let value = clamp(
             node,
             Target {
-                x: center.0 * scale - node.frame.width * 0.5,
-                y: center.1 * scale - node.frame.height * 0.5,
+                x: center.0 * scale - node.frame.size.width.0 * 0.5,
+                y: center.1 * scale - node.frame.size.height.0 * 0.5,
                 zoom: scale,
             },
             node.scroll.physics.refreshing,
@@ -476,22 +483,22 @@ impl Surface {
         let scale = (old * factor).clamp(min, max);
         let (_, cx, cy) = self.scroll_content_transform(id);
         let px = if node.scroll.mirrored {
-            node.frame.width - x
+            node.frame.size.width.0 - x
         } else {
             x
         };
         let py = y;
         let content = (
-            (node.scroll.x + px - cx) / old,
-            (node.scroll.y + py - cy) / old,
+            (node.scroll.x.0 + px - cx) / old,
+            (node.scroll.y.0 + py - cy) / old,
         );
         let new_cx = if node.scroll.behavior.center_content {
-            ((node.frame.width - node.scroll.content.width * scale) * 0.5).max(0.0)
+            ((node.frame.size.width.0 - node.scroll.content.width.0 * scale) * 0.5).max(0.0)
         } else {
             0.0
         };
         let new_cy = if node.scroll.behavior.center_content {
-            ((node.frame.height - node.scroll.content.height * scale) * 0.5).max(0.0)
+            ((node.frame.size.height.0 - node.scroll.content.height.0 * scale) * 0.5).max(0.0)
         } else {
             0.0
         };
@@ -527,39 +534,45 @@ impl Surface {
         let (cell_width, cell_height) = self.scroll_local_cell(id);
         let horizontal = node.scroll.horizontal;
         let content = if horizontal {
-            node.scroll.content.width
+            node.scroll.content.width.0
         } else {
-            node.scroll.content.height
+            node.scroll.content.height.0
         } * node.scroll.physics.zoom;
         let viewport = if horizontal {
-            frame.width
+            frame.size.width.0
         } else {
-            frame.height
+            frame.size.height.0
         };
         if content <= viewport {
             return false;
         }
         if horizontal {
-            x >= 0.0 && x < frame.width && y >= frame.height - cell_height && y < frame.height
+            x >= 0.0
+                && x < frame.size.width.0
+                && y >= frame.size.height.0 - cell_height
+                && y < frame.size.height.0
         } else {
-            y >= 0.0 && y < frame.height && x >= frame.width - cell_width && x < frame.width
+            y >= 0.0
+                && y < frame.size.height.0
+                && x >= frame.size.width.0 - cell_width
+                && x < frame.size.width.0
         }
     }
 
     fn scroll_local_cell(&self, id: NodeId) -> (f32, f32) {
         let Some(matrix) = self.local_to_surface(id) else {
-            return (self.metrics.width(), self.metrics.height());
+            return (self.metrics.width().0, self.metrics.height().0);
         };
         let (Some(a), Some(b), Some(c)) = (
             crate::geometry::project(&matrix, 0.0, 0.0),
             crate::geometry::project(&matrix, 1.0, 0.0),
             crate::geometry::project(&matrix, 0.0, 1.0),
         ) else {
-            return (self.metrics.width(), self.metrics.height());
+            return (self.metrics.width().0, self.metrics.height().0);
         };
         (
-            self.metrics.width() / (b.0 - a.0).hypot(b.1 - a.1).max(0.001),
-            self.metrics.height() / (c.0 - a.0).hypot(c.1 - a.1).max(0.001),
+            self.metrics.width().0 / (b.0 - a.0).hypot(b.1 - a.1).max(0.001),
+            self.metrics.height().0 / (c.0 - a.0).hypot(c.1 - a.1).max(0.001),
         )
     }
 
@@ -585,8 +598,8 @@ impl Surface {
                     page.x,
                     min_x,
                     max_x,
-                    node.frame.width,
-                    frame.width,
+                    node.frame.size.width.0,
+                    frame.size.width.0,
                     x,
                     cell_width,
                 )
@@ -595,8 +608,8 @@ impl Surface {
                     page.y,
                     min_y,
                     max_y,
-                    node.frame.height,
-                    frame.height,
+                    node.frame.size.height.0,
+                    frame.size.height.0,
                     y,
                     cell_height,
                 )
@@ -636,7 +649,7 @@ impl Surface {
         };
         node.scroll.physics.drag = Some(Drag {
             origin: (x, y),
-            from: (node.scroll.x, node.scroll.y),
+            from: (node.scroll.x.0, node.scroll.y.0),
             last: (x, y),
             sample: now,
             velocity: (0.0, 0.0),
@@ -672,15 +685,15 @@ impl Surface {
         if drag.thumb {
             let (length, viewport, range, delta) = if horizontal {
                 (
-                    node.scroll.content.width * node.scroll.physics.zoom,
-                    frame.width,
+                    node.scroll.content.width.0 * node.scroll.physics.zoom,
+                    frame.size.width.0,
                     max_x - min_x,
                     if mirrored { -dx } else { dx },
                 )
             } else {
                 (
-                    node.scroll.content.height * node.scroll.physics.zoom,
-                    frame.height,
+                    node.scroll.content.height.0 * node.scroll.physics.zoom,
+                    frame.size.height.0,
                     max_y - min_y,
                     dy,
                 )
@@ -700,7 +713,7 @@ impl Surface {
                     drag.from.0 + if mirrored { dx } else { -dx },
                     min_x,
                     max_x,
-                    frame.width,
+                    frame.size.width.0,
                     node.scroll.behavior.bounces,
                 );
             }
@@ -709,7 +722,7 @@ impl Surface {
                     drag.from.1 - dy,
                     min_y,
                     max_y,
-                    frame.height,
+                    frame.size.height.0,
                     node.scroll.behavior.bounces,
                 );
             }
@@ -777,19 +790,19 @@ impl Surface {
             current.y - velocity.1 / r.ln()
         };
         let snap = node.scroll.behavior.snap_target(
-            if horizontal { current.x } else { current.y },
-            projected,
+            Points(if horizontal { current.x } else { current.y }),
+            Points(projected),
             if horizontal { velocity.0 } else { velocity.1 },
             if horizontal {
-                node.frame.width
+                node.frame.size.width
             } else {
-                node.frame.height
+                node.frame.size.height
             },
-            if horizontal {
+            (if horizontal {
                 node.scroll.content.width
             } else {
                 node.scroll.content.height
-            } * current.zoom,
+            }) * current.zoom,
         );
         self.scroll_emit(id, EventKind::ScrollEndDrag);
         if refresh {
@@ -800,7 +813,7 @@ impl Surface {
                 Target {
                     y: -self
                         .node(id)
-                        .map_or(0.0, |n| n.scroll.behavior.content_inset.top)
+                        .map_or(0.0, |n| n.scroll.behavior.content_inset.top.0)
                         - REFRESH_SPACE,
                     ..bounded
                 }
@@ -810,9 +823,15 @@ impl Surface {
             self.animate_scroll(id, to, !cancelled, DURATION);
         } else if let Some(snap) = snap {
             let to = if horizontal {
-                Target { x: snap, ..bounded }
+                Target {
+                    x: snap.0,
+                    ..bounded
+                }
             } else {
-                Target { y: snap, ..bounded }
+                Target {
+                    y: snap.0,
+                    ..bounded
+                }
             };
             self.animate_scroll(id, to, !cancelled, DURATION);
         } else if velocity.0.abs().max(velocity.1.abs()) >= MIN_GLIDE {
@@ -903,8 +922,20 @@ impl Surface {
                     if outside {
                         let value = if node.scroll.behavior.bounces {
                             Target {
-                                x: rubber(value.x, bounded.x, bounded.x, node.frame.width, true),
-                                y: rubber(value.y, bounded.y, bounded.y, node.frame.height, true),
+                                x: rubber(
+                                    value.x,
+                                    bounded.x,
+                                    bounded.x,
+                                    node.frame.size.width.0,
+                                    true,
+                                ),
+                                y: rubber(
+                                    value.y,
+                                    bounded.y,
+                                    bounded.y,
+                                    node.frame.size.height.0,
+                                    true,
+                                ),
                                 ..value
                             }
                         } else {
@@ -972,7 +1003,7 @@ mod tests {
     use super::*;
 
     fn scroll() -> Surface {
-        use nsh_core::{MountBatch, MountItem, Rect, Size};
+        use nsh_core::{Bounds, MountBatch, MountItem, Size};
         let mut surface = Surface::new(40, 20, crate::CellMetrics::default());
         surface.apply(MountBatch {
             items: vec![
@@ -982,16 +1013,11 @@ mod tests {
                 },
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 160.0,
-                        height: 160.0,
-                    },
+                    frame: Bounds::new(Point::default(), Size::new(Points(160.0), Points(160.0))),
                 },
                 MountItem::ScrollContent {
                     id: 2,
-                    size: Size::new(320.0, 1600.0),
+                    size: Size::new(Points(320.0), Points(1600.0)),
                 },
                 MountItem::Insert {
                     parent: nsh_core::ROOT_ID,
@@ -1007,16 +1033,16 @@ mod tests {
     #[test]
     fn animated_command_acknowledges_once_and_core_correction_retargets_motion() {
         let mut surface = scroll();
-        surface.scroll_command(2, 0.0, 300.0, true);
-        assert_eq!(surface.node(2).unwrap().scroll.y, 0.0);
+        surface.scroll_command(2, Points(0.0), Points(300.0), true);
+        assert_eq!(surface.node(2).unwrap().scroll.y.0, 0.0);
         assert_eq!(surface.node(2).unwrap().scroll.count, 1);
         surface.tick_scroll(0.15);
-        let midway = surface.node(2).unwrap().scroll.y;
+        let midway = surface.node(2).unwrap().scroll.y.0;
         assert!(midway > 0.0 && midway < 300.0);
-        surface.adjust_scroll(2, 0.0, 32.0);
+        surface.adjust_scroll(2, Points(0.0), Points(32.0));
         assert_eq!(surface.node(2).unwrap().scroll.count, 2);
         surface.tick_scroll(0.3);
-        assert_eq!(surface.node(2).unwrap().scroll.y, 332.0);
+        assert_eq!(surface.node(2).unwrap().scroll.y.0, 332.0);
     }
 
     #[test]
@@ -1030,7 +1056,7 @@ mod tests {
         surface.begin_scroll_drag(2, 40.0, 40.0, false);
         surface.now = 0.1;
         surface.move_scroll_drag(2, 40.0, 300.0);
-        assert!(surface.node(2).unwrap().scroll.y < -64.0);
+        assert!(surface.node(2).unwrap().scroll.y.0 < -64.0);
         surface.end_scroll_drag(2, false);
         assert!(surface.node(2).unwrap().scroll.physics.refreshing);
         assert!(
@@ -1040,10 +1066,10 @@ mod tests {
                 .any(|event| matches!(event, SurfaceEvent::Event(2, EventKind::Refresh, _)))
         );
         surface.tick_scroll(0.4);
-        assert!((surface.node(2).unwrap().scroll.y + REFRESH_SPACE).abs() < 0.01);
+        assert!((surface.node(2).unwrap().scroll.y.0 + REFRESH_SPACE).abs() < 0.01);
         surface.set_refreshing(2, false);
         surface.tick_scroll(0.7);
-        assert_eq!(surface.node(2).unwrap().scroll.y, 0.0);
+        assert_eq!(surface.node(2).unwrap().scroll.y.0, 0.0);
     }
 
     #[test]
@@ -1058,15 +1084,15 @@ mod tests {
         ] {
             surface.node_mut(2).unwrap().events.set(kind, true);
         }
-        surface.scroll_jump(2, 0.0, 500.0);
+        surface.scroll_jump(2, Points(0.0), Points(500.0));
         surface.begin_scroll_drag(2, 40.0, 100.0, false);
         surface.now = 0.1;
         surface.move_scroll_drag(2, 40.0, 50.0);
         surface.end_scroll_drag(2, false);
         surface.tick_scroll(0.2);
-        let first = surface.node(2).unwrap().scroll.y;
+        let first = surface.node(2).unwrap().scroll.y.0;
         surface.tick_scroll(0.3);
-        let second = surface.node(2).unwrap().scroll.y;
+        let second = surface.node(2).unwrap().scroll.y.0;
         surface.tick_scroll(10.0);
         assert!(first > 550.0 && second > first);
         for kind in [
@@ -1092,12 +1118,12 @@ mod tests {
         let mut surface = scroll();
         surface.node_mut(2).unwrap().scroll.behavior.max_zoom = 3.0;
         surface.events.clear();
-        surface.zoom_scroll(2, 8.0, Some((80.0, 80.0)), false);
+        surface.zoom_scroll(2, 8.0, Some(Point::new(Points(80.0), Points(80.0))), false);
         assert_eq!(surface.node(2).unwrap().scroll.physics.zoom, 3.0);
         assert_eq!(
             (
-                surface.node(2).unwrap().scroll.x,
-                surface.node(2).unwrap().scroll.y
+                surface.node(2).unwrap().scroll.x.0,
+                surface.node(2).unwrap().scroll.y.0
             ),
             (160.0, 160.0)
         );
@@ -1107,7 +1133,7 @@ mod tests {
         ));
         assert!(matches!(
             surface.events.get(1),
-            Some(SurfaceEvent::Scroll(2, 160.0, 160.0, _))
+            Some(SurfaceEvent::Scroll(2, point, _)) if *point == Point::new(Points(160.0), Points(160.0))
         ));
     }
 
@@ -1122,21 +1148,21 @@ mod tests {
             .transform
             .push(nsh_core::TransformKind::Rotate, 20.0);
         node.scroll.behavior.max_zoom = 3.0;
-        surface.scroll_jump(2, 0.0, 500.0);
+        surface.scroll_jump(2, Points(0.0), Points(500.0));
         let matrix = surface.local_to_surface(2).unwrap();
         let from = crate::geometry::project(&matrix, 50.0, 100.0).unwrap();
         let to = crate::geometry::project(&matrix, 50.0, 50.0).unwrap();
         assert!(surface.begin_scroll_drag(2, from.0, from.1, false));
         surface.now = 0.1;
         surface.move_scroll_drag(2, to.0, to.1);
-        assert!((surface.node(2).unwrap().scroll.y - 550.0).abs() < 0.001);
+        assert!((surface.node(2).unwrap().scroll.y.0 - 550.0).abs() < 0.001);
         surface.end_scroll_drag(2, true);
-        surface.scroll_jump(2, 0.0, 500.0);
+        surface.scroll_jump(2, Points(0.0), Points(500.0));
         let focal = crate::geometry::project(&matrix, 80.0, 40.0).unwrap();
         assert!(surface.zoom_scroll_at(2, 2.0, focal.0, focal.1));
         let scroll = &surface.node(2).unwrap().scroll;
-        assert!((scroll.x - 80.0).abs() < 0.001);
-        assert!((scroll.y - 1040.0).abs() < 0.001);
+        assert!((scroll.x.0 - 80.0).abs() < 0.001);
+        assert!((scroll.y.0 - 1040.0).abs() < 0.001);
     }
 
     #[test]
@@ -1176,19 +1202,19 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             })
         };
-        surface.scroll_jump(2, 0.0, 500.0);
+        surface.scroll_jump(2, Points(0.0), Points(500.0));
         surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Middle), 6, 4));
         surface.now = 0.1;
         surface.handle_event(mouse(MouseEventKind::Drag(MouseButton::Middle), 3, 4));
         surface.now = 0.11;
         surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Middle), 3, 4));
-        let released = surface.node(2).unwrap().scroll.y;
+        let released = surface.node(2).unwrap().scroll.y.0;
         surface.tick_scroll(0.2);
-        assert!(surface.node(2).unwrap().scroll.y > released);
-        surface.scroll_jump(2, 0.0, 0.0);
+        assert!(surface.node(2).unwrap().scroll.y.0 > released);
+        surface.scroll_jump(2, Points(0.0), Points(0.0));
         surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 0, 19));
         surface.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 19));
-        assert!((surface.node(2).unwrap().scroll.y - 800.0).abs() < 0.01);
+        assert!((surface.node(2).unwrap().scroll.y.0 - 800.0).abs() < 0.01);
         surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 5, 19));
         assert!(!surface.scroll_animating());
     }

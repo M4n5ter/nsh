@@ -3,7 +3,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use nsh_core::{ApproxTextEngine, MountItem, Size};
+use nsh_core::{ApproxTextEngine, MountItem, Size, geometry::px};
 use nsh_engine::{
     Engine, EngineConfig,
     package::{App, Contents, SecretKey, TrustStore, build, certify},
@@ -17,7 +17,7 @@ fn counter(build_number: u64, bytecode_version: &str) -> Contents {
         entry,
         minify: true,
         split: false,
-        ui_sets: vec![nsh_ui_mobile::registry().into()],
+        ui_sets: vec![nsh_base::registry().into()],
     })
     .unwrap();
     let bytecode = nsh_js::compile_bytecode(&bundle.code, true).unwrap();
@@ -41,17 +41,20 @@ fn first_texts(bundle: nsh_engine::Bundle) -> Vec<String> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: nsh_engine::App::Js(bundle),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
+        websocket: None,
+        filesystem: None,
         assets: None,
         environment: Default::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
         data_dir: None,
         storage: None,
+        clock: Default::default(),
     };
     let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     let first = rx

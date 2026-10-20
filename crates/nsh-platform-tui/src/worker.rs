@@ -3,8 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use nsh_animation::AnimationValue;
-use nsh_core::{NodeId, access::Access, canvas::Drawing};
+use nsh_core::{NodeId, access::Access, animation::AnimationValue, canvas::Drawing};
 
 use crate::image::{AnimatedRaster, Raster};
 
@@ -27,7 +26,7 @@ pub(crate) struct CanvasRequest {
     pub(crate) epoch: u64,
     pub(crate) drawing: Arc<Drawing>,
     pub(crate) args: Vec<(u16, AnimationValue)>,
-    pub(crate) size: nsh_core::Size,
+    pub(crate) size: nsh_core::Size<nsh_core::Points>,
     pub(crate) images: HashMap<Arc<str>, Arc<Raster>>,
 }
 

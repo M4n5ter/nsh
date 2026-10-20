@@ -27,11 +27,10 @@ private_interfaces = "deny"
 
 [workspace.dependencies]
 # nsh's crates, from the main workspace.
-nsh-animation = { version = "0.1.1", path = "../nsh-animation" }
 nsh-core = { version = "0.1.1", path = "../nsh-core" }
 nsh-dev = { version = "0.1.1", path = "../nsh-dev" }
 nsh-engine = { version = "0.1.1", path = "../nsh-engine", default-features = false }
-nsh-ui-mobile = { version = "0.1.1", path = "../nsh-ui-mobile" }
+nsh-base = { version = "0.1.1", path = "../nsh-base" }
 # The JSX compiler alone (tests compile their apps).
 nsh-bundler = { version = "0.1.1", path = "../nsh-bundler", default-features = false }
 nsh-platform-gpui = { version = "0.1.1", path = "nsh-platform-gpui", default-features = false }
@@ -85,7 +84,7 @@ lto = "fat"
 codegen-units = 1
 
 # Keep the interpreter and layout fast even in debug builds; they dominate runtime cost.
-[profile.dev.package.rquickjs-sys]
+[profile.dev.package.quickjs-jit-sys]
 opt-level = 3
 [profile.dev.package.taffy]
 opt-level = 3

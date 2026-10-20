@@ -50,7 +50,7 @@ use crate::{
 static UI_SETS: RwLock<Option<Vec<nsh_core::ui::Registry>>> = RwLock::new(None);
 
 /// Sets the UI sets served by subsequently loaded apps. The default is
-/// `nsh/ui/mobile`; app-specific hosts call this before creating views.
+/// `nsh/base`; app-specific hosts call this before creating views.
 pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
     *UI_SETS.write().unwrap_or_else(|e| e.into_inner()) = Some(sets);
 }
@@ -60,7 +60,7 @@ fn ui_sets() -> Vec<nsh_core::ui::Registry> {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
-        .unwrap_or_else(|| vec![nsh_ui_mobile::registry()])
+        .unwrap_or_else(|| vec![nsh_base::registry()])
 }
 
 /// The app loaded by [`run_app`].
@@ -69,7 +69,7 @@ pub enum AppSource {
     /// A native Rust root component.
     Rust(Root),
     /// A JavaScript bundle from trusted app resources or source code.
-    Bundle(Bundle),
+    Bundle(Box<Bundle>),
     /// A development server that pushes full bundles and hot updates.
     #[cfg(feature = "dev")]
     DevServer(String),
@@ -181,7 +181,7 @@ pub struct AppView {
     has_frame: bool,
     last_error: Option<String>,
     status: Option<String>,
-    theme: Option<nsh_core::ui::Theme>,
+    theme: Option<nsh_base::Theme>,
     image_protocol: Option<crate::ImageProtocol>,
     services: Option<ServiceManager>,
     service_output: VecDeque<ServiceOutput>,
@@ -246,21 +246,19 @@ impl AppView {
             services.reset(self.surface.access.clone());
         }
         let config = EngineConfig {
-            app,
             viewport: self.surface.viewport(),
             trace: self.options.trace,
             network: Some(self.network.clone()),
             assets: Some(assets),
             environment: self.environment,
-            header_heights: (
-                self.options.metrics.height(),
-                self.options.metrics.height() * 2.0,
-            ),
+            // Pages supply their own header content on the terminal.
+            header_heights: nsh_core::NO_NATIVE_HEADER,
             limits: self.options.limits,
             ui_sets: self.options.ui_sets.clone().unwrap_or_else(ui_sets),
             runtime: None,
             data_dir: self.options.data_dir.clone().or_else(nsh_engine::data_dir),
             storage: self.options.storage.clone(),
+            ..EngineConfig::new(app)
         };
         let (tx, rx) = mpsc::channel();
         let metrics = self.options.metrics;
@@ -272,7 +270,7 @@ impl AppView {
             Sink(tx),
             move |control| {
                 if let Some(theme) = theme {
-                    control.set_theme(Some(theme));
+                    control.set_tokens(Some(theme.into_tokens()));
                 }
             },
         )?);
@@ -424,7 +422,7 @@ impl AppView {
         self.options.size = (columns, rows);
         self.surface.resize(columns, rows);
         let size = self.surface.viewport();
-        self.environment.window = (size.width, size.height);
+        self.environment.window = size;
         if let Some(control) = self.control() {
             control.resize(size);
             control.set_environment(self.environment);
@@ -508,10 +506,10 @@ impl AppView {
 
     /// Applies a host theme now and to subsequently loaded apps. `None`
     /// restores the app's own theme.
-    pub fn set_theme(&mut self, theme: Option<nsh_core::ui::Theme>) {
+    pub fn set_theme(&mut self, theme: Option<nsh_base::Theme>) {
         self.theme = theme.clone();
         if let Some(control) = self.control() {
-            control.set_theme(theme);
+            control.set_tokens(theme.map(nsh_base::Theme::into_tokens));
         }
     }
 
@@ -609,13 +607,12 @@ impl AppView {
         for event in events {
             match event {
                 SurfaceEvent::Event(id, kind, payload) => control.dispatch_event(id, kind, payload),
-                SurfaceEvent::Scroll(id, x, y, count) => control.scroll(id, x, y, count),
+                SurfaceEvent::Scroll(id, offset, count) => control.scroll(id, offset, count),
                 SurfaceEvent::States(id, states) => control.set_states(id, states),
                 SurfaceEvent::AnimationsFinished(finished) => control.animations_finished(finished),
                 SurfaceEvent::ComponentSize(id, size) => control.set_component_size(id, size),
                 SurfaceEvent::Zoom(id, scale) => control.zoom(id, scale),
                 SurfaceEvent::RootSize(id, size, insets) => control.set_root_size(id, size, insets),
-                SurfaceEvent::ScreenHeader(id, height) => control.set_screen_header(id, height),
                 SurfaceEvent::Service(request) => self.service_request(request),
             }
         }
@@ -835,7 +832,7 @@ fn initial_environment(options: &AppOptions) -> Environment {
         })
         .unwrap_or_default();
     Environment {
-        window: (viewport.width, viewport.height),
+        window: viewport,
         renderer: Renderer::Terminal,
         color_scheme: options.appearance.resolve(ColorScheme::Dark),
         os: if cfg!(target_os = "windows") {
@@ -915,7 +912,7 @@ fn run_inner(source: AppSource, options: AppOptions) -> io::Result<()> {
     }
     match source {
         AppSource::Rust(root) => view.load(App::Rust(root))?,
-        AppSource::Bundle(bundle) => view.load(App::Js(bundle))?,
+        AppSource::Bundle(bundle) => view.load(App::Js(*bundle))?,
         #[cfg(feature = "dev")]
         AppSource::DevServer(url) => view.connect(url)?,
     }
@@ -1705,7 +1702,7 @@ mod tests {
                 input()
                     .h(px(32.0))
                     .value(move || typed.get())
-                    .on_change_text(move |value: &str| typed.set(value.to_owned())),
+                    .on_change(move |value: &str| typed.set(value.to_owned())),
             )
             .child(text(move || format!("Echo:{}", typed.get())))
             .child(
@@ -1732,9 +1729,15 @@ mod tests {
             size: (80, 24),
             ..Default::default()
         });
-        assert_eq!(view.surface().viewport(), nsh_core::Size::new(640.0, 384.0));
+        assert_eq!(
+            view.surface().viewport(),
+            nsh_core::Size::new(px(640.0), px(384.0))
+        );
         view.resize(40, 10);
-        assert_eq!(view.surface().viewport(), nsh_core::Size::new(320.0, 160.0));
+        assert_eq!(
+            view.surface().viewport(),
+            nsh_core::Size::new(px(320.0), px(160.0))
+        );
         assert!(view.control().is_none());
         assert_eq!(view.environment.renderer, Renderer::Terminal);
         assert!(view.image_protocol_cleanup().is_empty());

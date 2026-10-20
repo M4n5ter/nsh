@@ -4,8 +4,10 @@
 //! system.
 
 use nsh_core::{
-    AccessibilityRole, BlendMode, BorderStyle, Color, Dialog, DialogButtonStyle, EventKind,
-    Gradient, GradientKind, GradientSize, NodeId, Rect, ResizeMode, TextAlign, ViewKind, ViewStyle,
+    AccessibilityRole, BlendMode, BorderStyle, Bounds, Color, Dialog, DialogButtonStyle, EventKind,
+    Gradient, GradientKind, GradientSize, NodeId, Point, Points, ResizeMode, Size, TextAlign,
+    ViewKind, ViewStyle,
+    geometry::{Percentage, px},
 };
 use ratatui::{
     buffer::{Buffer, CellDiffOption},
@@ -24,7 +26,7 @@ const FOCUS: Color = Color(0x388b_fdff);
 
 struct CompositePlan {
     id: NodeId,
-    bounds: Rect,
+    bounds: Bounds<Points>,
 }
 
 impl Surface {
@@ -100,20 +102,6 @@ impl Surface {
                 continue;
             }
             let clip = self.clip_rect(id);
-            if node.kind == ViewKind::Modal && !node.modal.transparent {
-                // A modal dims its presenter before painting its own
-                // background. Transparent modals retain their content's
-                // explicitly mounted fills.
-                fill(
-                    buffer,
-                    area,
-                    area,
-                    Color(0x0000_0066),
-                    opacity * self.navigation_scrim_opacity(id),
-                    BlendMode::Normal,
-                    false,
-                );
-            }
             if let Some(plan) = plans.iter().find(|plan| plan.id == id)
                 && let Some(scene) = self.composite_scene(plan, &ids, area, buffer)
                 && let Some(frame) = self
@@ -139,10 +127,9 @@ impl Surface {
                 composed = Some(id);
                 continue;
             }
-            if node.kind == ViewKind::Modal
-                && !node.modal.transparent
-                && style.background_color.is_transparent()
-            {
+            // Screens cover their presenter while sliding; Dialog layers
+            // remain transparent and let the app provide its own backdrop.
+            if node.kind == ViewKind::Screen {
                 fill(
                     buffer,
                     cells(frame, self.metrics, area),
@@ -155,11 +142,11 @@ impl Surface {
             }
             self.paint_decor(frame, clip, &style, opacity, area, buffer);
             let foreground = node.bindings.iter().find_map(|(property, value)| {
-                if *property != nsh_animation::AnimationProp::Color {
+                if *property != nsh_core::animation::AnimationProp::Color {
                     return None;
                 }
                 Some(match self.animation.eval(*value) {
-                    nsh_animation::AnimationValue::Color(color) => Color(color),
+                    nsh_core::animation::AnimationValue::Color(color) => Color(color),
                     value => Color(value.number() as u32),
                 })
             });
@@ -187,7 +174,7 @@ impl Surface {
                         let (image_frame, image_clip, mode) = image_geometry(
                             layer.source,
                             node.image.mode(),
-                            nsh_core::Size::new(node.frame.width, node.frame.height),
+                            node.frame.size,
                             frame,
                             clip,
                         );
@@ -253,7 +240,6 @@ impl Surface {
                         }
                     }
                 }
-                ViewKind::Screen => self.paint_header(id, frame, clip, opacity, area, buffer),
                 ViewKind::Native => {
                     if let Some(component) = &node.native {
                         component.render(&self.component_context(id, area), buffer);
@@ -316,12 +302,13 @@ impl Surface {
                         .iter()
                         .filter(|run| run.start < selection.1 && run.end > selection.0)
                     {
-                        let rect = Rect {
-                            x: content.x + run.x,
-                            y: content.y + run.y,
-                            width: f32::from(run.width) * self.metrics.width(),
-                            height: self.metrics.height(),
-                        };
+                        let rect = Bounds::new(
+                            Point::new(content.origin.x + run.x, content.origin.y + run.y),
+                            Size::new(
+                                f32::from(run.width) * self.metrics.width(),
+                                self.metrics.height(),
+                            ),
+                        );
                         fill(
                             buffer,
                             cells(rect, self.metrics, area),
@@ -340,7 +327,7 @@ impl Surface {
                 if foreground.is_some() || filter.is_some() {
                     crate::text::render_text_filtered(
                         layout,
-                        (content.x, content.y),
+                        content.origin,
                         clip,
                         opacity,
                         foreground,
@@ -352,7 +339,7 @@ impl Surface {
                 } else {
                     crate::text::render_text(
                         layout,
-                        (content.x, content.y),
+                        content.origin,
                         clip,
                         opacity,
                         self.metrics,
@@ -455,16 +442,11 @@ impl Surface {
             radii.bottom_left,
         ]
         .iter()
-        .any(|r| *r > 0.0);
+        .any(|r| *r > Points::ZERO);
         let effects = style.effects.as_ref().is_some_and(|effects| {
             !effects.filters.is_empty() || !effects.backdrop_filters.is_empty()
         });
-        let opacity = style.opacity
-            * if self.pressed == Some(id) {
-                node.props.active_opacity.unwrap_or(1.0)
-            } else {
-                1.0
-            };
+        let opacity = style.opacity;
         let grouped_alpha = opacity < 0.999
             && opacity > 0.0
             && (!node.children.is_empty()
@@ -517,54 +499,60 @@ impl Surface {
                 };
                 let style = self.animated_style(child);
                 let mut spread = if style.shadow.is_visible() {
-                    style.shadow.radius.max(0.0) * 3.0
+                    style.shadow.radius.max(Points::ZERO) * 3.0
                         + style.shadow.offset_x.abs().max(style.shadow.offset_y.abs())
                 } else {
-                    0.0
+                    Points::ZERO
                 };
                 if style.outline.is_visible() {
-                    spread = spread.max((style.outline.offset + style.outline.width).max(0.0));
+                    spread =
+                        spread.max((style.outline.offset + style.outline.width).max(Points::ZERO));
                 }
                 if let Some(effects) = &style.effects {
                     for filter in effects.filters.iter().chain(&effects.backdrop_filters) {
                         spread = spread.max(match *filter {
-                            nsh_core::Filter::Blur(radius) => radius.max(0.0) * 3.0,
+                            nsh_core::Filter::Blur(radius) => radius.max(Points::ZERO) * 3.0,
                             nsh_core::Filter::DropShadow {
                                 offset_x,
                                 offset_y,
                                 blur,
                                 ..
-                            } => offset_x.abs().max(offset_y.abs()) + blur.max(0.0) * 2.0,
-                            _ => 0.0,
+                            } => offset_x.abs().max(offset_y.abs()) + blur.max(Points::ZERO) * 2.0,
+                            _ => Points::ZERO,
                         });
                     }
                     for shadow in &effects.box_shadows {
                         spread = spread.max(
-                            shadow.spread.max(0.0)
-                                + shadow.blur.max(0.0) * 2.0
+                            shadow.spread.max(Points::ZERO)
+                                + shadow.blur.max(Points::ZERO) * 2.0
                                 + shadow.offset_x.abs().max(shadow.offset_y.abs()),
                         );
                     }
                 }
-                let frame = Rect {
-                    x: frame.x - spread,
-                    y: frame.y - spread,
-                    width: frame.width + spread * 2.0,
-                    height: frame.height + spread * 2.0,
-                };
-                bounds = union(bounds, frame);
+                let frame = Bounds::new(
+                    Point::new(frame.origin.x - spread, frame.origin.y - spread),
+                    Size::new(
+                        frame.size.width + spread * 2.0,
+                        frame.size.height + spread * 2.0,
+                    ),
+                );
+                bounds = bounds.union(&frame);
             }
             bounds = crate::surface::intersect(bounds, self.clip_rect(id));
             let rect = cells(bounds, self.metrics, area);
             if rect.is_empty() {
                 continue;
             }
-            let bounds = Rect {
-                x: f32::from(rect.x - area.x) * self.metrics.width(),
-                y: f32::from(rect.y - area.y) * self.metrics.height(),
-                width: f32::from(rect.width) * self.metrics.width(),
-                height: f32::from(rect.height) * self.metrics.height(),
-            };
+            let bounds = Bounds::new(
+                Point::new(
+                    f32::from(rect.x - area.x) * self.metrics.width(),
+                    f32::from(rect.y - area.y) * self.metrics.height(),
+                ),
+                Size::new(
+                    f32::from(rect.width) * self.metrics.width(),
+                    f32::from(rect.height) * self.metrics.height(),
+                ),
+            );
             plans.push(CompositePlan { id, bounds });
         }
         plans
@@ -612,19 +600,19 @@ impl Surface {
         }
         let node = self.node(id)?;
         let frame = self.presentation_frame(id)?;
-        let size = nsh_core::Size::new(frame.width, frame.height);
-        let local = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: frame.width,
-            height: frame.height,
-        };
+        let size = frame.size;
+        let local = Bounds::new(Point::default(), size);
         if !finite_rect(local) {
             return None;
         }
         let mut style = self.animated_style(id);
-        if self.pressed == Some(id) {
-            style.opacity *= node.props.active_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+        if node.kind == ViewKind::Screen {
+            let backdrop = if self.dark {
+                Color(0x181b_22ff)
+            } else {
+                Color(0xffff_ffff)
+            };
+            style.background_color = over_color(style.background_color, backdrop);
         }
         if matches!(
             node.kind,
@@ -632,20 +620,10 @@ impl Surface {
         ) {
             style.overflow_hidden = true;
         }
-        if node.kind == ViewKind::Modal
-            && !node.modal.transparent
-            && style.background_color.is_transparent()
-        {
-            style.background_color = if self.dark {
-                Color(0x181b_22ff)
-            } else {
-                Color(0xffff_ffff)
-            };
-        }
         let foreground = node.bindings.iter().find_map(|(property, value)| {
-            (*property == nsh_animation::AnimationProp::Color).then(|| {
+            (*property == nsh_core::animation::AnimationProp::Color).then(|| {
                 match self.animation.eval(*value) {
-                    nsh_animation::AnimationValue::Color(color) => Color(color),
+                    nsh_core::animation::AnimationValue::Color(color) => Color(color),
                     value => Color(value.number() as u32),
                 }
             })
@@ -727,12 +705,13 @@ impl Surface {
                     .filter(|run| run.start < range.1 && run.end > range.0)
                 {
                     selection.push((
-                        Rect {
-                            x: content.x + run.x,
-                            y: content.y + run.y,
-                            width: f32::from(run.width) * self.metrics.width(),
-                            height: self.metrics.height(),
-                        },
+                        Bounds::new(
+                            Point::new(content.origin.x + run.x, content.origin.y + run.y),
+                            Size::new(
+                                f32::from(run.width) * self.metrics.width(),
+                                self.metrics.height(),
+                            ),
+                        ),
                         text.selection_color.unwrap_or(Color(0x388b_fd66)),
                     ));
                 }
@@ -747,11 +726,7 @@ impl Surface {
         }
         if matches!(
             node.kind,
-            ViewKind::Input
-                | ViewKind::Screen
-                | ViewKind::Native
-                | ViewKind::WebView
-                | ViewKind::Video
+            ViewKind::Input | ViewKind::Native | ViewKind::WebView | ViewKind::Video
         ) {
             let columns = (size.width / self.metrics.width())
                 .ceil()
@@ -776,7 +751,6 @@ impl Surface {
                     area,
                     &mut buffer,
                 ),
-                ViewKind::Screen => self.paint_header(id, local, local, 1.0, area, &mut buffer),
                 ViewKind::Native => {
                     if let Some(component) = &node.native {
                         component.render(
@@ -939,8 +913,8 @@ impl Surface {
         &self,
         id: NodeId,
         raster: &std::sync::Arc<crate::image::Raster>,
-        frame: Rect,
-        clip: Rect,
+        frame: Bounds<Points>,
+        clip: Bounds<Points>,
         mode: ResizeMode,
         tint: Option<Color>,
         opacity: f32,
@@ -1058,12 +1032,13 @@ impl Surface {
             }
             if style.outline.is_visible() {
                 let offset = style.outline.offset + style.outline.width / 2.0;
-                let outline = Rect {
-                    x: frame.x - offset,
-                    y: frame.y - offset,
-                    width: frame.width + offset * 2.0,
-                    height: frame.height + offset * 2.0,
-                };
+                let outline = Bounds::new(
+                    Point::new(frame.origin.x - offset, frame.origin.y - offset),
+                    Size::new(
+                        frame.size.width + offset * 2.0,
+                        frame.size.height + offset * 2.0,
+                    ),
+                );
                 if protocol_border_hits(
                     cells(outline, self.metrics, area).intersection(clip),
                     region,
@@ -1113,19 +1088,6 @@ impl Surface {
             {
                 return false;
             }
-            if node.kind == ViewKind::Screen
-                && node.screen.header_shown
-                && hits(cells(
-                    Rect {
-                        height: self.navigation_header(other).height.min(frame.height),
-                        ..frame
-                    },
-                    self.metrics,
-                    area,
-                ))
-            {
-                return false;
-            }
             if (!style.background_color.is_transparent()
                 || style
                     .effects
@@ -1137,25 +1099,33 @@ impl Surface {
             }
             if style.shadow.is_visible() {
                 let spread = style.shadow.radius * 2.0;
-                let shadow = Rect {
-                    x: frame.x + style.shadow.offset_x - spread,
-                    y: frame.y + style.shadow.offset_y - spread,
-                    width: frame.width + spread * 2.0,
-                    height: frame.height + spread * 2.0,
-                };
+                let shadow = Bounds::new(
+                    Point::new(
+                        frame.origin.x + style.shadow.offset_x - spread,
+                        frame.origin.y + style.shadow.offset_y - spread,
+                    ),
+                    Size::new(
+                        frame.size.width + spread * 2.0,
+                        frame.size.height + spread * 2.0,
+                    ),
+                );
                 if hits(cells(shadow, self.metrics, area)) {
                     return false;
                 }
             }
             if let Some(effects) = &style.effects {
                 for shadow in effects.box_shadows.iter().filter(|s| s.is_visible()) {
-                    let spread = shadow.spread.max(0.0) + shadow.blur.max(0.0);
-                    let shadow = Rect {
-                        x: frame.x + shadow.offset_x - spread,
-                        y: frame.y + shadow.offset_y - spread,
-                        width: frame.width + spread * 2.0,
-                        height: frame.height + spread * 2.0,
-                    };
+                    let spread = shadow.spread.max(Points::ZERO) + shadow.blur.max(Points::ZERO);
+                    let shadow = Bounds::new(
+                        Point::new(
+                            frame.origin.x + shadow.offset_x - spread,
+                            frame.origin.y + shadow.offset_y - spread,
+                        ),
+                        Size::new(
+                            frame.size.width + spread * 2.0,
+                            frame.size.height + spread * 2.0,
+                        ),
+                    );
                     if hits(cells(shadow, self.metrics, area)) {
                         return false;
                     }
@@ -1244,9 +1214,6 @@ impl Surface {
                 return 0.0;
             }
             opacity *= style.opacity.clamp(0.0, 1.0);
-            if self.pressed == Some(current) {
-                opacity *= node.props.active_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
-            }
             if node.kind == ViewKind::Modal {
                 break;
             }
@@ -1257,8 +1224,8 @@ impl Surface {
 
     fn paint_decor(
         &self,
-        frame: Rect,
-        clip: Rect,
+        frame: Bounds<Points>,
+        clip: Bounds<Points>,
         style: &ViewStyle,
         opacity: f32,
         area: CellRect,
@@ -1281,7 +1248,7 @@ impl Surface {
                 style.shadow.offset_x,
                 style.shadow.offset_y,
                 style.shadow.radius * 2.0,
-                0.0,
+                Points::ZERO,
                 style.shadow.color,
                 opacity * style.shadow.opacity,
                 self.metrics,
@@ -1316,22 +1283,22 @@ impl Surface {
             .iter()
             .flat_map(|e| e.background_images.iter())
             .filter(|g| g.stops.len() >= 2)
-            .map(|g| (g, g.resolved_stops()))
+            .map(|g| (g, g.resolved_stops(frame.size)))
             .collect();
         for y in rect.intersection(clip).y..rect.intersection(clip).bottom() {
             for x in rect.intersection(clip).x..rect.intersection(clip).right() {
                 let mut color = filtered(style.background_color);
                 for (gradient, stops) in gradients.iter().rev() {
-                    let px = (f32::from(x - area.x) + 0.5) * self.metrics.width() - frame.x;
-                    let py = (f32::from(y - area.y) + 0.5) * self.metrics.height() - frame.y;
+                    let px = (f32::from(x - area.x) + 0.5) * self.metrics.width() - frame.origin.x;
+                    let py = (f32::from(y - area.y) + 0.5) * self.metrics.height() - frame.origin.y;
                     color = over_color(
                         filtered(gradient_color(
                             gradient,
                             stops,
-                            px,
-                            py,
-                            frame.width,
-                            frame.height,
+                            px.0,
+                            py.0,
+                            frame.size.width.0,
+                            frame.size.height.0,
                         )),
                         color,
                     );
@@ -1363,8 +1330,8 @@ impl Surface {
 
     fn paint_borders(
         &self,
-        frame: Rect,
-        clip: Rect,
+        frame: Bounds<Points>,
+        clip: Bounds<Points>,
         style: &ViewStyle,
         opacity: f32,
         area: CellRect,
@@ -1378,13 +1345,13 @@ impl Surface {
         let filtered = |color| filter_color(color, matrix.as_ref());
         let radii = style.radii();
         let rounded = [
-            radii.top_left > 0.0,
-            radii.top_right > 0.0,
-            radii.bottom_right > 0.0,
-            radii.bottom_left > 0.0,
+            radii.top_left > Points::ZERO,
+            radii.top_right > Points::ZERO,
+            radii.bottom_right > Points::ZERO,
+            radii.bottom_left > Points::ZERO,
         ];
         let sides = std::array::from_fn(|i| {
-            style.borders.widths[i] > 0.0 && !style.borders.colors[i].is_transparent()
+            style.borders.width(i) > Points::ZERO && !style.borders.colors[i].is_transparent()
         });
         if style.borders.is_visible() {
             stroke_frame(
@@ -1402,12 +1369,13 @@ impl Surface {
         }
         if style.outline.is_visible() {
             let offset = style.outline.offset + style.outline.width / 2.0;
-            let outline = Rect {
-                x: frame.x - offset,
-                y: frame.y - offset,
-                width: frame.width + offset * 2.0,
-                height: frame.height + offset * 2.0,
-            };
+            let outline = Bounds::new(
+                Point::new(frame.origin.x - offset, frame.origin.y - offset),
+                Size::new(
+                    frame.size.width + offset * 2.0,
+                    frame.size.height + offset * 2.0,
+                ),
+            );
             stroke_frame(
                 buffer,
                 outline,
@@ -1422,102 +1390,6 @@ impl Surface {
             );
         }
     }
-
-    fn paint_header(
-        &self,
-        id: NodeId,
-        frame: Rect,
-        clip: Rect,
-        opacity: f32,
-        area: CellRect,
-        buffer: &mut Buffer,
-    ) {
-        let Some(node) = self.node(id) else { return };
-        let config = &node.screen;
-        let layout = self.navigation_header(id);
-        if !config.header_shown || layout.height <= 0.0 {
-            return;
-        }
-        let header = cells(
-            Rect {
-                height: layout.height.min(frame.height),
-                ..frame
-            },
-            self.metrics,
-            area,
-        );
-        let clip = cells(clip, self.metrics, area).intersection(area);
-        let background = config.background_color.unwrap_or(if self.dark {
-            Color(0x2428_32ff)
-        } else {
-            Color(0xf4f5_f7ff)
-        });
-        if !config.header_transparent {
-            fill(
-                buffer,
-                header,
-                clip,
-                background,
-                opacity,
-                BlendMode::Normal,
-                true,
-            )
-        }
-        let has_back = self.navigation_can_back(id);
-        let row =
-            header.y + (layout.bar_height / self.metrics.height()).floor().max(1.0) as u16 / 2;
-        if has_back && config.back_visible && config.left.is_none() {
-            let back_title = self.navigation_back_title(id);
-            let label = format!("‹ {}", back_title.as_deref().unwrap_or("Back"));
-            write_text(
-                buffer,
-                header.x.saturating_add(1),
-                row,
-                header.width.saturating_sub(2).min(18),
-                &label,
-                clip,
-                config.tint_color.unwrap_or(FOCUS),
-                opacity,
-                Modifier::empty(),
-            );
-        }
-        if config.title_view.is_none()
-            && let Some(title) = &config.title
-        {
-            let width = UnicodeWidthStr::width(title.as_ref())
-                .min(header.width.saturating_sub(4) as usize) as u16;
-            let x = if layout.large {
-                header.x.saturating_add(1)
-            } else {
-                header.x + header.width.saturating_sub(width) / 2
-            };
-            let row = if layout.large {
-                header.y
-                    + (layout.title_y / self.metrics.height())
-                        .ceil()
-                        .max(1.0)
-                        .min(f32::from(header.height.saturating_sub(1)))
-                        as u16
-            } else {
-                row
-            };
-            write_text(
-                buffer,
-                x,
-                row,
-                width,
-                title,
-                clip,
-                config.title_color.unwrap_or(if self.dark {
-                    Color(0xe6e9_efff)
-                } else {
-                    Color::BLACK
-                }),
-                opacity,
-                Modifier::BOLD,
-            );
-        }
-    }
 }
 
 fn focus_uses_text_indicator(node: &Node, rect: CellRect) -> bool {
@@ -1528,8 +1400,8 @@ fn focus_uses_text_indicator(node: &Node, rect: CellRect) -> bool {
                 || [
                     EventKind::Press,
                     EventKind::LongPress,
-                    EventKind::PressIn,
-                    EventKind::PressOut,
+                    EventKind::PressDown,
+                    EventKind::PressUp,
                 ]
                 .into_iter()
                 .any(|event| node.events.contains(event))))
@@ -1576,17 +1448,6 @@ fn translation_only(matrix: &nsh_core::Matrix) -> bool {
         && [m[1], m[4], m[3], m[7]].iter().all(|v| v.abs() < 1e-6)
 }
 
-fn union(a: Rect, b: Rect) -> Rect {
-    let x = a.x.min(b.x);
-    let y = a.y.min(b.y);
-    Rect {
-        x,
-        y,
-        width: (a.x + a.width).max(b.x + b.width) - x,
-        height: (a.y + a.height).max(b.y + b.height) - y,
-    }
-}
-
 fn capture_border_text(
     buffer: &Buffer,
     rect: CellRect,
@@ -1619,35 +1480,36 @@ fn capture_border_text(
 fn image_geometry(
     source: &nsh_core::ImageSource,
     mode: ResizeMode,
-    size: nsh_core::Size,
-    frame: Rect,
-    clip: Rect,
-) -> (Rect, Rect, ResizeMode) {
+    size: Size<Points>,
+    frame: Bounds<Points>,
+    clip: Bounds<Points>,
+) -> (Bounds<Points>, Bounds<Points>, ResizeMode) {
     if mode == ResizeMode::Center
-        && let Some((width, height)) = source.size
+        && let Some(Size { width, height }) = source.size
         && width.is_finite()
         && height.is_finite()
-        && width > 0.0
-        && height > 0.0
+        && width > Points::ZERO
+        && height > Points::ZERO
     {
         let width = width
-            * if size.width > 0.0 {
-                frame.width / size.width
+            * if size.width > Points::ZERO {
+                frame.size.width / size.width
             } else {
                 1.0
             };
         let height = height
-            * if size.height > 0.0 {
-                frame.height / size.height
+            * if size.height > Points::ZERO {
+                frame.size.height / size.height
             } else {
                 1.0
             };
-        let image = Rect {
-            x: frame.x + (frame.width - width) * 0.5,
-            y: frame.y + (frame.height - height) * 0.5,
-            width,
-            height,
-        };
+        let image = Bounds::new(
+            Point::new(
+                frame.origin.x + (frame.size.width - width) * 0.5,
+                frame.origin.y + (frame.size.height - height) * 0.5,
+            ),
+            Size::new(width, height),
+        );
         (
             image,
             crate::surface::intersect(frame, clip),
@@ -1658,12 +1520,17 @@ fn image_geometry(
     }
 }
 
-fn finite_rect(rect: Rect) -> bool {
-    [rect.x, rect.y, rect.width, rect.height]
-        .iter()
-        .all(|v| v.is_finite())
-        && rect.width > 0.0
-        && rect.height > 0.0
+fn finite_rect(rect: Bounds<Points>) -> bool {
+    [
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+        && rect.size.width > Points::ZERO
+        && rect.size.height > Points::ZERO
 }
 
 fn protocol_border_hits(rect: CellRect, region: CellRect) -> bool {
@@ -1680,25 +1547,25 @@ fn protocol_border_hits(rect: CellRect, region: CellRect) -> bool {
     .any(|border| !border.intersection(region).is_empty())
 }
 
-fn cells(rect: Rect, metrics: CellMetrics, area: CellRect) -> CellRect {
+fn cells(rect: Bounds<Points>, metrics: CellMetrics, area: CellRect) -> CellRect {
     if !finite_rect(rect) {
         return CellRect::default();
     }
     // Clamp each edge separately: saturating a negative origin before
     // finding the far edge incorrectly moves clipped views to the right.
-    let x = (rect.x / metrics.width())
+    let x = (rect.origin.x / metrics.width())
         .floor()
         .max(0.0)
         .min(f32::from(area.width));
-    let y = (rect.y / metrics.height())
+    let y = (rect.origin.y / metrics.height())
         .floor()
         .max(0.0)
         .min(f32::from(area.height));
-    let right = ((rect.x + rect.width) / metrics.width())
+    let right = ((rect.origin.x + rect.size.width) / metrics.width())
         .ceil()
         .max(0.0)
         .min(f32::from(area.width));
-    let bottom = ((rect.y + rect.height) / metrics.height())
+    let bottom = ((rect.origin.y + rect.size.height) / metrics.height())
         .ceil()
         .max(0.0)
         .min(f32::from(area.height));
@@ -1710,23 +1577,28 @@ fn cells(rect: Rect, metrics: CellMetrics, area: CellRect) -> CellRect {
     )
 }
 
-fn relative_frame(global: Rect, local: Rect, content: Rect) -> Rect {
-    let sx = if local.width > 0.0 {
-        global.width / local.width
+fn relative_frame(
+    global: Bounds<Points>,
+    local: Bounds<Points>,
+    content: Bounds<Points>,
+) -> Bounds<Points> {
+    let sx = if local.size.width > Points::ZERO {
+        global.size.width / local.size.width
     } else {
         1.0
     };
-    let sy = if local.height > 0.0 {
-        global.height / local.height
+    let sy = if local.size.height > Points::ZERO {
+        global.size.height / local.size.height
     } else {
         1.0
     };
-    Rect {
-        x: global.x + content.x * sx,
-        y: global.y + content.y * sy,
-        width: content.width * sx,
-        height: content.height * sy,
-    }
+    Bounds::new(
+        Point::new(
+            global.origin.x + content.origin.x * sx,
+            global.origin.y + content.origin.y * sy,
+        ),
+        Size::new(content.size.width * sx, content.size.height * sy),
+    )
 }
 
 fn fill(
@@ -1840,7 +1712,7 @@ fn stroke(
 #[allow(clippy::too_many_arguments)]
 fn stroke_frame(
     buffer: &mut Buffer,
-    frame: Rect,
+    frame: Bounds<Points>,
     metrics: CellMetrics,
     area: CellRect,
     clip: CellRect,
@@ -1851,10 +1723,10 @@ fn stroke_frame(
     opacity: f32,
 ) {
     // Clipping a box must not move its border to the clipping edge.
-    sides[0] &= frame.y >= 0.0;
-    sides[1] &= frame.x + frame.width <= f32::from(area.width) * metrics.width();
-    sides[2] &= frame.y + frame.height <= f32::from(area.height) * metrics.height();
-    sides[3] &= frame.x >= 0.0;
+    sides[0] &= frame.origin.y >= Points::ZERO;
+    sides[1] &= frame.origin.x + frame.size.width <= f32::from(area.width) * metrics.width();
+    sides[2] &= frame.origin.y + frame.size.height <= f32::from(area.height) * metrics.height();
+    sides[3] &= frame.origin.x >= Points::ZERO;
     stroke(
         buffer,
         cells(frame, metrics, area),
@@ -1871,8 +1743,8 @@ fn stroke_frame(
 fn paint_input(
     node: &Node,
     focused: bool,
-    frame: Rect,
-    clip: Rect,
+    frame: Bounds<Points>,
+    clip: Bounds<Points>,
     opacity: f32,
     foreground: Option<Color>,
     metrics: CellMetrics,
@@ -1988,20 +1860,22 @@ pub(crate) struct InputGeometry {
 
 pub(crate) fn input_geometry(
     node: &Node,
-    frame: Rect,
+    frame: Bounds<Points>,
     metrics: CellMetrics,
     area: CellRect,
 ) -> InputGeometry {
-    let inner = if node.input_content.width > 0.0 && node.input_content.height > 0.0 {
+    let inner = if node.input_content.size.width > Points::ZERO
+        && node.input_content.size.height > Points::ZERO
+    {
         relative_frame(frame, node.frame, node.input_content)
     } else {
         frame
     };
     InputGeometry {
-        column: i64::from(area.x) + (inner.x / metrics.width()).floor() as i64,
-        row: i64::from(area.y) + (inner.y / metrics.height()).floor() as i64,
-        columns: (inner.width / metrics.width()).floor().max(1.0) as usize,
-        rows: (inner.height / metrics.height()).ceil().max(1.0) as usize,
+        column: i64::from(area.x) + (inner.origin.x / metrics.width()).floor() as i64,
+        row: i64::from(area.y) + (inner.origin.y / metrics.height()).floor() as i64,
+        columns: (inner.size.width / metrics.width()).floor().max(1.0) as usize,
+        rows: (inner.size.height / metrics.height()).ceil().max(1.0) as usize,
         visible: cells(inner, metrics, area),
     }
 }
@@ -2142,8 +2016,8 @@ fn paint_grapheme(
 #[allow(clippy::too_many_arguments)]
 fn paint_scrollbars(
     node: &Node,
-    frame: Rect,
-    clip: Rect,
+    frame: Bounds<Points>,
+    clip: Bounds<Points>,
     opacity: f32,
     metrics: CellMetrics,
     area: CellRect,
@@ -2192,12 +2066,12 @@ fn paint_scrollbars(
     let content_height = node.scroll.content.height * node.scroll.physics.zoom;
     let content_width = node.scroll.content.width * node.scroll.physics.zoom;
     let color = Color(0x8080_80b0);
-    if content_height > frame.height + 0.5 {
+    if content_height > frame.size.height + px(0.5) {
         let length = usize::from(rect.height);
-        let thumb = ((frame.height / content_height) * length as f32)
+        let thumb = ((frame.size.height / content_height) * length as f32)
             .ceil()
             .max(1.0) as usize;
-        let offset = (node.scroll.y / (content_height - frame.height)).clamp(0.0, 1.0);
+        let offset = (node.scroll.y / (content_height - frame.size.height)).clamp(0.0, 1.0);
         let start = (offset * length.saturating_sub(thumb) as f32).round() as usize;
         let x = rect.right() - 1;
         for i in start..start.saturating_add(thumb).min(length) {
@@ -2209,12 +2083,12 @@ fn paint_scrollbars(
             }
         }
     }
-    if content_width > frame.width + 0.5 {
+    if content_width > frame.size.width + px(0.5) {
         let length = usize::from(rect.width);
-        let thumb = ((frame.width / content_width) * length as f32)
+        let thumb = ((frame.size.width / content_width) * length as f32)
             .ceil()
             .max(1.0) as usize;
-        let offset = (node.scroll.x / (content_width - frame.width)).clamp(0.0, 1.0);
+        let offset = (node.scroll.x / (content_width - frame.size.width)).clamp(0.0, 1.0);
         let offset = if node.scroll.mirrored {
             1.0 - offset
         } else {
@@ -2532,49 +2406,57 @@ pub(crate) fn dialog_geometry(
 
 #[allow(clippy::too_many_arguments)]
 fn paint_shadow(
-    frame: Rect,
+    frame: Bounds<Points>,
     clip: CellRect,
-    dx: f32,
-    dy: f32,
-    blur: f32,
-    spread: f32,
+    dx: Points,
+    dy: Points,
+    blur: Points,
+    spread: Points,
     color: Color,
     opacity: f32,
     metrics: CellMetrics,
     area: CellRect,
     buffer: &mut Buffer,
 ) {
-    let radius = (blur * 0.5).max(0.0);
-    let shadow = Rect {
-        x: frame.x + dx - spread,
-        y: frame.y + dy - spread,
-        width: frame.width + spread * 2.0,
-        height: frame.height + spread * 2.0,
-    };
-    let outer = Rect {
-        x: shadow.x - radius,
-        y: shadow.y - radius,
-        width: shadow.width + radius * 2.0,
-        height: shadow.height + radius * 2.0,
-    };
+    let radius = (blur * 0.5).max(Points::ZERO);
+    let shadow = Bounds::new(
+        Point::new(frame.origin.x + dx - spread, frame.origin.y + dy - spread),
+        Size::new(
+            frame.size.width + spread * 2.0,
+            frame.size.height + spread * 2.0,
+        ),
+    );
+    let outer = Bounds::new(
+        Point::new(shadow.origin.x - radius, shadow.origin.y - radius),
+        Size::new(
+            shadow.size.width + radius * 2.0,
+            shadow.size.height + radius * 2.0,
+        ),
+    );
     let rect = cells(outer, metrics, area).intersection(clip);
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
             let px = (f32::from(x - area.x) + 0.5) * metrics.width();
             let py = (f32::from(y - area.y) + 0.5) * metrics.height();
-            if px >= frame.x
-                && px < frame.x + frame.width
-                && py >= frame.y
-                && py < frame.y + frame.height
+            if px >= frame.origin.x
+                && px < frame.origin.x + frame.size.width
+                && py >= frame.origin.y
+                && py < frame.origin.y + frame.size.height
             {
                 continue;
             }
-            let distance = (shadow.x - px)
-                .max(px - shadow.x - shadow.width)
-                .max(0.0)
-                .hypot((shadow.y - py).max(py - shadow.y - shadow.height).max(0.0));
-            let factor = if radius > 0.0 {
-                (1.0 - distance / radius).clamp(0.0, 1.0)
+            let distance = (shadow.origin.x - px)
+                .max(px - shadow.origin.x - shadow.size.width)
+                .max(Points::ZERO)
+                .0
+                .hypot(
+                    (shadow.origin.y - py)
+                        .max(py - shadow.origin.y - shadow.size.height)
+                        .max(Points::ZERO)
+                        .0,
+                );
+            let factor = if radius > Points::ZERO {
+                (1.0 - distance / radius.0).clamp(0.0, 1.0)
             } else {
                 f32::from(distance == 0.0)
             };
@@ -2585,7 +2467,7 @@ fn paint_shadow(
 }
 
 fn paint_inset_shadow(
-    frame: Rect,
+    frame: Bounds<Points>,
     clip: CellRect,
     shadow: &nsh_core::BoxShadow,
     opacity: f32,
@@ -2597,12 +2479,12 @@ fn paint_inset_shadow(
     let radius = (shadow.blur * 0.5).max(metrics.width().min(metrics.height()));
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
-            let px = (f32::from(x - area.x) + 0.5) * metrics.width() - frame.x;
-            let py = (f32::from(y - area.y) + 0.5) * metrics.height() - frame.y;
+            let px = (f32::from(x - area.x) + 0.5) * metrics.width() - frame.origin.x;
+            let py = (f32::from(y - area.y) + 0.5) * metrics.height() - frame.origin.y;
             let distance = (px - shadow.offset_x - shadow.spread)
-                .min(frame.width - px + shadow.offset_x - shadow.spread)
+                .min(frame.size.width - px + shadow.offset_x - shadow.spread)
                 .min(py - shadow.offset_y - shadow.spread)
-                .min(frame.height - py + shadow.offset_y - shadow.spread);
+                .min(frame.size.height - py + shadow.offset_y - shadow.spread);
             let factor = (1.0 - distance / radius).clamp(0.0, 1.0);
             let cell = &mut buffer[(x, y)];
             cell.set_bg(blend(
@@ -2617,7 +2499,7 @@ fn paint_inset_shadow(
 
 pub(crate) fn gradient_color(
     gradient: &Gradient,
-    stops: &[(Color, f32)],
+    stops: &[(Color, Percentage)],
     x: f32,
     y: f32,
     width: f32,
@@ -2626,16 +2508,17 @@ pub(crate) fn gradient_color(
     if stops.is_empty() {
         return Color::TRANSPARENT;
     }
-    let mut t = if let Some(angle) = gradient.kind.linear_angle(width, height) {
-        let angle = angle.to_radians();
+    let mut t = if let Some(angle) = gradient.kind.linear_angle(Size::new(px(width), px(height))) {
+        let angle = angle.0;
         let (dx, dy) = (angle.sin(), -angle.cos());
         let length = (width * dx).abs() + (height * dy).abs();
         0.5 + ((x - width * 0.5) * dx + (y - height * 0.5) * dy) / length.max(f32::EPSILON)
     } else {
         match gradient.kind {
             GradientKind::Conic { from, x: cx, y: cy } => {
-                ((x - cx * width).atan2(-(y - cy * height)).to_degrees() - from).rem_euclid(360.0)
-                    / 360.0
+                ((x - cx.0 * width).atan2(-(y - cy.0 * height)) - from.0)
+                    .rem_euclid(std::f32::consts::TAU)
+                    / std::f32::consts::TAU
             }
             GradientKind::Radial {
                 circle,
@@ -2643,7 +2526,7 @@ pub(crate) fn gradient_color(
                 x: cx,
                 y: cy,
             } => {
-                let (cx, cy) = (cx * width, cy * height);
+                let (cx, cy) = (cx.0 * width, cy.0 * height);
                 let near = matches!(
                     size,
                     GradientSize::ClosestSide | GradientSize::ClosestCorner
@@ -2684,24 +2567,24 @@ pub(crate) fn gradient_color(
         }
     };
     if gradient.repeating {
-        let start = stops[0].1;
-        let length = stops.last().map_or(1.0, |s| s.1) - start;
+        let start = stops[0].1.0;
+        let length = stops.last().map_or(1.0, |s| s.1.0) - start;
         if length > 0.0 {
             t = (t - start).rem_euclid(length) + start
         }
     }
-    if t <= stops[0].1 {
+    if t <= stops[0].1.0 {
         return stops[0].0;
     }
     for pair in stops.windows(2) {
         let [(a, start), (b, end)] = pair else {
             unreachable!()
         };
-        if t <= *end {
+        if t <= end.0 {
             return interpolate(
                 *a,
                 *b,
-                ((t - start) / (end - start).max(f32::EPSILON)).clamp(0.0, 1.0),
+                ((t - start.0) / (end.0 - start.0).max(f32::EPSILON)).clamp(0.0, 1.0),
             );
         }
     }
@@ -2854,11 +2737,16 @@ fn rgb(color: CellColor) -> [u8; 3] {
 mod tests {
     use std::sync::Arc;
 
-    use nsh_core::{MountBatch, MountItem, ROOT_ID, ResolvedTextStyle, Size, TextEngine};
+    use nsh_core::{Edges, MountBatch, MountItem, ROOT_ID, ResolvedTextStyle, TextEngine};
 
     use super::*;
 
-    fn mount_node(id: NodeId, kind: ViewKind, parent: NodeId, frame: Rect) -> Vec<MountItem> {
+    fn mount_node(
+        id: NodeId,
+        kind: ViewKind,
+        parent: NodeId,
+        frame: Bounds<Points>,
+    ) -> Vec<MountItem> {
         let mut items = vec![
             MountItem::Create { id, kind },
             MountItem::Frame { id, frame },
@@ -2886,33 +2774,25 @@ mod tests {
             2,
             ViewKind::View,
             ROOT_ID,
-            Rect {
-                width: 160.0,
-                height: 128.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(160.0), px(128.0)),
+            ),
         );
         items.extend(mount_node(
             4,
             ViewKind::Image,
             2,
-            Rect {
-                x: 8.0,
-                y: 16.0,
-                width: 16.0,
-                height: 32.0,
-            },
+            Bounds::new(Point::new(px(8.0), px(16.0)), Size::new(px(16.0), px(32.0))),
         ));
         items.extend(mount_node(
             6,
             ViewKind::Canvas,
             2,
-            Rect {
-                x: 40.0,
-                y: 16.0,
-                width: 32.0,
-                height: 32.0,
-            },
+            Bounds::new(
+                Point::new(px(40.0), px(16.0)),
+                Size::new(px(32.0), px(32.0)),
+            ),
         ));
         surface.apply(MountBatch { items });
         let raster = Arc::new(crate::image::Raster {
@@ -2984,26 +2864,20 @@ mod tests {
             8,
             ViewKind::Text,
             ROOT_ID,
-            Rect {
-                x: 8.0,
-                y: 16.0,
-                width: 8.0,
-                height: 16.0,
-            },
+            Bounds::new(Point::new(px(8.0), px(16.0)), Size::new(px(8.0), px(16.0))),
         );
         let mut text = nsh_core::AttributedText::default();
         text.push("X", ResolvedTextStyle::default());
         let engine = crate::TerminalTextEngine::default();
-        let layout = engine.layout(&engine.prepare(&text), Size::new(8.0, 16.0));
+        let layout = engine.layout(&engine.prepare(&text), Size::new(px(8.0), px(16.0)));
         items.push(MountItem::Text {
             id: 8,
             text: Arc::new(text),
             layout,
-            content: Rect {
-                width: 8.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            content: Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(8.0), px(16.0)),
+            ),
         });
         surface.apply(MountBatch { items });
         surface.render(area, &mut buffer);
@@ -3024,11 +2898,10 @@ mod tests {
                 10,
                 ViewKind::Modal,
                 ROOT_ID,
-                Rect {
-                    width: 160.0,
-                    height: 128.0,
-                    ..Rect::default()
-                },
+                Bounds::new(
+                    Point::new(Points::ZERO, Points::ZERO),
+                    Size::new(px(160.0), px(128.0)),
+                ),
             ),
         });
         surface.render(area, &mut buffer);
@@ -3062,16 +2935,14 @@ mod tests {
             },
             MountItem::Frame {
                 id: 8,
-                frame: Rect {
-                    width: 160.0,
-                    height: 128.0,
-                    ..Rect::default()
-                },
+                frame: Bounds::new(
+                    Point::new(Points::ZERO, Points::ZERO),
+                    Size::new(px(160.0), px(128.0)),
+                ),
             },
             MountItem::ModalConfig {
                 id: 8,
                 config: nsh_core::ModalConfig {
-                    transparent: true,
                     animation: nsh_core::ModalAnimation::Fade,
                     ..nsh_core::ModalConfig::default()
                 },
@@ -3086,25 +2957,22 @@ mod tests {
             10,
             ViewKind::Text,
             8,
-            Rect {
-                x: 8.0,
-                y: 16.0,
-                width: 112.0,
-                height: 16.0,
-            },
+            Bounds::new(
+                Point::new(px(8.0), px(16.0)),
+                Size::new(px(112.0), px(16.0)),
+            ),
         ));
         let mut text = nsh_core::AttributedText::default();
         text.push("Deploy service", ResolvedTextStyle::default());
         let engine = crate::TerminalTextEngine::default();
         items.push(MountItem::Text {
             id: 10,
-            layout: engine.layout(&engine.prepare(&text), Size::new(112.0, 16.0)),
+            layout: engine.layout(&engine.prepare(&text), Size::new(px(112.0), px(16.0))),
             text: Arc::new(text),
-            content: Rect {
-                width: 112.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            content: Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(112.0), px(16.0)),
+            ),
         });
         surface.apply(MountBatch { items });
         let mut current = Buffer::empty(area);
@@ -3150,9 +3018,9 @@ mod tests {
 
     #[test]
     fn focusing_short_rows_keeps_kitty_images_and_canvas_tiles_intact() {
-        for height in [16.0, 32.0] {
+        for height in [px(16.0), px(32.0)] {
             let mut surface = protocol_scene(crate::ProtocolType::Kitty);
-            surface.node_mut(2).unwrap().frame.height = height;
+            surface.node_mut(2).unwrap().frame.size.height = height;
             surface.node_mut(2).unwrap().props.accessibility.role = AccessibilityRole::Button;
             surface
                 .node_mut(2)
@@ -3161,33 +3029,27 @@ mod tests {
                 .set(EventKind::Press, true);
             for id in [4, 6] {
                 let node = surface.node_mut(id).unwrap();
-                node.frame.y = 0.0;
-                node.frame.height = height;
+                node.frame.origin.y = Points::ZERO;
+                node.frame.size.height = height;
             }
             let mut items = mount_node(
                 8,
                 ViewKind::Text,
                 2,
-                Rect {
-                    x: 88.0,
-                    y: 0.0,
-                    width: 48.0,
-                    height: 16.0,
-                },
+                Bounds::new(Point::new(px(88.0), px(0.0)), Size::new(px(48.0), px(16.0))),
             );
             let mut text = nsh_core::AttributedText::default();
             text.push("Row", ResolvedTextStyle::default());
             let engine = crate::TerminalTextEngine::default();
-            let layout = engine.layout(&engine.prepare(&text), Size::new(48.0, 16.0));
+            let layout = engine.layout(&engine.prepare(&text), Size::new(px(48.0), px(16.0)));
             items.push(MountItem::Text {
                 id: 8,
                 text: Arc::new(text),
                 layout,
-                content: Rect {
-                    width: 48.0,
-                    height: 16.0,
-                    ..Rect::default()
-                },
+                content: Bounds::new(
+                    Point::new(Points::ZERO, Points::ZERO),
+                    Size::new(px(48.0), px(16.0)),
+                ),
             });
             surface.apply(MountBatch { items });
             surface.focus = None;
@@ -3227,11 +3089,10 @@ mod tests {
                     10,
                     ViewKind::Modal,
                     ROOT_ID,
-                    Rect {
-                        width: 160.0,
-                        height: 128.0,
-                        ..Rect::default()
-                    },
+                    Bounds::new(
+                        Point::new(Points::ZERO, Points::ZERO),
+                        Size::new(px(160.0), px(128.0)),
+                    ),
                 ),
             });
             surface.render(area, &mut buffer);
@@ -3268,34 +3129,32 @@ mod tests {
     }
 
     #[test]
-    fn raster_groups_apply_native_press_opacity_once_and_keep_scroll_indicators() {
+    fn raster_groups_apply_resolved_opacity_once_and_keep_scroll_indicators() {
         let mut surface = Surface::new(8, 4, CellMetrics::default());
         let mut items = mount_node(
             2,
             ViewKind::View,
             ROOT_ID,
-            Rect {
-                width: 64.0,
-                height: 64.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(64.0), px(64.0)),
+            ),
         );
-        items.push(MountItem::ViewProps {
+        items.push(MountItem::ViewStyle {
             id: 2,
-            props: Box::new(nsh_core::ViewProps {
-                active_opacity: Some(0.5),
-                ..nsh_core::ViewProps::default()
+            style: Box::new(ViewStyle {
+                opacity: 0.5,
+                ..ViewStyle::default()
             }),
         });
         items.extend(mount_node(
             4,
             ViewKind::View,
             2,
-            Rect {
-                width: 32.0,
-                height: 32.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(32.0), px(32.0)),
+            ),
         ));
         items.push(MountItem::ViewStyle {
             id: 4,
@@ -3305,7 +3164,6 @@ mod tests {
             }),
         });
         surface.apply(MountBatch { items });
-        surface.pressed = Some(2);
         let area = CellRect::new(0, 0, 8, 4);
         let plans = surface.composite_plans(&surface.paint_ids(), area);
         let scene = surface
@@ -3324,20 +3182,19 @@ mod tests {
             2,
             ViewKind::Scroll,
             ROOT_ID,
-            Rect {
-                width: 32.0,
-                height: 64.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(32.0), px(64.0)),
+            ),
         );
         items.push(MountItem::ScrollContent {
             id: 2,
-            size: Size::new(32.0, 256.0),
+            size: Size::new(px(32.0), px(256.0)),
         });
         items.push(MountItem::ViewStyle {
             id: 2,
             style: Box::new(ViewStyle {
-                border_radius: 8.0,
+                border_radius: px(8.0),
                 overflow_hidden: true,
                 ..ViewStyle::default()
             }),
@@ -3360,7 +3217,7 @@ mod tests {
     #[test]
     fn rounded_images_clip_their_pixels_and_deep_groups_keep_the_plain_fallback() {
         let mut surface = protocol_scene(crate::ProtocolType::Halfblocks);
-        surface.node_mut(4).unwrap().style.border_radius = 8.0;
+        surface.node_mut(4).unwrap().style.border_radius = px(8.0);
         let area = CellRect::new(0, 0, 20, 8);
         let ids = surface.paint_ids();
         let plans = surface.composite_plans(&ids, area);
@@ -3392,11 +3249,10 @@ mod tests {
                 id,
                 ViewKind::View,
                 if index == 0 { ROOT_ID } else { id - 2 },
-                Rect {
-                    width: 64.0,
-                    height: 32.0,
-                    ..Rect::default()
-                },
+                Bounds::new(
+                    Point::new(Points::ZERO, Points::ZERO),
+                    Size::new(px(64.0), px(32.0)),
+                ),
             ));
         }
         items.push(MountItem::ViewStyle {
@@ -3410,24 +3266,22 @@ mod tests {
             72,
             ViewKind::Text,
             68,
-            Rect {
-                width: 32.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(32.0), px(16.0)),
+            ),
         ));
         let mut text = nsh_core::AttributedText::default();
         text.push("Deep", ResolvedTextStyle::default());
         let engine = crate::TerminalTextEngine::default();
         items.push(MountItem::Text {
             id: 72,
-            layout: engine.layout(&engine.prepare(&text), Size::new(32.0, 16.0)),
+            layout: engine.layout(&engine.prepare(&text), Size::new(px(32.0), px(16.0))),
             text: Arc::new(text),
-            content: Rect {
-                width: 32.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            content: Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(32.0), px(16.0)),
+            ),
         });
         deep.apply(MountBatch { items });
         deep.focus = None;
@@ -3450,20 +3304,18 @@ mod tests {
             2,
             ViewKind::View,
             ROOT_ID,
-            Rect {
-                x: 24.0,
-                y: 16.0,
-                width: 16.0,
-                height: 16.0,
-            },
+            Bounds::new(
+                Point::new(px(24.0), px(16.0)),
+                Size::new(px(16.0), px(16.0)),
+            ),
         );
         items.push(MountItem::ViewStyle {
             id: 2,
             style: Box::new(ViewStyle {
                 overflow_hidden: true,
-                border_radius: 4.0,
+                border_radius: px(4.0),
                 effects: Some(Arc::new(nsh_core::Effects {
-                    backdrop_filters: vec![nsh_core::Filter::Blur(8.0)],
+                    backdrop_filters: vec![nsh_core::Filter::Blur(px(8.0))],
                     ..nsh_core::Effects::default()
                 })),
                 ..ViewStyle::default()
@@ -3473,7 +3325,7 @@ mod tests {
         let area = CellRect::new(0, 0, 8, 4);
         let ids = surface.paint_ids();
         let plans = surface.composite_plans(&ids, area);
-        assert!(plans[0].bounds.x <= 16.0);
+        assert!(plans[0].bounds.origin.x.0 <= 16.0);
         let mut background = Buffer::empty(area);
         for cell in &mut background.content {
             cell.set_bg(CellColor::Rgb(0, 0, 0));
@@ -3485,8 +3337,8 @@ mod tests {
             .composite_scene(&plans[0], &ids, area, &background)
             .unwrap();
         let raster = crate::composite::rasterize(&scene, &surface.fonts).unwrap();
-        let x = (24.0 - scene.bounds.x) as usize;
-        let y = (24.0 - scene.bounds.y) as usize;
+        let x = (24.0 - scene.bounds.origin.x.0) as usize;
+        let y = (24.0 - scene.bounds.origin.y.0) as usize;
         assert!(
             raster.rgba[(y * raster.width as usize + x) * 4] > 0,
             "rounded clipped backdrops must include the bright strip outside the box"
@@ -3501,23 +3353,21 @@ mod tests {
                 2,
                 ViewKind::View,
                 ROOT_ID,
-                Rect {
-                    x: 24.0,
-                    y: 16.0,
-                    width: 16.0,
-                    height: 16.0,
-                },
+                Bounds::new(
+                    Point::new(px(24.0), px(16.0)),
+                    Size::new(px(16.0), px(16.0)),
+                ),
             );
             let mut style = ViewStyle {
                 overflow_hidden: true,
-                border_radius: 4.0,
+                border_radius: px(4.0),
                 background_color: Color(0xff00_00ff),
                 ..ViewStyle::default()
             };
             let (x, expected) = if outline {
                 style.outline = nsh_core::Outline {
-                    width: 2.0,
-                    offset: 2.0,
+                    width: px(2.0),
+                    offset: px(2.0),
                     color: Color(0x0000_ffff),
                     ..nsh_core::Outline::default()
                 };
@@ -3525,9 +3375,9 @@ mod tests {
             } else {
                 style.shadow = nsh_core::Shadow {
                     color: Color::BLACK,
-                    offset_x: 8.0,
-                    offset_y: 0.0,
-                    radius: 0.0,
+                    offset_x: px(8.0),
+                    offset_y: px(0.0),
+                    radius: px(0.0),
                     opacity: 1.0,
                 };
                 (45.0, [0, 0, 0, 255])
@@ -3543,10 +3393,13 @@ mod tests {
             let scene = surface
                 .composite_scene(&plans[0], &ids, area, &white_buffer(area))
                 .unwrap();
-            assert!(x >= scene.bounds.x && x < scene.bounds.x + scene.bounds.width);
+            assert!(
+                x >= scene.bounds.origin.x.0
+                    && x < scene.bounds.origin.x.0 + scene.bounds.size.width.0
+            );
             let raster = crate::composite::rasterize(&scene, &surface.fonts).unwrap();
-            let x = (x - scene.bounds.x) as usize;
-            let y = (24.0 - scene.bounds.y) as usize;
+            let x = (x - scene.bounds.origin.x.0) as usize;
+            let y = (24.0 - scene.bounds.origin.y.0) as usize;
             assert_eq!(
                 &raster.rgba[(y * raster.width as usize + x) * 4..][..4],
                 &expected
@@ -3561,11 +3414,10 @@ mod tests {
             2,
             ViewKind::View,
             ROOT_ID,
-            Rect {
-                width: 80.0,
-                height: 32.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(80.0), px(32.0)),
+            ),
         );
         items.push(MountItem::ViewProps {
             id: 2,
@@ -3591,24 +3443,22 @@ mod tests {
             4,
             ViewKind::Text,
             2,
-            Rect {
-                width: 40.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(40.0), px(16.0)),
+            ),
         ));
         let mut text = nsh_core::AttributedText::default();
         text.push("Focus", ResolvedTextStyle::default());
         let engine = crate::TerminalTextEngine::default();
         items.push(MountItem::Text {
             id: 4,
-            layout: engine.layout(&engine.prepare(&text), Size::new(40.0, 16.0)),
+            layout: engine.layout(&engine.prepare(&text), Size::new(px(40.0), px(16.0))),
             text: Arc::new(text),
-            content: Rect {
-                width: 40.0,
-                height: 16.0,
-                ..Rect::default()
-            },
+            content: Bounds::new(
+                Point::new(Points::ZERO, Points::ZERO),
+                Size::new(px(40.0), px(16.0)),
+            ),
         });
         surface.apply(MountBatch { items });
         let area = CellRect::new(0, 0, 10, 2);
@@ -3632,85 +3482,23 @@ mod tests {
     }
 
     #[test]
-    fn large_headers_collapse_and_refresh_feedback_stays_visible_without_indicators() {
-        let mut surface = Surface::new(40, 6, CellMetrics::default());
-        let viewport = Rect {
-            width: 320.0,
-            height: 96.0,
-            ..Rect::default()
-        };
-        let mut items = mount_node(2, ViewKind::Stack, ROOT_ID, viewport);
-        for (id, title, large) in [(4, "Fleet", false), (6, "Billing", true)] {
-            items.extend([
-                MountItem::Create {
-                    id,
-                    kind: ViewKind::Screen,
-                },
-                MountItem::Frame {
-                    id,
-                    frame: viewport,
-                },
-                MountItem::ScreenConfig {
-                    id,
-                    config: Box::new(nsh_core::ScreenConfig {
-                        title: Some(Arc::from(title)),
-                        back_title: Some(Arc::from("Home")),
-                        large_title: large,
-                        header_height: if large { 32.0 } else { 16.0 },
-                        animation: nsh_core::ScreenAnimation::None,
-                        ..nsh_core::ScreenConfig::default()
-                    }),
-                },
-                MountItem::Insert {
-                    parent: 2,
-                    child: id,
-                    before: None,
-                },
-            ]);
-        }
-        items.extend(mount_node(
-            8,
-            ViewKind::Scroll,
-            6,
-            Rect {
-                x: 0.0,
-                y: 32.0,
-                width: 320.0,
-                height: 64.0,
-            },
-        ));
-        items.push(MountItem::ScrollContent {
-            id: 8,
-            size: Size::new(320.0, 512.0),
-        });
-        surface.apply(MountBatch { items });
-        surface.node_mut(8).unwrap().scroll.shows_indicator = false;
-        surface.focus = None;
-        let expanded = surface.snapshot();
-        assert!(expanded.lines().next().unwrap().contains("‹ Home"));
-        assert!(expanded.lines().nth(1).unwrap().contains("Billing"));
-        surface.scroll_to(8, 0.0, 16.0);
-        let compact = surface.snapshot();
-        assert!(compact.lines().next().unwrap().contains("Billing"));
-        assert!(!compact.lines().nth(1).unwrap().contains("Billing"));
-
+    fn refresh_feedback_stays_visible_without_indicators() {
         let mut refresh = Surface::new(20, 6, CellMetrics::default());
         refresh.apply(MountBatch {
             items: mount_node(
                 2,
                 ViewKind::Scroll,
                 ROOT_ID,
-                Rect {
-                    width: 160.0,
-                    height: 96.0,
-                    ..Rect::default()
-                },
+                Bounds::new(
+                    Point::new(Points::ZERO, Points::ZERO),
+                    Size::new(px(160.0), px(96.0)),
+                ),
             ),
         });
         let scroll = &mut refresh.node_mut(2).unwrap().scroll;
         scroll.shows_indicator = false;
         scroll.physics.refreshing = true;
-        scroll.y = -48.0;
+        scroll.y = px(-48.0);
         refresh.focus = None;
         assert!(refresh.snapshot().contains("Refreshing"));
     }
@@ -3722,46 +3510,31 @@ mod tests {
             2,
             ViewKind::Scroll,
             ROOT_ID,
-            Rect {
-                x: 8.0,
-                y: 16.0,
-                width: 32.0,
-                height: 16.0,
-            },
+            Bounds::new(Point::new(px(8.0), px(16.0)), Size::new(px(32.0), px(16.0))),
         );
         items.push(MountItem::ScrollContent {
             id: 2,
-            size: Size::new(64.0, 16.0),
+            size: Size::new(px(64.0), px(16.0)),
         });
         items.extend(mount_node(
             4,
             ViewKind::Text,
             2,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 64.0,
-                height: 16.0,
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(64.0), px(16.0))),
         ));
         let mut text = nsh_core::AttributedText::default();
         text.push("abcdefgh", ResolvedTextStyle::default());
         let engine = crate::TerminalTextEngine::default();
-        let layout = engine.layout(&engine.prepare(&text), Size::new(64.0, 16.0));
+        let layout = engine.layout(&engine.prepare(&text), Size::new(px(64.0), px(16.0)));
         items.push(MountItem::Text {
             id: 4,
             text: Arc::new(text),
             layout,
-            content: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 64.0,
-                height: 16.0,
-            },
+            content: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(64.0), px(16.0))),
         });
         surface.apply(MountBatch { items });
         surface.node_mut(2).unwrap().scroll.shows_indicator = false;
-        surface.scroll_to(2, 8.0, 0.0);
+        surface.scroll_to(2, px(8.0), px(0.0));
         surface.focus = None;
         let mut buffer = Buffer::empty(CellRect::new(0, 0, 12, 5));
         for cell in &mut buffer.content {
@@ -3783,12 +3556,7 @@ mod tests {
             2,
             ViewKind::Input,
             ROOT_ID,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 48.0,
-                height: 16.0,
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(48.0), px(16.0))),
         );
         items.push(MountItem::InputValue {
             id: 2,
@@ -3814,33 +3582,49 @@ mod tests {
     }
 
     #[test]
+    fn screens_cover_presenters_while_dialog_layers_preserve_their_pixels() {
+        for (kind, expected) in [
+            (ViewKind::Screen, CellColor::Rgb(255, 255, 255)),
+            (ViewKind::Modal, CellColor::Rgb(0, 0, 255)),
+        ] {
+            let mut surface = Surface::new(8, 4, CellMetrics::default());
+            let frame = Bounds::new(Point::default(), Size::new(px(64.0), px(64.0)));
+            let mut items = mount_node(2, ViewKind::View, ROOT_ID, frame);
+            items.push(MountItem::ViewStyle {
+                id: 2,
+                style: Box::new(ViewStyle {
+                    background_color: Color(0x0000_ffff),
+                    ..ViewStyle::default()
+                }),
+            });
+            items.extend(mount_node(4, kind, ROOT_ID, frame));
+            surface.apply(MountBatch { items });
+            surface.focus = None;
+            let area = CellRect::new(0, 0, 8, 4);
+            let mut buffer = Buffer::empty(area);
+            surface.render(area, &mut buffer);
+            assert!(buffer.content.iter().all(|cell| cell.bg == expected));
+        }
+    }
+
+    #[test]
     fn a_modal_covers_presenter_scroll_indicators() {
         let mut surface = Surface::new(8, 4, CellMetrics::default());
         let mut items = mount_node(
             2,
             ViewKind::Scroll,
             ROOT_ID,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 64.0,
-                height: 64.0,
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(64.0), px(64.0))),
         );
         items.push(MountItem::ScrollContent {
             id: 2,
-            size: Size::new(64.0, 640.0),
+            size: Size::new(px(64.0), px(640.0)),
         });
         items.extend(mount_node(
             4,
             ViewKind::Modal,
             ROOT_ID,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 64.0,
-                height: 64.0,
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(64.0), px(64.0))),
         ));
         items.push(MountItem::ViewStyle {
             id: 4,
@@ -3869,12 +3653,7 @@ mod tests {
             2,
             ViewKind::Input,
             ROOT_ID,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 80.0,
-                height: 48.0,
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(80.0), px(48.0))),
         );
         items.push(MountItem::Input {
             id: 2,
@@ -3916,37 +3695,25 @@ mod tests {
     #[test]
     fn nested_modal_uses_viewport_scene_above_later_presenter_siblings() {
         let mut surface = Surface::new(12, 6, CellMetrics::default());
-        let viewport = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 96.0,
-            height: 96.0,
-        };
+        let viewport = Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(96.0), px(96.0)));
         let mut items = mount_node(
             2,
             ViewKind::Scroll,
             ROOT_ID,
-            Rect {
-                x: 16.0,
-                y: 16.0,
-                width: 32.0,
-                height: 32.0,
-            },
+            Bounds::new(
+                Point::new(px(16.0), px(16.0)),
+                Size::new(px(32.0), px(32.0)),
+            ),
         );
         items.push(MountItem::ScrollContent {
             id: 2,
-            size: Size::new(160.0, 160.0),
+            size: Size::new(px(160.0), px(160.0)),
         });
         items.extend(mount_node(
             4,
             ViewKind::View,
             2,
-            Rect {
-                x: 8.0,
-                y: 8.0,
-                width: 16.0,
-                height: 16.0,
-            },
+            Bounds::new(Point::new(px(8.0), px(8.0)), Size::new(px(16.0), px(16.0))),
         ));
         items.push(MountItem::ViewStyle {
             id: 4,
@@ -3968,27 +3735,17 @@ mod tests {
             8,
             ViewKind::Text,
             6,
-            Rect {
-                x: 8.0,
-                y: 16.0,
-                width: 80.0,
-                height: 16.0,
-            },
+            Bounds::new(Point::new(px(8.0), px(16.0)), Size::new(px(80.0), px(16.0))),
         ));
         let mut text = nsh_core::AttributedText::default();
         text.push("Modal", ResolvedTextStyle::default());
         let engine = crate::TerminalTextEngine::default();
-        let layout = engine.layout(&engine.prepare(&text), Size::new(80.0, 16.0));
+        let layout = engine.layout(&engine.prepare(&text), Size::new(px(80.0), px(16.0)));
         items.push(MountItem::Text {
             id: 8,
             text: Arc::new(text),
             layout,
-            content: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 80.0,
-                height: 16.0,
-            },
+            content: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(80.0), px(16.0))),
         });
         items.extend(mount_node(10, ViewKind::View, ROOT_ID, viewport));
         items.push(MountItem::ViewStyle {
@@ -3999,7 +3756,7 @@ mod tests {
             }),
         });
         surface.apply(MountBatch { items });
-        surface.scroll_to(2, 8.0, 16.0);
+        surface.scroll_to(2, px(8.0), px(16.0));
         surface.focus = None;
         let mut buffer = Buffer::empty(CellRect::new(0, 0, 12, 6));
         surface.render(buffer.area, &mut buffer);
@@ -4023,19 +3780,14 @@ mod tests {
             2,
             ViewKind::View,
             ROOT_ID,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 80.0,
-                height: 64.0,
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(80.0), px(64.0))),
         );
         items.push(MountItem::ViewStyle {
             id: 2,
             style: Box::new(ViewStyle {
-                border_radius: 8.0,
+                border_radius: px(8.0),
                 borders: nsh_core::Borders {
-                    widths: [1.0; 4],
+                    widths: Edges::all(px(1.0)),
                     colors: [Color::BLACK; 4],
                     style: BorderStyle::Solid,
                 },
@@ -4046,12 +3798,7 @@ mod tests {
             6,
             ViewKind::View,
             2,
-            Rect {
-                x: 1.0,
-                y: 1.0,
-                width: 78.0,
-                height: 62.0,
-            },
+            Bounds::new(Point::new(px(1.0), px(1.0)), Size::new(px(78.0), px(62.0))),
         ));
         items.push(MountItem::ViewStyle {
             id: 6,
@@ -4064,27 +3811,17 @@ mod tests {
             4,
             ViewKind::Text,
             2,
-            Rect {
-                x: 0.0,
-                y: 4.0,
-                width: 80.0,
-                height: 16.0,
-            },
+            Bounds::new(Point::new(px(0.0), px(4.0)), Size::new(px(80.0), px(16.0))),
         ));
         let mut text = nsh_core::AttributedText::default();
         text.push("中 press", ResolvedTextStyle::default());
         let engine = crate::TerminalTextEngine::default();
-        let layout = engine.layout(&engine.prepare(&text), Size::new(80.0, 16.0));
+        let layout = engine.layout(&engine.prepare(&text), Size::new(px(80.0), px(16.0)));
         items.push(MountItem::Text {
             id: 4,
             text: Arc::new(text),
             layout,
-            content: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 80.0,
-                height: 16.0,
-            },
+            content: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(80.0), px(16.0))),
         });
         surface.apply(MountBatch { items });
         surface.focus = Some(2);
@@ -4110,44 +3847,27 @@ mod tests {
                 2,
                 ViewKind::Image,
                 ROOT_ID,
-                Rect {
-                    x: 8.0,
-                    y: 0.0,
-                    width: 64.0,
-                    height: 64.0,
-                },
+                Bounds::new(Point::new(px(8.0), px(0.0)), Size::new(px(64.0), px(64.0))),
             ),
         });
         let source = nsh_core::ImageSource {
             uri: Arc::from("asset:/photo@2x.png"),
-            size: Some((16.0, 32.0)),
+            size: Some(Size::new(px(16.0), px(32.0))),
         };
-        let frame = Rect {
-            x: 8.0,
-            y: 0.0,
-            width: 64.0,
-            height: 64.0,
-        };
+        let frame = Bounds::new(Point::new(px(8.0), px(0.0)), Size::new(px(64.0), px(64.0)));
         let (image, clip, mode) = image_geometry(
             &source,
             ResizeMode::Center,
-            nsh_core::Size::new(64.0, 64.0),
+            Size::new(px(64.0), px(64.0)),
             frame,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 80.0,
-                height: 64.0,
-            },
+            Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(80.0), px(64.0))),
         );
         assert_eq!(
             image,
-            Rect {
-                x: 32.0,
-                y: 16.0,
-                width: 16.0,
-                height: 32.0
-            }
+            Bounds::new(
+                Point::new(px(32.0), px(16.0)),
+                Size::new(px(16.0), px(32.0))
+            )
         );
         assert_eq!(clip, frame);
         assert_eq!(mode, ResizeMode::Stretch);
@@ -4159,12 +3879,10 @@ mod tests {
         let area = CellRect::new(7, 3, 10, 4);
         assert_eq!(
             cells(
-                Rect {
-                    x: -16.0,
-                    y: 0.0,
-                    width: 24.0,
-                    height: 16.0
-                },
+                Bounds::new(
+                    Point::new(px(-16.0), px(0.0)),
+                    Size::new(px(24.0), px(16.0))
+                ),
                 metrics,
                 area
             ),
@@ -4172,12 +3890,7 @@ mod tests {
         );
         assert_eq!(
             cells(
-                Rect {
-                    x: 0.0,
-                    y: -32.0,
-                    width: 8.0,
-                    height: 16.0
-                },
+                Bounds::new(Point::new(px(0.0), px(-32.0)), Size::new(px(8.0), px(16.0))),
                 metrics,
                 area
             )
@@ -4235,7 +3948,9 @@ mod tests {
     #[test]
     fn gradient_samples_follow_css_direction() {
         let gradient = Gradient {
-            kind: GradientKind::Linear { angle: 90.0 },
+            kind: GradientKind::Linear {
+                angle: nsh_core::geometry::deg(90.0),
+            },
             stops: vec![
                 nsh_core::ColorStop {
                     color: Color(0xff00_00ff),
@@ -4248,7 +3963,7 @@ mod tests {
             ],
             repeating: false,
         };
-        let stops = gradient.resolved_stops();
+        let stops = gradient.resolved_stops(Size::new(px(80.0), px(16.0)));
         assert_eq!(
             gradient_color(&gradient, &stops, 0.0, 8.0, 80.0, 16.0),
             Color(0xff00_00ff)
@@ -4324,8 +4039,10 @@ mod tests {
 mod native_color_tests {
     use std::sync::Arc;
 
-    use nsh_animation::{AnimationOp, AnimationProp, Easing, Extrapolate, Output};
-    use nsh_core::{MountBatch, MountItem, ROOT_ID, ResolvedTextStyle, Size, TextEngine};
+    use nsh_core::{
+        MountBatch, MountItem, ROOT_ID, ResolvedTextStyle, TextEngine,
+        animation::{AnimationOp, AnimationProp, Easing, Extrapolate, Output},
+    };
 
     use super::*;
 
@@ -4335,7 +4052,7 @@ mod native_color_tests {
         let mut text = nsh_core::AttributedText::default();
         text.push("color", ResolvedTextStyle::default());
         let engine = crate::TerminalTextEngine::default();
-        let layout = engine.layout(&engine.prepare(&text), Size::new(40.0, 16.0));
+        let layout = engine.layout(&engine.prepare(&text), Size::new(px(40.0), px(16.0)));
         surface.apply(MountBatch {
             items: vec![
                 MountItem::Create {
@@ -4344,11 +4061,10 @@ mod native_color_tests {
                 },
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        width: 40.0,
-                        height: 16.0,
-                        ..Rect::default()
-                    },
+                    frame: Bounds::new(
+                        Point::new(Points::ZERO, Points::ZERO),
+                        Size::new(px(40.0), px(16.0)),
+                    ),
                 },
                 MountItem::Insert {
                     parent: ROOT_ID,
@@ -4359,11 +4075,10 @@ mod native_color_tests {
                     id: 2,
                     text: Arc::new(text),
                     layout,
-                    content: Rect {
-                        width: 40.0,
-                        height: 16.0,
-                        ..Rect::default()
-                    },
+                    content: Bounds::new(
+                        Point::new(Points::ZERO, Points::ZERO),
+                        Size::new(px(40.0), px(16.0)),
+                    ),
                 },
                 MountItem::Animation(AnimationOp::CreateValue {
                     node: 1,

@@ -3,12 +3,11 @@
 //! ([`decode_animation_op`], as `nsh/animated` encodes them) and JSON
 //! ([`to_json`]).
 
-use nsh_animation::{
-    AnimationOp, AnimationProp, Driver, Easing, Extrapolate, MathOp, Operand, Output,
-};
 use nsh_core::{
     Color, Command, EventKind, LayoutAnimation, NodeId, Op, Prop, Style, StyleDecl, StyleError,
     StylePatch, StyleValue, TransformKind,
+    animation::{AnimationOp, AnimationProp, Driver, Easing, Extrapolate, MathOp, Operand, Output},
+    geometry::{Percentage, Points, point, px},
     js::{
         host::{HostCx, HostInput, HostList, HostProps, HostValue},
         protocol::*,
@@ -190,8 +189,8 @@ pub(crate) fn decode_command<'js>(
                 animated: o
                     .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
                     .unwrap_or(true),
-                view_position: f("viewPosition")?.unwrap_or(0.0),
-                view_offset: f("viewOffset")?.unwrap_or(0.0),
+                view_position: Percentage(f("viewPosition")?.unwrap_or(0.0)),
+                view_offset: Points(f("viewOffset")?.unwrap_or(0.0)),
             }
         }
         "scrollToEnd" => Command::ScrollToEnd {
@@ -213,7 +212,7 @@ pub(crate) fn decode_command<'js>(
                 scale: field("scale").unwrap_or(1.0) as f32,
                 center: field("x")
                     .zip(field("y"))
-                    .map(|(x, y)| (x as f32, y as f32)),
+                    .map(|(x, y)| point(Points(x as f32), Points(y as f32))),
                 animated: arg
                     .as_object()
                     .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
@@ -226,8 +225,8 @@ pub(crate) fn decode_command<'js>(
                     .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
             };
             Command::ScrollTo {
-                x: field("x").unwrap_or(0.0) as f32,
-                y: field("y").unwrap_or(0.0) as f32,
+                x: Points(field("x").unwrap_or(0.0) as f32),
+                y: Points(field("y").unwrap_or(0.0) as f32),
                 animated: arg
                     .as_object()
                     .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
@@ -239,7 +238,7 @@ pub(crate) fn decode_command<'js>(
 }
 
 /// Reads the node id of an animated value object (`{ __av: id }`).
-fn animated_value(value: &Value<'_>) -> Option<nsh_animation::NodeId> {
+fn animated_value(value: &Value<'_>) -> Option<nsh_core::animation::NodeId> {
     value
         .as_object()?
         .get::<_, Option<u32>>("__av")
@@ -373,7 +372,7 @@ pub(crate) fn decode_prop<'js>(
     match decoded {
         Some(prop) => Ok(prop.map(|prop| Op::SetProp { id, prop })),
         None => {
-            if let Some(event) = EventKind::from_prop(name) {
+            if let Some(event) = EventKind::from_handler(name) {
                 return Ok(Some(Op::Listen {
                     id,
                     event,
@@ -457,9 +456,9 @@ fn decode_style<'js>(
         }
         if key == "textShadowOffset" {
             let offset = match value.as_object() {
-                Some(o) => Some((
-                    o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32,
-                    o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32,
+                Some(o) => Some(point(
+                    px(o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32),
+                    px(o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32),
                 )),
                 None => None,
             };
@@ -469,9 +468,9 @@ fn decode_style<'js>(
         if key == "shadowOffset" {
             // `{ width, height }`; null / undefined restores the default.
             let offset = match value.as_object() {
-                Some(o) => Some((
-                    o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32,
-                    o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32,
+                Some(o) => Some(point(
+                    px(o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32),
+                    px(o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32),
                 )),
                 None if value.is_null() || value.is_undefined() => None,
                 None => {
@@ -595,14 +594,14 @@ fn parse_angle(s: &str) -> Option<f32> {
 
 fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
     let sub = r.int()?;
-    let node = r.int()? as nsh_animation::NodeId;
+    let node = r.int()? as nsh_core::animation::NodeId;
     Ok(match sub {
         ANIMATION_VALUE => AnimationOp::CreateValue {
             node,
             value: r.number()?,
         },
         ANIMATION_INTERPOLATE => {
-            let input = r.int()? as nsh_animation::NodeId;
+            let input = r.int()? as nsh_core::animation::NodeId;
             let input_range = r.numbers()?;
             let outputs = r.value()?;
             let output = decode_output(r, &outputs)?;
@@ -626,7 +625,7 @@ fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
         }
         ANIMATION_DIFF_CLAMP => AnimationOp::CreateDiffClamp {
             node,
-            input: r.int()? as nsh_animation::NodeId,
+            input: r.int()? as nsh_core::animation::NodeId,
             min: r.number()?,
             max: r.number()?,
         },
@@ -660,7 +659,7 @@ fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
             value: r.number()?,
         },
         ANIMATION_START => {
-            let animation = r.int()? as nsh_animation::AnimationId;
+            let animation = r.int()? as nsh_core::animation::AnimationId;
             let config = r.value()?;
             let driver = decode_driver(r.ctx, &config)?;
             AnimationOp::Start {
@@ -679,7 +678,7 @@ fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
         ANIMATION_EXTRACT_OFFSET => AnimationOp::ExtractOffset { node },
         ANIMATION_READ => AnimationOp::Read {
             node,
-            request: r.int()? as nsh_animation::AnimationId,
+            request: r.int()? as nsh_core::animation::AnimationId,
         },
         other => {
             return Err(Exception::throw_type(
@@ -803,8 +802,8 @@ fn decode_composite(
     r: &Reader<'_, '_>,
     spec: &Value<'_>,
     depth: u32,
-) -> rquickjs::Result<nsh_animation::Composite> {
-    use nsh_animation::Composite;
+) -> rquickjs::Result<nsh_core::animation::Composite> {
+    use nsh_core::animation::Composite;
     let Some(o) = spec.as_object().filter(|_| depth < 64) else {
         return Err(Exception::throw_type(r.ctx, "animation: invalid composite"));
     };
@@ -835,7 +834,7 @@ fn decode_composite(
             reset: o.get::<_, Option<bool>>("reset")?.unwrap_or(true),
         },
         _ => Composite::Run {
-            node: o.get::<_, f64>("node")? as nsh_animation::NodeId,
+            node: o.get::<_, f64>("node")? as nsh_core::animation::NodeId,
             driver: decode_driver(r.ctx, spec)?,
         },
     })
@@ -959,8 +958,10 @@ mod decode_bench {
 
 #[cfg(test)]
 mod tests {
-    use nsh_animation::{Curve, EaseMode};
-    use nsh_core::{LayoutCurve, LayoutProperty, LayoutTransition};
+    use nsh_core::{
+        LayoutCurve, LayoutProperty, LayoutTransition,
+        animation::{Curve, EaseMode},
+    };
     use rquickjs::{Context, Runtime};
 
     use super::*;
@@ -1001,6 +1002,21 @@ mod tests {
         assert_eq!(style("{ transform: undefined }"), style("{}"));
         // `null` still sets the default over classes.
         assert_ne!(style("{ backgroundColor: null }"), style("{}"));
+    }
+
+    #[test]
+    fn style_longhands_win_whatever_the_key_order() {
+        // As React Native flattens the styles of an array into one object,
+        // the longhand of a later style wins too.
+        let longhand_last = style("{ borderWidth: 2, borderTopWidth: 5, padding: 4 }");
+        assert_eq!(
+            style("{ borderTopWidth: 5, padding: 4, borderWidth: 2 }"),
+            longhand_last
+        );
+        assert_eq!(
+            style("[{ borderTopWidth: 5 }, { padding: 4, borderWidth: 2 }]"),
+            longhand_last
+        );
     }
 
     #[test]

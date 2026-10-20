@@ -50,7 +50,9 @@ use std::{
 };
 
 use nsh_core::{
-    Color, EventKind, EventPayload, InputConfig, PayloadValue, Rect, SubmitBehavior, TextAlign,
+    Bounds, Color, EventKind, EventPayload, InputConfig, PayloadValue, Points, SubmitBehavior,
+    TextAlign,
+    geometry::{Point, Size},
     tailwind::state,
 };
 use rustc_hash::FxHashMap;
@@ -128,7 +130,7 @@ pub(crate) struct InputState {
     /// A configuration was applied (auto focus happens on the first).
     configured: Cell<bool>,
     /// Content box; the whole view until the core sends one.
-    content: Cell<Option<Rect>>,
+    content: Cell<Option<Bounds<Points>>>,
     /// The size the editor was hosted (and last drawn) at.
     size: Cell<(f32, f32)>,
     /// User edits reported to the engine.
@@ -223,18 +225,18 @@ impl InputState {
                         DWRITE_FONT_STYLE_NORMAL
                     },
                     DWRITE_FONT_STRETCH_NORMAL,
-                    s.font_size.max(1.0),
+                    s.font_size.0.max(1.0),
                     &HSTRING::new(),
                 )
                 .ok()?
         };
-        if config.multiline && s.line_height > 0.0 {
+        if config.multiline && s.line_height.0 > 0.0 {
             // SAFETY: a COM call on the new format.
             let _ = unsafe {
                 format.SetLineSpacing(
                     DWRITE_LINE_SPACING_METHOD_UNIFORM,
-                    s.line_height,
-                    s.line_height * 0.8,
+                    s.line_height.0,
+                    s.line_height.0 * 0.8,
                 )
             };
         }
@@ -253,7 +255,7 @@ impl InputState {
     ) -> Option<IDWriteTextLayout> {
         let format = self.format()?;
         let width = self.size.get().0.max(1.0);
-        let spacing = self.config.borrow().style.letter_spacing;
+        let spacing = self.config.borrow().style.letter_spacing.0;
         // SAFETY: COM calls on the new layout with ranges inside the text.
         unsafe {
             let layout = crate::gfx::dwrite()
@@ -892,8 +894,8 @@ fn place_ime(surface: &Surface) {
         y: (y * s).round() as i32,
     };
     let (Some(top), Some(bottom)) = (
-        m.map(content.x + x, content.y + y),
-        m.map(content.x + x, content.y + y + h),
+        m.map(content.origin.x.0 + x, content.origin.y.0 + y),
+        m.map(content.origin.x.0 + x, content.origin.y.0 + y + h),
     ) else {
         return;
     };
@@ -1241,14 +1243,18 @@ fn auto_focus(surface: &Rc<Surface>, view: &NshView) {
 }
 
 /// The content box in the view.
-fn content_rect(view: &NshView, input: &InputState) -> Rect {
+fn content_rect(view: &NshView, input: &InputState) -> Bounds<Points> {
     input.content.get().unwrap_or_else(|| {
         let f = view.state().frame;
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: f.width,
-            height: f.height,
+        Bounds {
+            origin: Point {
+                x: Points(0.0),
+                y: Points(0.0),
+            },
+            size: Size {
+                width: f.size.width,
+                height: f.size.height,
+            },
         }
     })
 }
@@ -1256,10 +1262,10 @@ fn content_rect(view: &NshView, input: &InputState) -> Rect {
 /// Hosts the editor at the content box.
 fn place(view: &NshView, input: &Rc<InputState>) {
     let content = content_rect(view, input);
-    if content.width <= 0.0 || content.height <= 0.0 {
+    if content.size.width.0 <= 0.0 || content.size.height.0 <= 0.0 {
         return;
     }
-    input.set_size((content.width, content.height));
+    input.set_size((content.size.width.0, content.size.height.0));
     let item: Rc<dyn Hosted> = input.clone();
     view.set_native(&item, content);
 }
@@ -1294,7 +1300,7 @@ pub(crate) fn animated(view: &NshView) {
 }
 
 /// `InputContent`: where the text goes inside the view.
-pub(crate) fn content(view: &NshView, content: Rect) {
+pub(crate) fn content(view: &NshView, content: Bounds<Points>) {
     let Some(input) = input_of(view) else {
         return;
     };
@@ -1444,7 +1450,7 @@ pub(crate) fn pointer(surface: &Rc<Surface>, view: &NshView, event: &ItemPointer
         return false;
     };
     let content = content_rect(view, &input);
-    let (x, y) = (event.x - content.x, event.y - content.y);
+    let (x, y) = (event.x - content.origin.x.0, event.y - content.origin.y.0);
     match event.kind {
         PointerKind::Down => {
             if input.model.borrow().composition.is_some() {

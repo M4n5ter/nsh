@@ -10,7 +10,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crossterm::event::Event;
-use nsh_core::{EventPayload, JsonValue, Rect, Size};
+use nsh_core::{Bounds, EventPayload, JsonValue, Points, Size};
 use ratatui::{buffer::Buffer, layout::Rect as CellRect};
 
 use crate::CellMetrics;
@@ -24,9 +24,9 @@ use crate::CellMetrics;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComponentContext {
     /// The component's complete frame, in shared layout points.
-    pub frame: Rect,
+    pub frame: Bounds<Points>,
     /// The visible part of the frame after ancestor and surface clipping.
-    pub clip: Rect,
+    pub clip: Bounds<Points>,
     /// The component's frame projected into addressable destination cells.
     ///
     /// When the frame starts outside the surface, this rectangle begins at
@@ -148,7 +148,7 @@ pub trait NativeComponent {
     ///
     /// It may change after props, commands or input. Both dimensions must be
     /// finite and positive; `None` leaves measurement to the app's style.
-    fn intrinsic_size(&self) -> Option<Size> {
+    fn intrinsic_size(&self) -> Option<Size<Points>> {
         None
     }
 }
@@ -193,6 +193,7 @@ impl Components {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use nsh_core::{Point, geometry::px};
     use serde_json::json;
 
     use super::*;
@@ -244,25 +245,15 @@ mod tests {
             true
         }
 
-        fn intrinsic_size(&self) -> Option<Size> {
-            Some(Size::new(32.0, 16.0))
+        fn intrinsic_size(&self) -> Option<Size<Points>> {
+            Some(Size::new(px(32.0), px(16.0)))
         }
     }
 
     fn context() -> ComponentContext {
         ComponentContext {
-            frame: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 32.0,
-                height: 16.0,
-            },
-            clip: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 32.0,
-                height: 16.0,
-            },
+            frame: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(32.0), px(16.0))),
+            clip: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(32.0), px(16.0))),
             area: CellRect::new(3, 2, 4, 1),
             clip_area: CellRect::new(3, 2, 4, 1),
             metrics: CellMetrics::default(),
@@ -325,7 +316,10 @@ mod tests {
         assert_eq!(&*name, "change");
         assert_eq!(data, json!({ "value": 6 }));
         assert!(component.focusable());
-        assert_eq!(component.intrinsic_size(), Some(Size::new(32.0, 16.0)));
+        assert_eq!(
+            component.intrinsic_size(),
+            Some(Size::new(px(32.0), px(16.0)))
+        );
 
         component.set_prop("value", None);
         assert_eq!(painted_value(&component), "0");
@@ -371,12 +365,10 @@ mod tests {
                 },
                 MountItem::Frame {
                     id: 2,
-                    frame: Rect {
-                        x: 8.0,
-                        y: 16.0,
-                        width: 32.0,
-                        height: 16.0,
-                    },
+                    frame: Bounds::new(
+                        Point::new(px(8.0), px(16.0)),
+                        Size::new(px(32.0), px(16.0)),
+                    ),
                 },
                 MountItem::Events { id: 2, events },
                 MountItem::Component {
@@ -399,7 +391,7 @@ mod tests {
         let events = surface.drain_events().collect::<Vec<_>>();
         assert!(events.iter().any(|event| matches!(
             event,
-            SurfaceEvent::ComponentSize(2, size) if *size == Size::new(32.0, 16.0)
+            SurfaceEvent::ComponentSize(2, size) if *size == Size::new(px(32.0), px(16.0))
         )));
         assert!(events.iter().any(|event| matches!(
             event,

@@ -44,7 +44,7 @@ guide is [Terminal](../../website/docs/tui.md), with a matching
   occlusion and ancestor clips reuse them, and input always reads current
   geometry outside that pass.
 - `scroll.rs` and `navigation.rs`: native scrolling, zoom, drag/inertia,
-  screen and modal transitions, sheet geometry and interactive dismissal.
+  page and dialog transitions, viewport-sized dialog layers and back handling.
 - `motion.rs`: presentation tracks for layout create/update/delete,
   style transitions and keyframe animations. Layout/style targets stay
   on the node; drawing and hit testing sample the same presentation.
@@ -181,17 +181,14 @@ existing engine messages. Drawing and hit testing share the sampled
 presentation geometry; rendering remains quantized to cells and
 half-cell color samples.
 
-Screen push/pop defaults to a 300 ms horizontal slide with previous-screen
-parallax; fade uses 200 ms and the first screen appears immediately.
-Modals support slide, fade and immediate presentation, with `Show` after
-entry and `Dismiss` after exit. Page and form sheets report their actual
-card dimensions to the engine; transparent presentation uses the full
-viewport without a scrim. Header slots occupy the first terminal row and
-large titles occupy a second row that collapses with vertical scrolling.
-Mounted prevention/dismissal props are checked before back or drag
-decisions. Screen-edge and modal-header gestures complete past the native
-distance/velocity threshold or animate back. Reduced motion selects fades
-while retaining interactive gestures.
+Page push/pop defaults to a 300 ms horizontal slide with previous-page
+parallax; fade uses 200 ms and the first page appears immediately.
+Dialogs support slide, fade and immediate presentation, with `Show` after
+entry and `Dismiss` after exit. Each dialog occupies the viewport: its app
+supplies the backdrop, card and close controls. Pages place the app's
+header slot in the normal content tree, and report `NO_NATIVE_HEADER` to
+the engine. Mounted prevention and close props govern back handling;
+reduced motion selects fades for transitions.
 
 ## Graphics and platform boundaries
 
@@ -335,10 +332,10 @@ runners remain console applications.
 
 | API | Purpose |
 |---|---|
-| `CellMetrics::new(f32, f32) -> Result<Self, String>`; `width()`, `height()`, `viewport(u16, u16)` | Validated point dimensions for terminal cells |
+| `CellMetrics::new(Points, Points) -> Result<Self, String>`; `width()`, `height()`, `viewport(u16, u16)` | Validated point dimensions for terminal cells |
 | `TerminalTextEngine::new(CellMetrics)`; `Clone`, `Default`, `TextEngine` | Point measurement and terminal text runs; the engine owns its shared font catalog and is no longer `Copy` |
 | `AppOptions` | Trace, assets, ID/title, size, script, appearance, limits, metrics, component factories, `reduce_motion`, `data_dir` and `storage` |
-| `AppSource::{Rust(Root), Bundle(Bundle), DevServer(String)}` | Standalone source (`DevServer` requires `dev`) |
+| `AppSource::{Rust(Root), Bundle(Box<Bundle>), DevServer(String)}` | Standalone source (`DevServer` requires `dev`) |
 | `AppView::new(AppOptions) -> Self` | Independent embeddable engine and surface |
 | `AppView::load(App) -> io::Result<()>`; `connect(String)` (`dev`) | Load trusted code or start a development session |
 | `AppView::poll()`, `tick(f64) -> io::Result<bool>` | Process engine commits and advance native frames |
@@ -361,6 +358,7 @@ runners remain console applications.
 | `Surface::input_context() -> Option<InputContext>` | Snapshot editing hints and generation; secure text is omitted |
 | `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
 | `Surface::handle_event(Event)`; `drain_events()` | Accept input and forward ordered `SurfaceEvent`s |
+| `Surface::handle_wheel(MouseEvent, u16) -> u16` | Apply identical frame-local wheel detents to one hit-tested owner and report consumed detents |
 | `Surface::set_host_services_enabled(bool)` | Route service requests to the embedding host without terminal IO |
 | `Surface::complete_clipboard(u32, bool, Result<ClipboardContent, String>)` | Complete a host clipboard read with capability and size checks |
 | `Surface::complete_paste(InputEdit, Result<ClipboardContent, String>)` | Complete a paste while its focused input, selection and edit count still match |
@@ -389,7 +387,14 @@ turn per completed output frame. They deliver presented input through
 `pump()`, then apply every produced mount batch in order. The host keeps
 both the VM and surface at that presentation until its terminal output
 completes; freezing the surface alone would leave recycled list callbacks
-pointing at newer items. This entry point does not freeze values read by
+pointing at newer items. During otherwise idle probes,
+`LocalEngine::needs_pump() -> bool` reads queued messages and due deadlines
+without running app code; native input and synchronous dispatch still
+require a pump. `Surface::handle_wheel` accepts consecutive wheel detents
+with identical coordinates, direction and modifiers from one presented
+frame. It hit-tests once and applies the accumulated scroll delta once;
+a host component receives at most one detent before the host dispatches
+its callbacks and admits another frame. This entry point does not freeze values read by
 multiple callbacks, so the host must validate the whole physical input's
 target sequence before dispatch. Raw `Surface` hosts opt into service
 requests explicitly with `set_host_services_enabled`; clipboard reads and

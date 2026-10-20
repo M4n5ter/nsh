@@ -38,6 +38,8 @@ pub(crate) struct NshPlugin {
     pub(crate) entry: PathBuf,
     /// The native modules the app imports.
     pub(crate) natives: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// Static native imports whose namespaces hot factories require immediately.
+    pub(crate) preloads: Option<Arc<Mutex<std::collections::BTreeSet<String>>>>,
     /// The native modules there are.
     pub(crate) modules: Arc<NativeModules>,
     /// A split bundle: dynamic imports of chunks call the runtime's chunk
@@ -45,7 +47,8 @@ pub(crate) struct NshPlugin {
     pub(crate) split: bool,
 }
 
-/// The `"tailwind"` and `"theme"` of the app's `nsh.json`.
+/// The `"tailwind"`, `"theme"`, `"appearance"` and `"statusBar"` of the
+/// app's `nsh.json`.
 #[derive(Debug, Default)]
 pub(crate) struct ThemeSetup {
     /// The Tailwind theme as JSON, for the runtime (`None`: the default).
@@ -56,6 +59,8 @@ pub(crate) struct ThemeSetup {
     pub(crate) ui: Option<String>,
     /// `"appearance"`: `"light"` or `"dark"` (`None`: the system's).
     pub(crate) appearance: Option<&'static str>,
+    /// `"statusBar"`, checked, as JSON: the status bar's default.
+    pub(crate) status_bar: Option<String>,
 }
 
 /// File types imported as image assets.
@@ -98,19 +103,25 @@ fn density(path: &Path) -> f64 {
 }
 
 impl NshPlugin {
-    /// The entry's first statement, giving the renderer the app's themes.
+    /// The entry's first statement, giving the renderer the app's themes,
+    /// appearance and status bar.
     fn prologue(&self) -> Option<String> {
         let json = |v: &Option<String>| match v {
             Some(json) => serde_json::Value::String(json.clone()).to_string(),
             None => "null".to_owned(),
         };
         let setup = &self.tailwind;
-        (setup.json.is_some() || setup.ui.is_some() || setup.appearance.is_some()).then(|| {
+        (setup.json.is_some()
+            || setup.ui.is_some()
+            || setup.appearance.is_some()
+            || setup.status_bar.is_some())
+        .then(|| {
             format!(
-                "_$setup({}, {}, {});",
+                "_$setup({}, {}, {}, {});",
                 json(&setup.json),
                 json(&setup.ui),
-                json(&setup.appearance.map(str::to_owned))
+                json(&setup.appearance.map(str::to_owned)),
+                json(&setup.status_bar)
             )
         })
     }
@@ -189,10 +200,21 @@ impl Plugin for NshPlugin {
     ) -> HookResolveIdReturn {
         let spec = args.specifier;
         if self.modules.contains(spec) {
+            // Hot factories keep external import() expressions. Preloading
+            // their namespaces would turn an optional native API into an
+            // eager dependency, including on hosts where it is unavailable.
             self.natives
                 .lock()
                 .expect("natives lock")
                 .insert(spec.to_owned());
+            if !args.kind.is_dynamic()
+                && let Some(preloads) = &self.preloads
+            {
+                preloads
+                    .lock()
+                    .expect("preloads lock")
+                    .insert(spec.to_owned());
+            }
             return Ok(Some(HookResolveIdOutput {
                 external: Some(true.into()),
                 ..HookResolveIdOutput::from_id(spec)
@@ -207,7 +229,14 @@ impl Plugin for NshPlugin {
                 "{from}`{spec}` is not part of nsh apps: import signal, computed, effect, batch, untracked, cleanup, context and mount from \"nsh\""
             )));
         }
-        if spec.starts_with("nsh/") || spec.starts_with("nsh:") {
+        // Rolldown may otherwise replace unsupported Node builtins with browser
+        // shims. These are absent from the reference runtime catalog.
+        if ["events", "assert", "util", "string_decoder", "fs"].contains(&spec)
+            || spec.starts_with("node:")
+            || spec.starts_with("@nsh/llrt-types/")
+            || spec.starts_with("nsh/")
+            || spec.starts_with("nsh:")
+        {
             return Err(self.refuse(format!("{from}nsh has no module `{spec}`")));
         }
         Ok(None)
@@ -274,7 +303,10 @@ impl Plugin for NshPlugin {
         let path = Path::new(args.id);
         let entry = path == self.entry;
         let script = matches!(args.module_type, ModuleType::Ts | ModuleType::Js);
-        if !(jsx_module || entry || self.hot && script) {
+        // A module that reads `import.meta` gets its own URL (`metaUrl`).
+        // (JSON, text and CSS modules are not code, whatever they say.)
+        let meta = script && args.code.contains("import.meta");
+        if !(jsx_module || entry || self.hot && script || meta) {
             return Ok(None);
         }
         let hot_key = self.hot.then(|| self.rel(path));
@@ -298,6 +330,7 @@ impl Plugin for NshPlugin {
             args.code,
             prologue.as_deref(),
             hot_key.as_deref(),
+            Some(&self.rel(path)),
             &self.modules,
         )
         .map_err(|detail| self.fail(path, &detail))?;

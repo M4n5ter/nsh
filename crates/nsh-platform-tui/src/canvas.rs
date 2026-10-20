@@ -10,14 +10,15 @@ use std::{
     sync::Arc,
 };
 
-use nsh_animation::AnimationValue;
 use nsh_core::{
     Color,
+    animation::AnimationValue,
     canvas::{
         CanvasFont, CanvasGradient, CanvasOp, CanvasTextAlign, CanvasTextBaseline, Composite,
         Drawing, FillRule, GradientShape, LineCap, LineJoin, Num, Paint, PathOp, arc_sweep,
         fit_radii,
     },
+    geometry::{Bounds, Corners, Points, Radians, ScaledPixels, size},
 };
 use tiny_skia as sk;
 
@@ -36,15 +37,16 @@ const MAX_PIXELS: u64 = 8 << 20;
 pub(crate) fn rasterize(
     drawing: &Drawing,
     args: &[(u16, AnimationValue)],
-    width: f32,
-    height: f32,
+    width: Points,
+    height: Points,
     images: &HashMap<Arc<str>, Arc<Raster>>,
     fonts: &FontCatalog,
 ) -> Result<Raster, String> {
-    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+    if !width.is_finite() || !height.is_finite() || width <= Points::ZERO || height <= Points::ZERO
+    {
         return Err("canvas has no finite positive size".into());
     }
-    let (w, h) = (width.ceil() as u32, height.ceil() as u32);
+    let (w, h) = (width.ceil().0 as u32, height.ceil().0 as u32);
     if w > MAX_SIDE || h > MAX_SIDE || u64::from(w) * u64::from(h) > MAX_PIXELS {
         return Err(
             "canvas exceeds the terminal raster limit (8192 per side, 8 million pixels)".into(),
@@ -301,7 +303,7 @@ impl<'a> Replay<'a> {
             CanvasOp::LineCap(cap) => self.state.cap = *cap,
             CanvasOp::LineJoin(join) => self.state.join = *join,
             CanvasOp::MiterLimit(m) => self.state.miter = *m as f64,
-            CanvasOp::LineDash(d) => self.state.dash = d.clone(),
+            CanvasOp::LineDash(d) => self.state.dash = d.iter().map(|value| value.0).collect(),
             CanvasOp::LineDashOffset(o) => self.state.dash_offset = self.n(*o),
             CanvasOp::GlobalAlpha(a) => {
                 let a = self.n(*a);
@@ -311,10 +313,10 @@ impl<'a> Replay<'a> {
             }
             CanvasOp::Composite(m) => self.state.composite = *m,
             CanvasOp::ShadowColor(color) => self.state.shadow.0 = *color,
-            CanvasOp::ShadowBlur(b) => self.state.shadow.1 = *b as f64,
-            CanvasOp::ShadowOffset(x, y) => {
-                self.state.shadow.2 = *x as f64;
-                self.state.shadow.3 = *y as f64;
+            CanvasOp::ShadowBlur(b) => self.state.shadow.1 = b.0 as f64,
+            CanvasOp::ShadowOffset(offset) => {
+                self.state.shadow.2 = offset.x.0 as f64;
+                self.state.shadow.3 = offset.y.0 as f64;
             }
             CanvasOp::Font(f) => {
                 // The shorthand keeps the numeric variant, as in browsers.
@@ -382,7 +384,8 @@ impl<'a> Replay<'a> {
                     return;
                 }
                 let start = n(*start);
-                let sweep = arc_sweep(start as f32, n(*end) as f32, *ccw) as f64;
+                let sweep =
+                    arc_sweep(Radians(start as f32), Radians(n(*end) as f32), *ccw).0 as f64;
                 let unit = m.then(&Affine::translate(n(*x), n(*y)).then(&Affine::scale(r, r)));
                 path.arc(&unit, start, sweep);
             }
@@ -401,7 +404,8 @@ impl<'a> Replay<'a> {
                     return;
                 }
                 let start = n(*start);
-                let sweep = arc_sweep(start as f32, n(*end) as f32, *ccw) as f64;
+                let sweep =
+                    arc_sweep(Radians(start as f32), Radians(n(*end) as f32), *ccw).0 as f64;
                 let unit = m.then(
                     &Affine::translate(x, y)
                         .then(&Affine::rotate(rotation))
@@ -419,8 +423,23 @@ impl<'a> Replay<'a> {
             }
             PathOp::RoundRect(rect, radii) => {
                 let [x, y, w, h] = rect.map(n);
-                let [tl, tr, br, bl] =
-                    fit_radii(w as f32, h as f32, radii.map(|r| n(r) as f32)).map(f64::from);
+                let [tl, tr, br, bl] = radii.map(|r| Points(n(r) as f32));
+                let fitted = fit_radii(
+                    size(Points(w as f32), Points(h as f32)),
+                    Corners {
+                        top_left: tl,
+                        top_right: tr,
+                        bottom_right: br,
+                        bottom_left: bl,
+                    },
+                );
+                let [tl, tr, br, bl] = [
+                    fitted.top_left,
+                    fitted.top_right,
+                    fitted.bottom_right,
+                    fitted.bottom_left,
+                ]
+                .map(|r| f64::from(r.0));
                 path.move_to(m.map((x + tl, y)));
                 self.arc_to(path, x + w, y, x + w, y + h, tr);
                 self.arc_to(path, x + w, y + h, x, y + h, br);
@@ -777,7 +796,7 @@ impl<'a> Replay<'a> {
 
     // --- Text ---
 
-    fn text_op(&mut self, text: &Arc<str>, x: f64, y: f64, max_width: Option<f32>, mode: Mode) {
+    fn text_op(&mut self, text: &Arc<str>, x: f64, y: f64, max_width: Option<Points>, mode: Mode) {
         if text.is_empty() || self.state.singular {
             return;
         }
@@ -800,8 +819,8 @@ impl<'a> Replay<'a> {
             CanvasTextBaseline::Ideographic | CanvasTextBaseline::Bottom => -descent,
         };
         let squeeze = match max_width {
-            Some(m) if !m.is_finite() || m <= 0.0 => return,
-            Some(m) if (m as f64) < width && width > 0.0 => m as f64 / width,
+            Some(m) if !m.is_finite() || m <= Points::ZERO => return,
+            Some(m) if (m.0 as f64) < width && width > 0.0 => m.0 as f64 / width,
             _ => 1.0,
         };
         let place = self.state.transform.then(
@@ -880,7 +899,7 @@ impl<'a> Replay<'a> {
 
     // --- Images ---
 
-    fn image(&mut self, uri: &str, source: Option<[f32; 4]>, dest: &[Num; 4]) {
+    fn image(&mut self, uri: &str, source: Option<Bounds<ScaledPixels>>, dest: &[Num; 4]) {
         if self.state.singular {
             return;
         }
@@ -888,8 +907,9 @@ impl<'a> Replay<'a> {
             return;
         };
         let (iw, ih) = (image.width() as f64, image.height() as f64);
-        let [mut sx, mut sy, mut sw, mut sh] =
-            source.map_or([0.0, 0.0, iw, ih], |s| s.map(f64::from));
+        let [mut sx, mut sy, mut sw, mut sh] = source.map_or([0.0, 0.0, iw, ih], |s| {
+            [s.origin.x, s.origin.y, s.size.width, s.size.height].map(|value| f64::from(value.0))
+        });
         if sw < 0.0 {
             sx += sw;
             sw = -sw;
@@ -1252,11 +1272,12 @@ fn gradient_table(g: &CanvasGradient, alpha: f32) -> Vec<[f32; 4]> {
     (0..GRADIENT_STEPS)
         .map(|i| {
             let t = i as f32 / (GRADIENT_STEPS - 1) as f32;
-            if t <= first.0 {
+            if t <= first.0.0 {
                 return premultiplied(first.1);
             }
             for w in stops.windows(2) {
                 let ((o0, c0), (o1, c1)) = (w[0], w[1]);
+                let (o0, o1) = (o0.0, o1.0);
                 if t < o1 {
                     let f = if o1 > o0 { (t - o0) / (o1 - o0) } else { 1.0 };
                     let (a, b) = (premultiplied(c0), premultiplied(c1));
@@ -1272,13 +1293,26 @@ fn gradient_table(g: &CanvasGradient, alpha: f32) -> Vec<[f32; 4]> {
 /// `None` where it paints nothing (outside a radial gradient's cone).
 fn gradient_offset(shape: &GradientShape, (x, y): Pt) -> Option<f64> {
     match *shape {
-        GradientShape::Linear([x0, y0, x1, y1]) => {
+        GradientShape::Linear { start, end } => {
+            let [x0, y0, x1, y1] = [start.x, start.y, end.x, end.y].map(|v| v.0);
             let (dx, dy) = ((x1 - x0) as f64, (y1 - y0) as f64);
             let len = dx * dx + dy * dy;
             Some(((x - x0 as f64) * dx + (y - y0 as f64) * dy) / len)
         }
-        GradientShape::Radial(circles) => radial_offset(circles.map(f64::from), (x, y)),
-        GradientShape::Conic([angle, cx, cy]) => {
+        GradientShape::Radial {
+            start,
+            start_radius,
+            end,
+            end_radius,
+        } => {
+            let circles = [start.x, start.y, start_radius, end.x, end.y, end_radius];
+            radial_offset(circles.map(|v| f64::from(v.0)), (x, y))
+        }
+        GradientShape::Conic {
+            start_angle,
+            center,
+        } => {
+            let (angle, cx, cy) = (start_angle.0, center.x.0, center.y.0);
             let a = (y - cy as f64).atan2(x - cx as f64) - angle as f64;
             Some((a / TAU).rem_euclid(1.0))
         }
@@ -1333,9 +1367,14 @@ fn gradient_pixels(
     }
     match g.shape {
         // Canvas paints nothing along a gradient of no length...
-        GradientShape::Linear([x0, y0, x1, y1]) if x0 == x1 && y0 == y1 => return None,
+        GradientShape::Linear { start, end } if start == end => return None,
         // ... or between two equal circles.
-        GradientShape::Radial([x0, y0, r0, x1, y1, r1]) if x0 == x1 && y0 == y1 && r0 == r1 => {
+        GradientShape::Radial {
+            start,
+            start_radius,
+            end,
+            end_radius,
+        } if start == end && start_radius == end_radius => {
             return None;
         }
         _ => {}
@@ -1675,6 +1714,8 @@ fn arc_to_geometry(p0: Pt, p1: Pt, p2: Pt, r: f64) -> Option<ArcTo> {
 
 #[cfg(test)]
 mod tests {
+    use nsh_core::geometry::{point, px};
+
     use super::*;
     fn close(a: Pt, b: Pt) -> bool {
         (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
@@ -1702,8 +1743,8 @@ mod tests {
                 slots: Vec::new(),
             },
             &[],
-            32.0,
-            32.0,
+            px(32.0),
+            px(32.0),
             &HashMap::new(),
             &FontCatalog::default(),
         )
@@ -1751,8 +1792,8 @@ mod tests {
                 (0, AnimationValue::Number(16.0)),
                 (2, AnimationValue::Color(RED.0)),
             ],
-            32.0,
-            32.0,
+            px(32.0),
+            px(32.0),
             &HashMap::new(),
             &FontCatalog::default(),
         )
@@ -1782,27 +1823,35 @@ mod tests {
         let gradient = |shape| {
             Arc::new(CanvasGradient {
                 shape,
-                stops: vec![(0.0, RED), (1.0, BLUE)],
+                stops: vec![
+                    (nsh_core::geometry::percentage(0.0), RED),
+                    (nsh_core::geometry::percentage(1.0), BLUE),
+                ],
             })
         };
         let linear = raster(vec![
-            CanvasOp::FillStyle(Paint::Gradient(gradient(GradientShape::Linear([
-                0.0, 0.0, 32.0, 0.0,
-            ])))),
+            CanvasOp::FillStyle(Paint::Gradient(gradient(GradientShape::Linear {
+                start: point(px(0.0), px(0.0)),
+                end: point(px(32.0), px(0.0)),
+            }))),
             CanvasOp::FillRect(rect(0.0, 0.0, 32.0, 32.0)),
         ]);
         assert!(at(&linear, 1, 16)[0] > at(&linear, 30, 16)[0]);
         let radial = raster(vec![
-            CanvasOp::FillStyle(Paint::Gradient(gradient(GradientShape::Radial([
-                16.0, 16.0, 0.0, 16.0, 16.0, 16.0,
-            ])))),
+            CanvasOp::FillStyle(Paint::Gradient(gradient(GradientShape::Radial {
+                start: point(px(16.0), px(16.0)),
+                start_radius: px(0.0),
+                end: point(px(16.0), px(16.0)),
+                end_radius: px(16.0),
+            }))),
             CanvasOp::FillRect(rect(0.0, 0.0, 32.0, 32.0)),
         ]);
         assert!(at(&radial, 16, 16)[0] > at(&radial, 30, 16)[0]);
         let conic = raster(vec![
-            CanvasOp::FillStyle(Paint::Gradient(gradient(GradientShape::Conic([
-                0.0, 16.0, 16.0,
-            ])))),
+            CanvasOp::FillStyle(Paint::Gradient(gradient(GradientShape::Conic {
+                start_angle: Radians(0.0),
+                center: point(px(16.0), px(16.0)),
+            }))),
             CanvasOp::FillRect(rect(0.0, 0.0, 32.0, 32.0)),
         ]);
         assert!(at(&conic, 30, 18)[0] > at(&conic, 30, 14)[0]);
@@ -1813,10 +1862,10 @@ mod tests {
         let image = raster(vec![
             CanvasOp::StrokeStyle(Paint::Color(RED)),
             CanvasOp::LineWidth(c(4.0)),
-            CanvasOp::LineDash(vec![4.0, 4.0].into()),
+            CanvasOp::LineDash(vec![px(4.0), px(4.0)].into()),
             CanvasOp::ShadowColor(BLUE),
-            CanvasOp::ShadowBlur(2.0),
-            CanvasOp::ShadowOffset(0.0, 8.0),
+            CanvasOp::ShadowBlur(px(2.0)),
+            CanvasOp::ShadowOffset(point(px(0.0), px(8.0))),
             CanvasOp::BeginPath,
             CanvasOp::Path(PathOp::MoveTo(c(0.0), c(8.0))),
             CanvasOp::Path(PathOp::LineTo(c(32.0), c(8.0))),
@@ -1840,7 +1889,10 @@ mod tests {
                 CanvasOp::Translate(c(8.0), c(8.0)),
                 CanvasOp::DrawImage {
                     image: nsh_core::canvas::CanvasImage { uri: uri.clone() },
-                    source: Some([1.0, 0.0, 1.0, 1.0]),
+                    source: Some(Bounds::new(
+                        point(ScaledPixels(1.0), ScaledPixels(0.0)),
+                        size(ScaledPixels(1.0), ScaledPixels(1.0)),
+                    )),
                     dest: rect(0.0, 0.0, 8.0, 8.0),
                 },
             ],
@@ -1849,8 +1901,8 @@ mod tests {
         let image = rasterize(
             &drawing,
             &[],
-            32.0,
-            32.0,
+            px(32.0),
+            px(32.0),
             &HashMap::from([(uri, Arc::new(source))]),
             &FontCatalog::default(),
         )
@@ -1871,7 +1923,10 @@ mod tests {
         let drawing = Drawing {
             ops: vec![CanvasOp::DrawImage {
                 image: nsh_core::canvas::CanvasImage { uri: uri.clone() },
-                source: Some([-1.0, 0.0, 2.0, 1.0]),
+                source: Some(Bounds::new(
+                    point(ScaledPixels(-1.0), ScaledPixels(0.0)),
+                    size(ScaledPixels(2.0), ScaledPixels(1.0)),
+                )),
                 dest: rect(16.0, 0.0, -16.0, 8.0),
             }],
             slots: Vec::new(),
@@ -1879,8 +1934,8 @@ mod tests {
         let image = rasterize(
             &drawing,
             &[],
-            32.0,
-            32.0,
+            px(32.0),
+            px(32.0),
             &HashMap::from([(uri, Arc::new(source))]),
             &FontCatalog::default(),
         )
@@ -1903,8 +1958,8 @@ mod tests {
                 rasterize(
                     &Drawing::default(),
                     &[],
-                    w,
-                    h,
+                    px(w),
+                    px(h),
                     &HashMap::new(),
                     &FontCatalog::default()
                 )
@@ -1918,7 +1973,7 @@ mod tests {
         let fonts = FontCatalog::default();
         fonts
             .register(include_bytes!(
-                "../../../examples/gallery/fonts/Pacifico-Regular.ttf"
+                "../../../api/cases/layout/fonts/Pacifico-Regular.ttf"
             ))
             .unwrap();
         let engine =
@@ -1942,8 +1997,8 @@ mod tests {
                     slots: Vec::new(),
                 },
                 &[],
-                192.0,
-                64.0,
+                px(192.0),
+                px(64.0),
                 &HashMap::new(),
                 &fonts,
             )
@@ -1956,8 +2011,8 @@ mod tests {
                 .find(|&x| (0..r.height).any(|y| r.rgba[((y * r.width + x) * 4 + 3) as usize] > 0))
                 .unwrap() as f32
         };
-        assert!(((first_ink(&right) - first_ink(&left)) - (140.0 - advance)).abs() <= 1.1);
-        assert_eq!(advance, fonts.shape(&font, &text).width);
+        assert!(((first_ink(&right) - first_ink(&left)) - (140.0 - advance.0)).abs() <= 1.1);
+        assert_eq!(advance.0, fonts.shape(&font, &text).width);
     }
     #[test]
     fn transforms_compose_like_canvas() {

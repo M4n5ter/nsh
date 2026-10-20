@@ -70,7 +70,7 @@ directly with ordinary text rendering. Selecting a graphics protocol uses the te
 Headless scripts render reproducible text snapshots. An embedding host selects its protocol explicitly through
 `AppView::set_image_protocol`; creating an embedded view leaves terminal IO with its host.
 
-The existing [`nsh/ui/mobile`](../components/index.md) components render through these primitives. Give each
+The existing [`nsh/base`](../modules/nsh-base.md) components render through these primitives. Give each
 interactive row enough height to occupy at least one terminal row, use clear color contrast and keep important
 labels legible at the terminal's column width.
 
@@ -85,9 +85,9 @@ Images support PNG, JPEG, GIF and WebP, including animated GIF and WebP within t
 `fadeDuration` sets the loaded image's fade over its placeholder; the terminal default is 0 ms. Download progress
 arrives at most once every 100 ms and on completion.
 
-Screen stacks and modals apply slide, fade or immediate transitions. Screen-edge back gestures and downward
-modal-header drags follow the mounted navigation and dismissal props. Hosts can select reduced motion with
-`AppOptions::reduce_motion` or `AppView::set_reduce_motion`.
+Page stacks and dialogs apply slide, fade or immediate transitions. Apps supply page headers, dialog backdrops,
+cards and close controls. Dialogs occupy the viewport, and back or close actions follow the mounted props.
+Hosts can select reduced motion with `AppOptions::reduce_motion` or `AppView::set_reduce_motion`.
 
 ## Keyboard and mouse
 

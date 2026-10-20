@@ -25,8 +25,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOWS = {
     "core.yml": {
         "packages": [
-            "nsh-core", "nsh-animation", "nsh-macros", "nsh-js", "nsh-engine",
-            "nsh-bundler", "nsh-package", "nsh-ui-mobile", "nsh-testing",
+            "nsh-core", "nsh-macros", "nsh-js", "nsh-engine",
+            "nsh-bundler", "nsh-package", "nsh-base", "nsh-testing",
         ],
         "files": ["api/**", "examples/counter/**", "examples/gallery/**", "examples/bench/**"],
     },
@@ -46,7 +46,11 @@ WORKFLOWS = {
     },
     "rust-app.yml": {
         "packages": ["gallery-native", "rust-exports-native", "nsh-cli", "nsh-platform-web"],
-        "files": ["examples/gallery-rs/**", "examples/rust-exports/**"],
+        # `nsh test` runs the examples' tests.
+        "files": [
+            "examples/counter/**", "examples/gallery/**", "examples/gallery-rs/**",
+            "examples/rust-exports/**",
+        ],
     },
 }
 

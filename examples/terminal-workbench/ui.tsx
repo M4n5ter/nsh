@@ -15,7 +15,7 @@ export function Action(props: { label: string; onPress: () => void; testID: stri
   return (
     <View
       testID={props.testID}
-      accessibilityRole="button"
+      role="button"
       accessibilityLabel={props.accessibilityLabel ?? props.label}
       onPress={props.onPress}
       style={{ height: 16, width: props.width, paddingHorizontal: 8, justifyContent: "flex-start", backgroundColor: props.primary ? palette.mint : props.active ? palette.selected : palette.raised }}

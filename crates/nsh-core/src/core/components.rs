@@ -19,12 +19,13 @@ use super::{Core, Kind, NO_KEY, views::Anchor};
 use crate::{
     ApplyError, Command, EdgeInsets, EventKind, EventMask, EventPayload, NodeId, Op, Prop, ROOT_ID,
     Tag, TextEngine,
+    geometry::Points,
     tailwind::ClassList,
     ui::{
         Action, AnswerSlot, AnyInstance, AnyValue, Attrs, Child, ClipboardRead, ComponentError,
         ComponentSpec, ElKind, ElNode, Environment, Executor, ImageSize, IntoElement, JsEvent,
         JsResult, ListConfig, Listener, ModuleCx, ParentElement, PlaceFn, Position, Posts,
-        Reactive, Registry, Root, RustCall, RustOp, SharedString, StyleRefinement, Task, Theme,
+        Reactive, Registry, Root, RustCall, RustOp, SharedString, StyleRefinement, Task, Tokens,
         caught,
         responder::ResponderEl,
         view,
@@ -403,7 +404,11 @@ impl ClipboardAnswer {
         // can hold (the web's player encodes its own).
         answer.image = uri
             .filter(|u| u.starts_with("data:") && crate::platform::clipboard::uri_within_limit(u))
-            .map(|uri| crate::ui::ClipboardImage { uri, width, height });
+            .map(|uri| crate::ui::ClipboardImage {
+                uri,
+                width: pixels(width),
+                height: pixels(height),
+            });
         answer
     }
 }
@@ -421,12 +426,14 @@ pub(super) struct Components {
     /// The specs of the components made by type (not by name from the
     /// registry), one per type.
     specs: FxHashMap<&'static str, Arc<ComponentSpec>>,
-    pub(super) theme: Arc<Theme>,
-    /// The app's theme (`nsh.json`, a Rust app's root): drawn with while
-    /// the embedding app sets none ([`Core::set_host_theme`]).
-    app_theme: Arc<Theme>,
-    /// The embedding app's theme: wins over [`Self::app_theme`].
-    host_theme: Option<Arc<Theme>>,
+    /// The design tokens drawn with.
+    pub(super) tokens: Arc<Tokens>,
+    /// The app's tokens (a UI set's defaults, `nsh.json`'s theme, a Rust
+    /// app's root): drawn with while the embedding app sets none
+    /// ([`Core::set_host_tokens`]).
+    app_tokens: Arc<Tokens>,
+    /// The embedding app's tokens: win over [`Self::app_tokens`].
+    host_tokens: Option<Arc<Tokens>>,
     /// Boxed: making a view (or applying its patches) takes its instance
     /// out of the map and back.
     pub(super) instances: FxHashMap<NodeId, Box<Instance>>,
@@ -435,7 +442,7 @@ pub(super) struct Components {
     /// Slot nodes (`componentSlot`) -> their slot's name.
     slot_names: FxHashMap<NodeId, Arc<str>>,
     /// Slot nodes in a host -> the host.
-    slot_hosts: FxHashMap<NodeId, NodeId>,
+    pub(super) slot_hosts: FxHashMap<NodeId, NodeId>,
     styles: FxHashMap<StyleRefinement, Arc<ClassList>>,
     /// The styles a component on another's host gets from each above it,
     /// merged (by the lists', which the entry keeps).
@@ -451,7 +458,7 @@ pub(super) struct Components {
     /// Runs the components' async tasks and timers.
     pub(super) executor: Rc<Executor>,
     /// The status bar's settings, shared by components, modules and tasks.
-    pub(super) status_bars: crate::ui::status_bar::SharedStatusBars,
+    pub(super) status_bars: crate::ui::status_bar::StatusBars,
     /// Dialogs components show, by id: their answers.
     dialogs: FxHashMap<u32, AnswerSlot<i32>>,
     next_dialog: u32,
@@ -470,7 +477,7 @@ pub(super) struct Components {
     next_fetch: u32,
     /// The ends of the animations components started and the values they
     /// read, by id.
-    animations: FxHashMap<nsh_animation::AnimationId, Awaited>,
+    animations: FxHashMap<crate::animation::AnimationId, Awaited>,
     /// Elements to measure once this commit is laid out
     /// ([`crate::ui::ElementRef::measure`]).
     pub(super) measures: Vec<(NodeId, AnswerSlot<Option<crate::Measurement>>)>,
@@ -518,9 +525,9 @@ impl Default for Components {
         Self {
             registry: Registry::default(),
             specs: FxHashMap::default(),
-            theme: Arc::new(Theme::default()),
-            app_theme: Arc::new(Theme::default()),
-            host_theme: None,
+            tokens: Arc::new(Tokens::default()),
+            app_tokens: Arc::new(Tokens::default()),
+            host_tokens: None,
             instances: FxHashMap::default(),
             owners: FxHashMap::default(),
             slot_names: FxHashMap::default(),
@@ -567,15 +574,13 @@ impl Default for Components {
 }
 
 impl Components {
-    pub(super) fn for_viewport(viewport: crate::Size) -> Self {
+    pub(super) fn for_viewport(viewport: crate::Size<crate::Points>) -> Self {
         let mut components = Self::default();
         components.environment.window = viewport;
         // What components that run once read of the core.
-        components
-            .runtime
-            .set_services(components.executor.clone(), components.status_bars.clone());
+        components.runtime.set_services(components.executor.clone());
         components.runtime.set_environment(components.environment);
-        components.runtime.set_theme(components.theme.clone());
+        components.runtime.set_tokens(components.tokens.clone());
         components
     }
 
@@ -643,65 +648,68 @@ fn same(a: &Option<Arc<ClassList>>, b: &Option<Arc<ClassList>>) -> bool {
 }
 
 impl<M: TextEngine> Core<M> {
-    /// The components this core can render (from `nsh-ui-mobile` and the
-    /// like); set before the first op.
+    /// The components this core can render (from `nsh-base` and the
+    /// like), and the design tokens their sets bring
+    /// ([`Registry::tokens_from`]); set before the first op.
     pub fn set_components(&mut self, registry: Registry) {
+        if let Some(Ok(tokens)) = registry.tokens(None) {
+            self.set_tokens(tokens);
+        }
         self.components.registry = registry;
     }
 
-    /// `uiTheme` on the root: the app's theme (`nsh.json`).
+    /// `uiTheme` on the root: the app's theme file (`nsh.json`), which the
+    /// UI set that reads themes makes tokens of.
     pub(super) fn set_ui_theme(&mut self, json: &str) {
-        match Theme::from_json(json) {
-            Ok(theme) => self.set_theme(theme),
-            Err(e) => log::warn!("theme: {e}"),
+        match self.components.registry.tokens(Some(json)) {
+            Some(Ok(tokens)) => self.set_tokens(tokens),
+            Some(Err(e)) => log::warn!("theme: {e}"),
+            None => log::warn!("theme: no UI set reads themes"),
         }
     }
 
-    /// The app's theme; components are drawn with it unless the
-    /// embedding app set one ([`Core::set_host_theme`]).
-    pub fn set_theme(&mut self, theme: Theme) {
-        self.components.app_theme = Arc::new(theme);
-        self.theme_changed();
+    /// The app's design tokens; it is drawn with them unless the
+    /// embedding app set its own ([`Core::set_host_tokens`]).
+    pub fn set_tokens(&mut self, tokens: Tokens) {
+        self.components.app_tokens = Arc::new(tokens);
+        self.tokens_changed();
     }
 
-    /// The embedding app's theme (`None`: the app's again): an app
-    /// embedded in a native app looks like it, whatever theme the app
-    /// itself sets.
-    pub fn set_host_theme(&mut self, theme: Option<Theme>) {
-        self.components.host_theme = theme.map(Arc::new);
-        self.theme_changed();
+    /// The embedding app's design tokens (`None`: the app's again): an app
+    /// embedded in a native app looks like it, whatever the app sets.
+    pub fn set_host_tokens(&mut self, tokens: Option<Tokens>) {
+        self.components.host_tokens = tokens.map(Arc::new);
+        self.tokens_changed();
     }
 
-    /// The theme components are drawn with now: a signal of the surface,
-    /// so only the bindings that read it run again, and only when it
-    /// changed.
-    fn theme_changed(&mut self) {
-        let theme = match &self.components.host_theme {
-            // The app's own tokens the host's theme does not have stay.
-            Some(host) => {
-                let mut theme = (**host).clone();
-                theme.inherit(&self.components.app_theme);
-                Arc::new(theme)
-            }
-            None => self.components.app_theme.clone(),
+    /// The tokens drawn with now: a signal of the surface, so only the
+    /// bindings that read them run again, and only when they changed.
+    fn tokens_changed(&mut self) {
+        let tokens = match &self.components.host_tokens {
+            // The app's own tokens the host's do not have stay.
+            Some(host) => Arc::new(host.over(&self.components.app_tokens)),
+            None => self.components.app_tokens.clone(),
         };
-        if *theme == *self.components.theme {
-            self.components.theme = theme;
+        if *tokens == *self.components.tokens {
+            self.components.tokens = tokens;
             return;
         }
         {
             let _entered = self.components.runtime.enter();
-            self.components.theme = theme;
+            self.components.tokens = tokens;
             self.components
                 .runtime
-                .set_theme(self.components.theme.clone());
+                .set_tokens(self.components.tokens.clone());
         }
-        self.theme_tokens_changed();
+        self.class_tokens_changed();
     }
 
     /// Mounts a Rust app's root component as the content of the root view;
     /// its view is made in the next commit.
     pub fn mount_root(&mut self, root: &Root) {
+        if let Some(setting) = root.status_bar_ref() {
+            self.components.status_bars.set_base(setting);
+        }
         let _entered = self.components.runtime.enter();
         let mut el = root.element().0;
         let ElKind::Component(c) = std::mem::replace(&mut el.kind, ElKind::Plain) else {
@@ -747,7 +755,7 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// The surface's size changed (the environment's window).
-    pub(super) fn components_viewport(&mut self, size: crate::Size) {
+    pub(super) fn components_viewport(&mut self, size: crate::Size<crate::Points>) {
         let environment = Environment {
             window: size,
             ..self.components.environment
@@ -799,7 +807,7 @@ impl<M: TextEngine> Core<M> {
     pub fn run_component_tasks(&mut self) {
         let _entered = self.components.runtime.enter();
         let executor = self.components.executor.clone();
-        executor.fire_timers(crate::time::Instant::now());
+        executor.fire_timers(crate::time::now());
         // A task that keeps waking itself cannot hold the engine.
         for _ in 0..MAX_TASK_ROUNDS {
             let polled = executor.poll_ready();
@@ -1181,7 +1189,7 @@ impl<M: TextEngine> Core<M> {
                         }
                         result
                     }
-                    Err(message) => Err(message),
+                    Err(message) => Err(message.into()),
                 };
                 self.apply_actions();
                 self.settle(call, result);
@@ -1208,7 +1216,7 @@ impl<M: TextEngine> Core<M> {
                         }),
                     );
                 }
-                Err(message) => self.settle(call, Err(message)),
+                Err(message) => self.settle(call, Err(message.into())),
             },
             RustCall::Method(host, method) => {
                 let mut failed = None;
@@ -1221,16 +1229,16 @@ impl<M: TextEngine> Core<M> {
                     Some(Inner::Component(inner)) => match caught(|| inner.call(method)) {
                         Ok(Some(result)) => result,
                         Ok(None) => {
-                            Err(format!("{} has no ref of this method's type", inner.name()))
+                            Err(format!("{} has no ref of this method's type", inner.name()).into())
                         }
                         Err(message) => {
                             failed = Some(message.clone());
-                            Err(message)
+                            Err(message.into())
                         }
                     },
                     _ => {
                         drop_caught(method);
-                        Err(format!("node {host} hosts no Rust component"))
+                        Err(format!("node {host} hosts no Rust component").into())
                     }
                 };
                 self.apply_actions();
@@ -3571,8 +3579,8 @@ impl<M: TextEngine> Core<M> {
                 command: Command::ScrollToIndex {
                     index,
                     animated: false,
-                    view_position: 0.0,
-                    view_offset: 0.0,
+                    view_position: crate::geometry::Percentage(0.0),
+                    view_offset: Points::ZERO,
                 },
             });
         }
@@ -4195,7 +4203,7 @@ impl<M: TextEngine> Core<M> {
                 self.components
                     .animations
                     .insert(request, Awaited::Value(value));
-                let _ = self.apply_op(Op::Animation(nsh_animation::AnimationOp::Read {
+                let _ = self.apply_op(Op::Animation(crate::animation::AnimationOp::Read {
                     node,
                     request,
                 }));
@@ -4255,7 +4263,7 @@ impl<M: TextEngine> Core<M> {
 
     /// Native animations that ended: the components' resolve their
     /// [`crate::ui::AnimationEnd`]s; JS's stay in `finished`.
-    pub fn animations_finished(&mut self, finished: &mut Vec<nsh_animation::Finished>) {
+    pub fn animations_finished(&mut self, finished: &mut Vec<crate::animation::Finished>) {
         finished.retain(|f| match self.components.animations.remove(&f.animation) {
             Some(Awaited::End(end)) => {
                 end.borrow_mut().deliver(f.finished);
@@ -4430,7 +4438,10 @@ impl<M: TextEngine> Core<M> {
                     _ => None,
                 };
                 let size = match (number("width"), number("height"), error) {
-                    (Some(width), Some(height), None) => Ok(ImageSize { width, height }),
+                    (Some(width), Some(height), None) => Ok(ImageSize {
+                        width: pixels(width),
+                        height: pixels(height),
+                    }),
                     (_, _, error) => Err(error.unwrap_or_else(|| "no size".into())),
                 };
                 self.answer_image_info(request as u32, size);
@@ -4446,10 +4457,10 @@ impl<M: TextEngine> Core<M> {
             }
             EventKind::Insets => {
                 let insets = EdgeInsets {
-                    top: number("top").unwrap_or(0.0) as f32,
-                    right: number("right").unwrap_or(0.0) as f32,
-                    bottom: number("bottom").unwrap_or(0.0) as f32,
-                    left: number("left").unwrap_or(0.0) as f32,
+                    top: Points(number("top").unwrap_or(0.0) as f32),
+                    right: Points(number("right").unwrap_or(0.0) as f32),
+                    bottom: Points(number("bottom").unwrap_or(0.0) as f32),
+                    left: Points(number("left").unwrap_or(0.0) as f32),
                 };
                 // The views reading them follow (`drain_views`).
                 self.components.insets.insert(id, insets);
@@ -4539,7 +4550,12 @@ impl<M: TextEngine> Core<M> {
             }
             match node.kind {
                 // Not reported yet: a screen's header covers the top.
-                Kind::Screen => return EdgeInsets { top: 0.0, ..safe },
+                Kind::Screen => {
+                    return EdgeInsets {
+                        top: Points::ZERO,
+                        ..safe
+                    };
+                }
                 Kind::Modal => return safe,
                 _ => {}
             }
@@ -4661,4 +4677,10 @@ fn row_position(
         }
         None => Position::fixed(index, count),
     }
+}
+
+/// A pixel count a platform reports as a number (whole for what it
+/// decodes).
+fn pixels(n: f64) -> crate::geometry::DevicePixels {
+    crate::geometry::DevicePixels(n.round() as i32)
 }

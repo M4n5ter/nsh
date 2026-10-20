@@ -13,7 +13,7 @@ use crate::{dev::DevSession, runtime::Platform, ui};
 const APP_NAME: &str = "NshDev";
 const BUNDLE_ID: &str = "com.longbridge.nsh.host";
 
-/// Where `nsh run` runs the app.
+/// Where `nsh dev` and `nsh run` run the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Target {
     /// The Mac Catalyst development host (an iPhone-sized window).
@@ -39,18 +39,17 @@ pub(crate) enum Target {
 }
 
 impl Target {
-    /// The default: the host that runs on this machine (Mac Catalyst on
-    /// macOS, the GTK host on Linux, the Win32 host on Windows; Android
-    /// elsewhere).
+    /// The default: this system’s native desktop host (AppKit on macOS,
+    /// GTK on Linux, Win32 on Windows; the browser elsewhere).
     pub(crate) fn native() -> Target {
         if cfg!(target_os = "macos") {
-            Target::Catalyst
+            Target::Macos
         } else if cfg!(target_os = "linux") {
             Target::Linux
         } else if cfg!(windows) {
             Target::Windows
         } else {
-            Target::Android
+            Target::Web
         }
     }
 
@@ -204,6 +203,7 @@ pub(crate) fn run(
             let exe = app.join("Contents/MacOS/nsh-ios-host");
             // Its own output (AppKit's notes) is kept for when it fails.
             let mut command = Command::new(&exe);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
                 // A host that crashed must not ask to reopen its windows
@@ -215,6 +215,7 @@ pub(crate) fn run(
         // bundle around it.
         Target::Linux => {
             let mut command = Command::new(&host);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
                 .args(["--app-id", &crate::package::app_id(entry)?])
@@ -232,6 +233,7 @@ pub(crate) fn run(
             let (app_name, id) = crate::package::name_and_id(&entry, &config);
             let name = window.name.unwrap_or(&app_name);
             let mut command = Command::new(&host);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
                 .args(["--name", name, "--app-id", &id])
@@ -241,6 +243,7 @@ pub(crate) fn run(
         }
         Target::Windows => {
             let mut command = Command::new(&host);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
                 .args(["--app-id", &crate::package::app_id(entry)?])
@@ -251,6 +254,7 @@ pub(crate) fn run(
         // macOS too) without an app bundle around it.
         Target::Gpui => {
             let mut command = Command::new(&host);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
                 .args(["--app-id", &crate::package::app_id(entry)?])
@@ -259,6 +263,7 @@ pub(crate) fn run(
         }
         Target::Tui => {
             let mut command = Command::new(&host);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
                 .args(["--app-id", &crate::package::app_id(entry)?]);

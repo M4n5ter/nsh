@@ -27,11 +27,11 @@ On every platform, NSH's main use is the same: modules embedded in a native app 
 - **[GPUI](./gpui.md)** draws modules with [GPUI](https://gpui-kit.com), the framework of the sibling project GPUI Kit, on macOS, Windows and Linux alike: one renderer for all three desktops, and an `AppView` that GPUI and GPUI Kit apps place in their own element tree.
 - **[Terminal](./tui.md)** draws into Ratatui regions on macOS, Windows and Linux, sharing NSH layout and components with keyboard focus, Unicode editing, mouse input and half-block graphics. A host terminal app can embed several independent `AppView` regions.
 - **[Web](./web.md)** renders apps as HTML in a browser page: `nsh package --target web` publishes a static site for any web server or CDN, and a page of your own embeds an app with `createPlayer` or an iframe. It also runs the live demos and the [playground](/playground) on this site.
-- **Mac Catalyst** runs the iOS backend in an iPhone-sized window (390×844) on a Mac, for development. It is `nsh run`'s default target on macOS: the quickest way to see how a module looks on a phone.
+- **Mac Catalyst** runs the iOS backend in an iPhone-sized window (390×844) on a Mac, for development. Select it with `--target catalyst` to see how a module looks on a phone.
 
 ## Develop and package
 
-`nsh run` picks the machine's own platform when you give no `--target`: Mac Catalyst on macOS, the GTK window on Linux and the Win32 window on Windows. Phones are reached from a computer: iOS from a Mac with Xcode, Android from macOS, Linux or Windows with the Android SDK ([Installation](./installation.md#what-works-where)).
+`nsh run` picks the machine's own platform when you give no `--target`: AppKit on macOS, the GTK window on Linux and the Win32 window on Windows. Phones are reached from a computer: iOS from a Mac with Xcode, Android from macOS, Linux or Windows with the Android SDK ([Installation](./installation.md#what-works-where)).
 
 ```sh
 nsh run my-app --target macos      # or ios, android, windows, linux, gpui, tui, web, catalyst
@@ -67,7 +67,7 @@ Most of an app needs no platform checks: elements, styles, layout and modules be
 - **The renderer** is identified by `Platform.renderer` (`"native"`, `"web"` or `"terminal"`); the terminal keeps its actual `Platform.OS`. Use `Platform.isTerminal` when selecting a terminal presentation.
 - **Input follows the platform.** Phones get touches and the software keyboard; desktops get the mouse, the trackpad and the keyboard.
 
-The components of [`nsh/ui/mobile`](../components/index.md) are drawn by NSH, so they also run on desktops, looking as they do on phones. A desktop layout is built from the primitives (`View`, `Text`, `Scroll`, `List`, …) and `Platform.select({ desktop: … })`, as the gallery's desktop layout is; a desktop UI set is on the way.
+An app's components are drawn with NSH's primitives, so they run on desktops as well as on phones, looking the same on both. A desktop layout is built from the primitives (`View`, `Text`, `Scroll`, `List`, …) and `Platform.select({ desktop: … })`, as the gallery's desktop layout is.
 
 Each backend lists what it does not support yet: [macOS](./macos.md#what-differs-on-macos), [Windows](./windows.md#what-differs-on-windows), [Linux](./linux.md#what-differs-on-linux), [GPUI](./gpui.md#differences).
 
