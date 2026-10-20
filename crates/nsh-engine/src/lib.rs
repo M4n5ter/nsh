@@ -1836,10 +1836,14 @@ impl<M: TextEngine> State<M> {
         self.hover_moved = Some(nsh_core::time::now());
         for (id, event) in std::mem::take(&mut self.hover_moves) {
             let payload = EventPayload::Hover(event);
-            if self
-                .core
-                .component_event(id, EventKind::HoverMove, &payload)
-            {
+            if deliver_component_event(
+                script,
+                &mut self.core,
+                &mut self.events,
+                id,
+                EventKind::HoverMove,
+                &payload,
+            ) {
                 continue;
             }
             if let Some(script) = script {
@@ -1884,8 +1888,14 @@ impl<M: TextEngine> State<M> {
                 ("zoomScale", n(e.zoom)),
             ]);
             // A Rust component's scroll view is the component's.
-            if !self.core.component_event(id, EventKind::Scroll, &payload)
-                && let Some(script) = script
+            if !deliver_component_event(
+                script,
+                &mut self.core,
+                &mut self.events,
+                id,
+                EventKind::Scroll,
+                &payload,
+            ) && let Some(script) = script
             {
                 script.dispatch_event(id, EventKind::Scroll, &payload);
             }
@@ -2093,6 +2103,40 @@ fn class_environment(env: &Environment) -> nsh_core::tailwind::ClassEnvironment 
     }
 }
 
+/// Runs a queued native event's full component routing and delivers what
+/// that input emitted before a later input or timer can enter JS. Events
+/// already waiting in the core retain their ordinary commit ordering.
+fn deliver_component_event<M: TextEngine>(
+    script: Option<&Script>,
+    core: &mut Core<M>,
+    pending: &mut Vec<JsEvent>,
+    id: NodeId,
+    kind: EventKind,
+    payload: &EventPayload,
+) -> bool {
+    core.take_events(pending);
+    let handled = core.component_event(id, kind, payload);
+    let mut events = Vec::new();
+    core.take_events(&mut events);
+    for event in events {
+        match event {
+            JsEvent::Event(id, kind, payload) => {
+                if !deliver_component_event(script, core, pending, id, kind, &payload)
+                    && let Some(script) = script
+                {
+                    script.dispatch_event(id, kind, &payload);
+                }
+            }
+            other => {
+                if let Some(script) = script {
+                    script.deliver(other);
+                }
+            }
+        }
+    }
+    handled
+}
+
 /// Returns false on shutdown.
 fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message: Message) -> bool {
     match message {
@@ -2119,7 +2163,14 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
                 state.core.input_changed(id, text, *count);
             }
             // Events on a Rust component's parts are the component's.
-            if state.core.component_event(id, event, &payload) {
+            if deliver_component_event(
+                script,
+                &mut state.core,
+                &mut state.events,
+                id,
+                event,
+                &payload,
+            ) {
                 return true;
             }
             if let EventPayload::Touch(touch) = payload {
@@ -2470,7 +2521,8 @@ import { text } from "nsh:rt";
 import { Button } from "nsh/base";
 import { Forward, Business } from "test/presented";
 const rendered = signal("");
-const report = value => { text(value); rendered.set(value); };
+let sequence = 0;
+const report = value => { text(value); rendered.set(`${++sequence}:${value}`); };
 mount(() => <View>
   <Button testID="button" onPress={() => report("button")} />
   <Forward onPress={() => report("forward")} />
@@ -2536,7 +2588,7 @@ mount(() => <View>
         assert!(engine.dispatch_event_now(button, EventKind::Press, EventPayload::None));
         assert_eq!(reports(&mut engine), ["button"]);
         engine.pump();
-        assert_eq!(rendered(), ["button"]);
+        assert_eq!(rendered(), ["1:button"]);
 
         engine
             .control()
@@ -2555,8 +2607,8 @@ mount(() => <View>
         engine.pump();
         assert_eq!(
             rendered(),
-            ["forward", "button"],
-            "the commit applies direct output before the queued callback's output"
+            ["3:button"],
+            "direct and queued callbacks execute once in order before the single commit"
         );
 
         assert!(engine.dispatch_event_now(business, EventKind::Press, EventPayload::None));
@@ -2568,7 +2620,7 @@ mount(() => <View>
         engine.pump();
         assert_eq!(
             rendered(),
-            ["business"],
+            ["4:business"],
             "the first callback's own emit survives"
         );
 
@@ -2576,11 +2628,105 @@ mount(() => <View>
             .control()
             .dispatch_event(forward, EventKind::Press, EventPayload::None);
         engine.pump();
-        assert_eq!(rendered(), ["forward"]);
+        assert_eq!(rendered(), ["5:forward"]);
         assert_eq!(
             LATER.with(Cell::get),
             1,
             "ordinary queued dispatch retains all listeners"
+        );
+    }
+
+    #[cfg(feature = "js")]
+    #[test]
+    fn queued_component_and_js_inputs_keep_fifo_before_timers_in_one_frame() {
+        use nsh_core::{ApproxTextEngine, EventKind, EventPayload};
+
+        use super::{Bundle, EngineConfig, LocalEngine, MountSink};
+
+        struct Sink(crossbeam_channel::Sender<nsh_core::MountBatch>);
+        impl MountSink for Sink {
+            fn submit(&self, batch: nsh_core::MountBatch) {
+                self.0.send(batch).unwrap();
+            }
+        }
+        let registry = nsh_base::registry();
+        let source = nsh_bundler::compile_module(
+            "queued-input.tsx",
+            r#"import { mount, signal, Text, View } from "nsh";
+import { Button } from "nsh/base";
+const output = signal("");
+const record = value => output.set(output() ? `${output()},${value}` : value);
+mount(() => <View>
+  <Button testID="button" onPress={() => record("button")} />
+  <View testID="shortcut" onPress={() => record("shortcut")} />
+  <View testID="arm" onPress={() => {
+    output.set("");
+    setTimeout(() => record("timer"), 0);
+  }} />
+  <Text>{output()}</Text>
+</View>);"#,
+            &[(&registry).into()],
+        )
+        .unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut engine = LocalEngine::start(
+            EngineConfig {
+                ui_sets: vec![registry],
+                ..EngineConfig::new(Bundle::source(source))
+            },
+            ApproxTextEngine,
+            Sink(tx),
+        )
+        .unwrap();
+        let first = rx.try_recv().unwrap();
+        let node = |name| {
+            first
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    MountItem::ViewProps { id, props }
+                        if props.test_id.as_deref() == Some(name) =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        let (button, shortcut, arm) = (node("button"), node("shortcut"), node("arm"));
+        let control = engine.control();
+        let press = |node| control.dispatch_event(node, EventKind::Press, EventPayload::None);
+        let frame = || {
+            let frames = rx.try_iter().collect::<Vec<_>>();
+            assert_eq!(frames.len(), 1, "one pump produces one completed frame");
+            frames
+                .into_iter()
+                .flat_map(|batch| batch.items)
+                .filter_map(|item| match item {
+                    MountItem::Text { text, .. } => Some(text.text.clone()),
+                    _ => None,
+                })
+                .next_back()
+                .unwrap()
+        };
+        press(button);
+        press(shortcut);
+        engine.pump();
+        assert_eq!(frame(), "button,shortcut");
+
+        press(arm);
+        press(shortcut);
+        press(button);
+        engine.pump();
+        assert_eq!(frame(), "shortcut,button,timer");
+
+        press(arm);
+        press(button);
+        engine.pump();
+        assert_eq!(
+            frame(),
+            "button,timer",
+            "the final input precedes due timers too"
         );
     }
 
