@@ -944,41 +944,41 @@ pub(crate) fn paint(
             else {
                 continue;
             };
+            let mut samples = [[0.0f32; 4]; 4];
+            // Visit each sample row once, retaining each quadrant's original
+            // sample coordinates and accumulation order.
+            for sy in 0..8 {
+                let py = (y as f32 + (sy / 4) as f32 * 0.5 + ((sy % 4) as f32 + 0.5) / 8.0) * ch;
+                if py < top || py >= bottom {
+                    continue;
+                }
+                for sx in 0..4 {
+                    let px =
+                        (x as f32 + (sx / 2) as f32 * 0.5 + ((sx % 2) as f32 + 0.5) / 4.0) * cw;
+                    if px < left || px >= right {
+                        continue;
+                    }
+                    let mut color =
+                        raster.sample((px - dest.origin.x) / w * iw, (py - dest.origin.y) / h * ih);
+                    if let Some([r, g, b, a]) = tinted {
+                        color = [
+                            r * color[3] * a,
+                            g * color[3] * a,
+                            b * color[3] * a,
+                            color[3] * a,
+                        ];
+                    }
+                    let sampled = &mut samples[(sy / 4) * 2 + sx / 2];
+                    for k in 0..4 {
+                        sampled[k] += color[k] * opacity / 8.0;
+                    }
+                }
+            }
             let mut underlay = None;
             let mut colors = [[0.0; 3]; 4];
             let mut painted = false;
             for quadrant in 0..4 {
-                let mut sampled = [0.0f32; 4];
-                // Supersampling prevents one-point wide chart strokes and
-                // small details disappearing. Splitting the existing 4 × 8
-                // sample grid keeps the sampling cost unchanged.
-                for sy in 0..4 {
-                    let py =
-                        (y as f32 + (quadrant / 2) as f32 * 0.5 + (sy as f32 + 0.5) / 8.0) * ch;
-                    if py < top || py >= bottom {
-                        continue;
-                    }
-                    for sx in 0..2 {
-                        let px =
-                            (x as f32 + (quadrant % 2) as f32 * 0.5 + (sx as f32 + 0.5) / 4.0) * cw;
-                        if px < left || px >= right {
-                            continue;
-                        }
-                        let mut color = raster
-                            .sample((px - dest.origin.x) / w * iw, (py - dest.origin.y) / h * ih);
-                        if let Some([r, g, b, a]) = tinted {
-                            color = [
-                                r * color[3] * a,
-                                g * color[3] * a,
-                                b * color[3] * a,
-                                color[3] * a,
-                            ];
-                        }
-                        for k in 0..4 {
-                            sampled[k] += color[k] * opacity / 8.0;
-                        }
-                    }
-                }
+                let sampled = samples[quadrant];
                 if sampled[3] > 0.0 {
                     painted = true;
                 }
