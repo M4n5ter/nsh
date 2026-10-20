@@ -1958,6 +1958,275 @@ mod tests {
     }
 
     #[test]
+    fn a_list_follows_appends_after_an_unacknowledged_viewport_growth() {
+        use nsh_core::{CellSlot, Core, Op, Prop, Style, StylePatch, StyleValue, Tag};
+        use ratatui::{buffer::Buffer, layout::Rect};
+
+        fn height(id: NodeId, value: f32) -> Op {
+            let mut style = Box::<Style>::default();
+            let mut patch = StylePatch::default();
+            patch
+                .set(&mut style, "height", StyleValue::Number(value))
+                .unwrap();
+            Op::SetStyle { id, style, patch }
+        }
+
+        // Play the existing JS List protocol: bind native cells, provide their
+        // real four-line contents, then confirm each cell's item index.
+        fn commit(
+            core: &mut Core<crate::TerminalTextEngine>,
+            surface: &mut Surface,
+            cells: &mut Vec<NodeId>,
+        ) {
+            for _ in 0..8 {
+                if let Some(batch) = core.commit() {
+                    surface.apply(batch);
+                }
+                let mut binds = Vec::new();
+                core.take_list_binds(&mut binds);
+                if binds.is_empty() {
+                    return;
+                }
+                for bind in binds {
+                    for (slot, index) in bind.binds {
+                        while cells.len() <= slot as usize {
+                            let cell = 100 + cells.len() as u32 * 3;
+                            for op in [
+                                Op::Create {
+                                    id: cell,
+                                    tag: Tag::Cell,
+                                },
+                                Op::SetProp {
+                                    id: cell,
+                                    prop: Prop::Slot(CellSlot::Item(cells.len() as u32)),
+                                },
+                                height(cell, 64.0),
+                                Op::Create {
+                                    id: cell + 1,
+                                    tag: Tag::Text,
+                                },
+                                Op::CreateText {
+                                    id: cell + 2,
+                                    text: "".into(),
+                                },
+                                Op::Insert {
+                                    parent: cell + 1,
+                                    child: cell + 2,
+                                    before: None,
+                                },
+                                Op::Insert {
+                                    parent: cell,
+                                    child: cell + 1,
+                                    before: None,
+                                },
+                                Op::Insert {
+                                    parent: bind.list,
+                                    child: cell,
+                                    before: None,
+                                },
+                            ] {
+                                core.apply(op).unwrap();
+                            }
+                            cells.push(cell);
+                        }
+                        let cell = cells[slot as usize];
+                        core.apply(Op::SetText {
+                            id: cell + 2,
+                            text: format!("ROW {index:02}\na\nb\nTAIL {index:02}"),
+                        })
+                        .unwrap();
+                        core.apply(Op::SetProp {
+                            id: cell,
+                            prop: Prop::CellIndex(index),
+                        })
+                        .unwrap();
+                    }
+                }
+            }
+            panic!("the fixed-height List did not finish its native cell bindings");
+        }
+
+        fn acknowledge(core: &mut Core<crate::TerminalTextEngine>, surface: &mut Surface) {
+            for event in surface.drain_events() {
+                if let SurfaceEvent::Scroll(id, offset, applied) = event {
+                    core.set_scroll_offset(id, offset, applied);
+                }
+            }
+        }
+
+        // A reader away from the end must keep the same content. A reader at
+        // the end must see the complete new final line, even before the native
+        // clamp caused by the first commit has been acknowledged by the core.
+        for (initial, expected, sees_tail) in [(400.0, 400.0, false), (1200.0, 1216.0, true)] {
+            let metrics = CellMetrics::default();
+            let mut core = Core::new(
+                crate::TerminalTextEngine::new(metrics),
+                Size::new(px(160.0), px(640.0)),
+            );
+            let mut surface = Surface::new(20, 40, metrics);
+            let mut cells = Vec::new();
+            for op in [
+                Op::Create {
+                    id: 2,
+                    tag: Tag::List,
+                },
+                height(2, 400.0),
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::EstimatedItemSize(px(64.0)),
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::FollowEnd(Some(px(32.0))),
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Count(25),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ] {
+                core.apply(op).unwrap();
+            }
+            commit(&mut core, &mut surface, &mut cells);
+            surface.scroll_to(2, px(0.0), px(initial));
+            acknowledge(&mut core, &mut surface);
+            commit(&mut core, &mut surface, &mut cells);
+            acknowledge(&mut core, &mut surface);
+            assert_eq!(surface.node(2).unwrap().scroll.content.height, px(1600.0));
+            assert_eq!(surface.node(2).unwrap().scroll.y, px(initial));
+
+            // A footer disappears: the physical viewport grows by three rows.
+            core.apply(height(2, 448.0)).unwrap();
+            commit(&mut core, &mut surface, &mut cells);
+            assert_eq!(surface.node(2).unwrap().frame.size.height, px(448.0));
+            assert_eq!(surface.node(2).unwrap().scroll.y, px(initial.min(1152.0)));
+            // Deliberately leave that real SurfaceEvent::Scroll queued while
+            // the engine receives the next item's content in a second commit.
+            core.apply(Op::SetProp {
+                id: 2,
+                prop: Prop::Count(26),
+            })
+            .unwrap();
+            commit(&mut core, &mut surface, &mut cells);
+            assert_eq!(surface.node(2).unwrap().scroll.content.height, px(1664.0));
+            assert_eq!(surface.node(2).unwrap().scroll.y, px(expected));
+            let area = Rect::new(0, 0, 20, 40);
+            let mut buffer = Buffer::empty(area);
+            surface.render_plain(area, &mut buffer);
+            let painted = buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert_eq!(painted.contains("TAIL 25"), sees_tail);
+
+            // Late reports and another append cannot undo the chosen reading
+            // position or turn a programmatic clamp into a user scroll away.
+            acknowledge(&mut core, &mut surface);
+            commit(&mut core, &mut surface, &mut cells);
+            core.apply(Op::SetProp {
+                id: 2,
+                prop: Prop::Count(27),
+            })
+            .unwrap();
+            commit(&mut core, &mut surface, &mut cells);
+            assert_eq!(
+                surface.node(2).unwrap().scroll.y,
+                px(if sees_tail { 1280.0 } else { 400.0 })
+            );
+        }
+    }
+
+    #[test]
+    fn list_follow_preserves_a_valid_offset_inside_the_content_inset() {
+        use nsh_core::{
+            Core, EdgeInsets, Op, Prop, ScrollProp, Style, StylePatch, StyleValue, Tag,
+        };
+
+        fn height(value: f32) -> Op {
+            let mut style = Box::<Style>::default();
+            let mut patch = StylePatch::default();
+            patch
+                .set(&mut style, "height", StyleValue::Number(value))
+                .unwrap();
+            Op::SetStyle {
+                id: 2,
+                style,
+                patch,
+            }
+        }
+
+        let metrics = CellMetrics::default();
+        let mut core = Core::new(
+            crate::TerminalTextEngine::new(metrics),
+            Size::new(px(160.0), px(640.0)),
+        );
+        let mut surface = Surface::new(20, 40, metrics);
+        for op in [
+            Op::Create {
+                id: 2,
+                tag: Tag::List,
+            },
+            height(400.0),
+            Op::SetProp {
+                id: 2,
+                prop: Prop::EstimatedItemSize(px(64.0)),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::FollowEnd(Some(px(32.0))),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Count(25),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Scroll(ScrollProp::ContentInset(EdgeInsets {
+                    bottom: px(64.0),
+                    ..Default::default()
+                })),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ] {
+            core.apply(op).unwrap();
+        }
+        surface.apply(core.commit().unwrap());
+        surface.scroll_to(2, px(0.0), px(1248.0));
+        for event in surface.drain_events() {
+            if let SurfaceEvent::Scroll(id, offset, applied) = event {
+                core.set_scroll_offset(id, offset, applied);
+            }
+        }
+        if let Some(batch) = core.commit() {
+            surface.apply(batch);
+        }
+        surface.events.clear();
+
+        // The trailing inset keeps 1248 valid when the viewport grows. The
+        // native view does not clamp it, so the core must not invent a clamp.
+        core.apply(height(416.0)).unwrap();
+        surface.apply(core.commit().unwrap());
+        assert_eq!(surface.node(2).unwrap().scroll.y, px(1248.0));
+        core.apply(Op::SetProp {
+            id: 2,
+            prop: Prop::Count(26),
+        })
+        .unwrap();
+        surface.apply(core.commit().unwrap());
+        assert_eq!(surface.node(2).unwrap().scroll.content.height, px(1664.0));
+        assert_eq!(surface.node(2).unwrap().scroll.y, px(1248.0));
+    }
+
+    #[test]
     fn app_header_and_mirrored_cells_share_paint_and_hit_geometry() {
         let mut surface = Surface::new(20, 10, CellMetrics::default());
         create(

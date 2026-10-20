@@ -796,6 +796,15 @@ impl ListState {
         }
     }
 
+    /// Predicts the platform's upper clamp before its scroll report arrives.
+    /// Later relative corrections must start at the same clamped reported offset;
+    /// explicit pins supply their own correction before the viewport frame.
+    pub(super) fn predict_clamp(&mut self, maximum: f32) {
+        if !self.inverted && self.follow_end.is_some() && self.pin.is_none() {
+            self.offset = self.offset.min(maximum);
+        }
+    }
+
     /// Inverted lists keep their distance from the end of the content:
     /// returns how far to scroll after content or viewport changes (and
     /// starts at the end). Other lists with `follow_end` stay at the end

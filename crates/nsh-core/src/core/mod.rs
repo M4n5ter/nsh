@@ -4381,6 +4381,14 @@ impl<M: TextEngine> Core<M> {
             }
             let (id, events) = (node.id, node.events);
             let horizontal = list.horizontal;
+            let scroll = node.scroll.as_ref().expect("list scroll");
+            let zoom = scroll.zoom;
+            let inset = scroll.behavior.content_inset;
+            let (leading, trailing) = if horizontal {
+                (inset.left.0, inset.right.0)
+            } else {
+                (inset.top.0, inset.bottom.0)
+            };
             let l = *self
                 .layout
                 .layout(node.layout.expect("list layout"))
@@ -4429,6 +4437,8 @@ impl<M: TextEngine> Core<M> {
             list.offset += anchor;
             // A splice above the viewport already moved the offset.
             anchor += list.take_splice_anchor();
+            let maximum = (list.content_len() * zoom - main + trailing).max(-leading);
+            list.predict_clamp(maximum);
             // Inverted lists keep their distance from the end instead;
             // `maintainVisibleContentPosition` follows the end near it.
             anchor += list.anchor_end();
