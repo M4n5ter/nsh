@@ -9,8 +9,9 @@ Rust); layout uses Taffy; embedding native components such as maps or web views 
 toolchain is pure Rust and does not need Node.js; app developers get a prebuilt distribution (`cargo xtask dist`) and
 never need Rust either. Every platform has a native backend: iOS with UIKit views (`nsh-platform-ios`), Android with
 Android views (`nsh-platform-android`), macOS with AppKit views (`nsh-platform-macos`), Windows in Win32 windows drawn
-with Direct2D (`nsh-platform-windows`), Linux with GTK 4 widgets (`nsh-platform-linux`). The GPUI backend
-(`nsh-platform-gpui`) draws on macOS, Windows and Linux and embeds in GPUI / GPUI Kit apps; the web platform
+with Direct2D (`nsh-platform-windows`), Linux with GTK 4 widgets (`nsh-platform-linux`). Each desktop OS has one
+backend for standalone apps (AppKit, Win32, GTK 4); the GPUI backend (`nsh-platform-gpui`) draws on macOS, Windows and
+Linux and is the backend for embedding in GPUI / GPUI Kit apps; the web platform
 (`nsh-platform-web`) renders apps as HTML in a browser page, and `nsh package --target web` publishes them as static
 sites. The terminal backend (`nsh-platform-tui`) draws into Ratatui buffers on all three desktops and embeds in
 terminal apps. NSH is layered as GPUI Kit is: `nsh-core` is NSH's `gpui` (primitives, layout, rendering), `nsh-base` its
@@ -117,10 +118,10 @@ crates/
                        `DrawCx` with the transform and opacity GPUI lacks), text shaped by GPUI's text system on the engine
                        thread, the main-thread queue (`rt.rs`), GPUI events (`events.rs`, keys as Windows VK codes);
                        `AppView` is a GPUI view for GPUI / GPUI Kit apps; features `webview` (wry), `video` (GStreamer),
-                       `dev` as above, `shot` (`--script` shots on macOS / Windows: GPUI's test support, never in the runner)
-                       (docs/dev/gpui.md)
-  gpui/nsh-gpui-host/  Development host on GPUI (`nsh run --target gpui`): connects to a dev server or runs a bundle
-  gpui/nsh-gpui-app/   Release runner on GPUI: the executable of apps built by `nsh package --target gpui`
+                       `dev` as above, `shot` (`--script` shots on macOS / Windows: GPUI's test support); it is the
+                       backend for embedding, standalone apps run on each OS's own backend (docs/dev/gpui.md)
+  gpui/nsh-gpui-host/  Development host on GPUI (`nsh run --target gpui`): shows a TSX app as GPUI apps that embed it
+                       show it; connects to a dev server or runs a bundle
   nsh-ios-host/        Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
   nsh-ios-app/         Release runner: the executable of iOS apps built by `nsh package`
   nsh-cli/             The `nsh` command line (a binary): init / build / test / check / dev / run / package; keygen /
@@ -152,7 +153,7 @@ examples/             Example apps (gallery: a demo index, one module per demo, 
 ```
 
 Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ←
-`nsh-ios-host` / `nsh-ios-app` / `nsh-linux-host` / `nsh-linux-app` / `nsh-macos-host` / `nsh-macos-app` / `nsh-windows-host` / `nsh-windows-app` / `nsh-gpui-host` / `nsh-gpui-app` / `nsh-tui-host` / `nsh-tui-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`; `nsh-bundler`'s feature `bundle` depends on `nsh-js` (to check
+`nsh-ios-host` / `nsh-ios-app` / `nsh-linux-host` / `nsh-linux-app` / `nsh-macos-host` / `nsh-macos-app` / `nsh-windows-host` / `nsh-windows-app` / `nsh-gpui-host` / `nsh-tui-host` / `nsh-tui-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`; `nsh-bundler`'s feature `bundle` depends on `nsh-js` (to check
 imports against the names native modules export); `nsh-base` depends on `nsh-core` only and is used by the bundler
 (declarations), the platforms and the CLI (registry). An app's own crates (its UI sets) depend on `nsh-core` only and
 are never linked into the CLI: it reads their UI sets as data (`nsh_core::ui::description`); the hosts and runners
@@ -219,8 +220,7 @@ echo 'await app.press("label:Plan"); await app.wait(500)' | ./target/debug/nsh t
 ./target/debug/nsh-linux-host --script "wait 800; shot a.png; quit"        # Linux host, scripted: screenshots and simulated input
 ./target/debug/nsh run examples/gallery --target windows                   # in a Win32 window, 1200×800 (the default on Windows)
 ./target/debug/nsh-windows-host --bundle build/bundle.nshc --script "wait 800; shot a.png; quit"   # Windows host, scripted (connects to `nsh dev` without --bundle)
-./target/debug/nsh run examples/gallery --target gpui                      # in a GPUI window (macOS, Windows, Linux)
-./target/debug/nsh package examples/gallery --target gpui                  # packaged as this OS's apps are, with the GPUI runner
+./target/debug/nsh run examples/gallery --target gpui                      # in a GPUI window (macOS, Windows, Linux), as GPUI apps embed it
 ./target/debug/nsh run examples/terminal-workbench --target tui            # in this terminal, with hot reload
 ./target/debug/nsh package examples/terminal-workbench --target tui        # console executable and resources, archived for this OS
 ./target/debug/nsh-tui-host --bundle build/bundle.nshc --size 120x40 --script "wait 300; shot screen.txt; quit"   # headless text snapshot
@@ -271,7 +271,7 @@ check them on Windows, with the MSVC Build Tools, the Windows SDK and LLVM (libc
 a workspace of its own: the main workspace's `cargo test --workspace` and clippy never build it, and its CI runs only when
 it changes (and daily). Its crates build on all three desktops and are empty elsewhere; on Linux they need GPUI's X11 /
 Wayland / xkbcommon / fontconfig packages plus GTK 3, WebKitGTK 4.1 (feature `webview`, on by default) and GStreamer
-1.20+ with its base plug-ins (feature `video`, the host's and the runner's); on macOS Xcode's Metal Toolchain, or the
+1.20+ with its base plug-ins (feature `video`, the host's); on macOS Xcode's Metal Toolchain, or the
 feature `runtime-shaders` (`docs/dev/gpui.md`), which the CLI turns on when `xcrun metal` fails. It builds into the
 repository's `target/`; dependencies only it uses are declared in `crates/gpui/Cargo.toml`, not the root. `.cargo/config.toml` sets
 `IPHONEOS_DEPLOYMENT_TARGET = 15.0` for Rust and C alike.
@@ -284,6 +284,11 @@ when changing text measurement, clipping, pointer input or scripts (`docs/dev/tu
 
 ## Rules
 
+- **Convention over configuration (CoC, a project constraint).** Follow the existing project and toolchain conventions
+  before adding configuration, wrapper scripts, environment overrides or another cache directory. NSH-managed
+  temporary/generated files belong in `.nsh/`. Cargo keeps its normal `target/` directory and the user's existing
+  `CARGO_TARGET_DIR` behavior; do not add Cargo configuration or change that environment variable just to organize
+  NSH files. Reuse the existing Cargo cache rather than creating a second one under `.nsh/`.
 - **Three layers, as GPUI Kit's (an architecture rule).** `nsh-core` ↔ `gpui`: the primitives and the environment,
   `nsh` / `nsh/<module>` (native in `crates/nsh-js` or Rust modules of the runtime, `crates/nsh-core/src/runtime/`).
   `nsh-base` ↔ `gpui-base`: `nsh/base` (`crates/nsh-base`), unstyled base components of `gpui-base`'s scope that own

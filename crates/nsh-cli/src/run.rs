@@ -32,7 +32,7 @@ pub(crate) enum Target {
     /// page).
     Web,
     /// The GPUI development host, in a window on this machine (macOS,
-    /// Windows or Linux).
+    /// Windows or Linux): the app as GPUI apps that embed it show it.
     Gpui,
     /// The development host in this terminal.
     Tui,
@@ -95,9 +95,16 @@ pub(crate) struct HostWindow<'a> {
 impl HostWindow<'_> {
     /// Refuses the options `target`'s host does not take. An app of Rust
     /// only (`rust_root`) runs in its runner, which takes the script
-    /// (`NSH_SCRIPT`) on macOS, Linux and Windows: GPUI's runner has no
-    /// screenshots (they need GPUI's test support).
+    /// (`NSH_SCRIPT`) on macOS, Linux and Windows; GPUI has no runner (it is
+    /// the backend for embedding in GPUI apps), so such an app does not run
+    /// there at all.
     fn check(&self, target: Target, rust_root: bool) -> anyhow::Result<()> {
+        if rust_root && target == Target::Gpui {
+            bail!(
+                "a Rust app runs on this OS's own backend (--target macos, linux or windows); \
+                 GPUI apps embed its root with AppView"
+            );
+        }
         let desktop = matches!(
             target,
             Target::Macos | Target::Linux | Target::Windows | Target::Gpui
@@ -112,15 +119,8 @@ impl HostWindow<'_> {
                 "--window-size needs a desktop host (--target macos, linux, windows or gpui) and a TSX entry"
             );
         }
-        if self.script.is_some() {
-            if rust_root && !matches!(target, Target::Macos | Target::Linux | Target::Windows) {
-                bail!("--script runs in a desktop runner: pass --target macos, linux or windows");
-            }
-            if !desktop {
-                bail!(
-                    "--script runs in a desktop host: pass --target macos, linux, windows or gpui"
-                );
-            }
+        if self.script.is_some() && !desktop {
+            bail!("--script runs in a desktop host: pass --target macos, linux, windows or gpui");
         }
         Ok(())
     }
@@ -352,7 +352,7 @@ fn run_rust_app(
     };
     let run = work.join("rust");
     match target {
-        Target::Linux | Target::Macos | Target::Windows | Target::Gpui | Target::Tui => {
+        Target::Linux | Target::Macos | Target::Windows | Target::Tui => {
             let runner = crate::runtime::file(target.platform(), false)?;
             let dir = run.join("run/nsh");
             resources(&dir)?;
@@ -453,6 +453,7 @@ fn run_rust_app(
             session.print_web_url();
             session.watch(|| Ok(false))
         }
+        Target::Gpui => unreachable!("refused by HostWindow::check"),
     }
 }
 
@@ -1002,7 +1003,9 @@ mod tests {
         for target in [Target::Macos, Target::Linux, Target::Windows] {
             assert!(script.check(target, true).is_ok(), "Rust app, {target:?}");
         }
+        // GPUI runs no Rust app on its own, with or without a script.
         assert!(script.check(Target::Gpui, true).is_err());
+        assert!(HostWindow::default().check(Target::Gpui, true).is_err());
         assert!(script.check(Target::Tui, true).is_err());
         let sized = HostWindow {
             size: Some("700x500"),

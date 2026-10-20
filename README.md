@@ -37,9 +37,10 @@ Documentation, guides and live demos: **[nsh.dev](https://nsh.dev)**.
 | Terminal (macOS, Windows, Linux) | Ratatui, Crossterm | `AppView` (Rust, a Ratatui region, `nsh-platform-tui`) | Interactive terminal |
 | Web | HTML, CSS | `createPlayer` (JavaScript) or an iframe | Modern browsers |
 
-The GPUI backend (`nsh run --target gpui`, `nsh package --target gpui`) draws apps with GPUI on all three desktops and
-embeds in GPUI and GPUI Kit apps. The web platform (`nsh run --target web`, `nsh package --target web`) publishes apps
-as static sites and runs the website's live demos.
+Each desktop runs and packages apps with its own backend (AppKit, Win32, GTK 4). The GPUI backend draws with GPUI on
+all three desktops and embeds NSH in GPUI and GPUI Kit apps; `nsh run --target gpui` shows an app as they do. The web
+platform (`nsh run --target web`, `nsh package --target web`) publishes apps as static sites and runs the website's
+live demos.
 The terminal backend (`nsh run --target tui`, `nsh package --target tui`) shares the same runtime and layout,
 with keyboard focus, Unicode editing and mouse input. Images and canvas drawing use terminal graphics protocols
 and half-block rendering for portable composition.
@@ -139,7 +140,7 @@ nsh run my-app --target linux      # GTK 4 window
 <summary>GPUI (macOS, Windows, Linux)</summary>
 
 ```sh
-nsh run my-app --target gpui
+nsh run my-app --target gpui       # as GPUI apps that embed it show it
 ```
 
 </details>
