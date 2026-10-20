@@ -374,6 +374,7 @@ runners remain console applications.
 | `AppView::register_component(name, factory)`; `stop()` | Register a native terminal leaf and stop the engine |
 | `Surface::new(u16, u16, CellMetrics)` | Retained rendering/input layer for hosts supplying their own engine wiring |
 | `Surface::apply(MountBatch)`, `tick(f64)`, `animating()`, `render(Rect, &mut Buffer)` | Mount and draw the scene |
+| `Surface::render_plain(Rect, &mut Buffer)` | Draw one pass with Unicode image/canvas blocks while retaining the configured protocol for later passes |
 | `Surface::metrics`, `viewport`, `resize`, `snapshot`, `focused`, `should_quit` | Geometry and interaction inspection |
 | `Surface::focus_path() -> Vec<NodeId>` | Focused node followed by its mounted ancestors, or an empty path when no node has focus |
 | `EngineControl::set_focus_path(Vec<NodeId>)` | Queue the native focus snapshot before input events or environment updates |
@@ -408,6 +409,14 @@ Embedding hosts own event routing. Mouse events supplied to `AppView` use
 cells relative to the assigned region; drawing uses the region's absolute
 Ratatui rectangle. Native components receive destination cell rectangles
 and must respect both their clip and the buffer bounds.
+
+`Surface::render_plain` gives an embedding host a per-pass Unicode image
+path without changing the selected protocol or clearing its encoding cache.
+It neither requests protocol encodings nor consumes protocol uploads. A host
+can use it when rejecting an unpublished Sixel candidate before its terminal
+backend swaps buffers. The host owns whole-frame admission and retry ordering;
+this method does not roll back earlier protocol state or terminal output and
+cannot restore a Kitty upload already consumed by `render`.
 
 Hosts driving a `Surface` with `nsh_engine::LocalEngine` retain an
 exact-presentation path for input. They deliver presented input through

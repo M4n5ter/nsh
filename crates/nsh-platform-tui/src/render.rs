@@ -38,7 +38,13 @@ impl Surface {
         self.render_scene(area, buffer, true);
     }
 
-    pub(crate) fn render_plain(&self, area: CellRect, buffer: &mut Buffer) {
+    /// Paints the surface using Unicode image and canvas blocks for this pass.
+    ///
+    /// The configured image protocol and its retained encodings remain
+    /// available to later [`Self::render`] calls. This pass neither requests
+    /// protocol encodings nor consumes protocol uploads. It does not undo an
+    /// earlier render's state: hosts must not use it to roll back a Kitty upload.
+    pub fn render_plain(&self, area: CellRect, buffer: &mut Buffer) {
         self.render_scene(area, buffer, false);
     }
 
@@ -3049,6 +3055,35 @@ mod tests {
         });
         surface.render(area, &mut buffer);
         assert!(buffer[(1, 1)].symbol().contains("1337;File"));
+    }
+
+    #[test]
+    fn a_plain_pass_replaces_sixel_cells_without_disabling_later_protocol_renders() {
+        let mut surface = protocol_scene(crate::ProtocolType::Sixel);
+        let area = CellRect::new(0, 0, 20, 8);
+        let mut buffer = Buffer::empty(area);
+        surface.render_plain(area, &mut buffer);
+        assert!(!surface.protocol.pending());
+        assert_eq!(buffer[(1, 1)].symbol(), "▀");
+        assert_eq!(buffer[(1, 1)].fg, CellColor::Rgb(255, 127, 127));
+        assert_eq!(buffer[(1, 1)].bg, CellColor::Rgb(255, 127, 127));
+
+        surface.render(area, &mut buffer);
+        wait_protocol_encodings(&mut surface);
+        surface.render(area, &mut buffer);
+        assert!(buffer[(1, 1)].symbol().contains("\u{1b}P"));
+        assert!(buffer[(5, 1)].symbol().contains("\u{1b}P"));
+
+        surface.render_plain(area, &mut buffer);
+        assert_eq!(buffer[(1, 1)].symbol(), "▀");
+        assert_eq!(buffer[(1, 1)].fg, CellColor::Rgb(255, 127, 127));
+        assert_eq!(buffer[(5, 1)].symbol(), "▀");
+        assert!(buffer.content.iter().all(|cell| {
+            !cell.symbol().contains('\u{1b}') && cell.diff_option == CellDiffOption::None
+        }));
+        surface.render(area, &mut buffer);
+        assert!(buffer[(1, 1)].symbol().contains("\u{1b}P"));
+        assert!(!surface.protocol.pending());
     }
 
     #[test]
