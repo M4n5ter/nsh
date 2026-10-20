@@ -231,7 +231,7 @@ new frames and across app reloads. Embedded hosts write
 terminal resources; the standalone terminal guard handles this on exit.
 Hosts reserve the rendered region for the surface when using graphics
 protocols. Before painting their own overlapping widgets above that
-region, they select half blocks with `set_image_protocol(None)`; internal
+region, they select Unicode blocks with `set_image_protocol(None)`; internal
 NSH overlays already make that composition decision automatically.
 
 View transforms use inverse homographies for raster contents and hit
@@ -363,7 +363,7 @@ runners remain console applications.
 | `Surface::perform_accessibility_action(NodeId, &str) -> bool` | Invoke a mounted semantic action |
 | `AppView::set_image_protocol(Option<ImageProtocol>)`; `Surface::set_image_protocol(Option<ImageProtocol>)` | Choose host-negotiated graphics without terminal IO |
 | `AppView::image_protocol_cleanup() -> String`; `Surface::image_protocol_cleanup() -> String` | Return commands for the host to release its view's Kitty image resources |
-| `ImageProtocol::new(ProtocolType, u16, u16) -> Result<Self, String>`; `with_tmux(bool)`, `protocol_type()`, `cell_size()` | Select Kitty, Sixel, iTerm2 or half blocks with physical cell pixels |
+| `ImageProtocol::new(ProtocolType, u16, u16) -> Result<Self, String>`; `with_tmux(bool)`, `protocol_type()`, `cell_size()` | Select Kitty, Sixel, iTerm2 or Unicode blocks with physical cell pixels |
 | `AppView::register_component(name, factory)`; `stop()` | Register a native terminal leaf and stop the engine |
 | `Surface::new(u16, u16, CellMetrics)` | Retained rendering/input layer for hosts supplying their own engine wiring |
 | `Surface::apply(MountBatch)`, `tick(f64)`, `animating()`, `render(Rect, &mut Buffer)` | Mount and draw the scene |

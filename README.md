@@ -43,7 +43,7 @@ platform (`nsh run --target web`, `nsh package --target web`) publishes apps as 
 live demos.
 The terminal backend (`nsh run --target tui`, `nsh package --target tui`) shares the same runtime and layout,
 with keyboard focus, Unicode editing and mouse input. Images and canvas drawing use terminal graphics protocols
-and half-block rendering for portable composition.
+and Unicode block rendering for portable composition.
 
 ## Quick start
 
