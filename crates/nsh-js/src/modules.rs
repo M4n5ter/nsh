@@ -354,6 +354,10 @@ enum Made {
     Function(Arc<ModuleSpec>, &'static str),
     /// A Rust class (`#[class]`).
     Class(&'static nsh_core::ui::ClassDef),
+    /// A value supplied by this VM's embedding host.
+    Value(nsh_core::ui::ValueSpec),
+    /// Conflicting host bindings must fail instead of choosing an authority.
+    DuplicateValue,
     /// A runtime value a registry exports as it is (`safeArea`).
     Reexport(&'static str),
 }
@@ -443,6 +447,9 @@ impl ModuleTable {
             for class in registry.class_specs() {
                 out.push((class.name.to_owned(), Made::Class(class.def)));
             }
+            for value in registry.value_specs() {
+                out.push((value.name.to_owned(), Made::Value(value.clone())));
+            }
             for &value in registry
                 .reexports()
                 .0
@@ -450,6 +457,17 @@ impl ModuleTable {
                 .chain(registry.native_value_names())
             {
                 out.push((value.to_owned(), Made::Reexport(value)));
+            }
+        }
+        let conflicts: std::collections::HashSet<_> = out
+            .iter()
+            .filter(|(_, made)| matches!(made, Made::Value(_)))
+            .filter(|(name, _)| out.iter().filter(|(other, _)| other == name).count() > 1)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for (name, made) in &mut out {
+            if conflicts.contains(name) {
+                *made = Made::DuplicateValue;
             }
         }
         // nsh's own export wins over a registry's of the same name (it
@@ -588,6 +606,19 @@ unsafe extern "C" fn init(ctx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_in
         let Some(exports) = exports else {
             return -1;
         };
+        // Reject ambiguous authority before constructing any host values.
+        if let Some((name, _)) = exports
+            .iter()
+            .find(|(_, made)| matches!(made, Made::DuplicateValue))
+        {
+            let name = CString::new(name.as_str()).unwrap_or_default();
+            qjs::JS_ThrowTypeError(
+                ctx,
+                c"host export '%s' is registered twice".as_ptr(),
+                name.as_ptr(),
+            );
+            return -1;
+        }
         for (export, made) in exports {
             let value = match made {
                 Made::Own(Export::Function(f, length)) => {
@@ -602,7 +633,27 @@ unsafe extern "C" fn init(ctx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_in
                     Ok(ctor) => ctor.take(),
                     Err(_) => qjs::JS_EXCEPTION,
                 },
+                Made::Value(spec) => {
+                    let host = crate::classes::host_outside_calls(ctx);
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        spec.make()
+                            .to_js_value(&host)
+                            .map(|v| crate::classes::from_raw(v.into_raw()))
+                    })) {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(error)) => {
+                            let message = CString::new(error.to_string()).unwrap_or_default();
+                            qjs::JS_ThrowTypeError(ctx, c"%s".as_ptr(), message.as_ptr())
+                        }
+                        Err(panic) => {
+                            let message = CString::new(crate::classes::panic_message(panic))
+                                .unwrap_or_default();
+                            qjs::JS_ThrowInternalError(ctx, c"%s".as_ptr(), message.as_ptr())
+                        }
+                    }
+                }
                 Made::Reexport(value) => env::reexport(ctx, value),
+                Made::DuplicateValue => return -1, // Rejected before constructing values.
             };
             if qjs::JS_IsException(value) {
                 return -1;
@@ -618,6 +669,126 @@ unsafe extern "C" fn init(ctx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_in
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use nsh_core::ui::{JsHost, JsOwned, PropError, Registry, Ret, TsTypes};
+
+    use crate::{Host, HostOptions};
+
+    #[test]
+    fn host_values_are_lazy_once_per_vm_and_absent_from_other_vms() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        let mut registry = Registry::ui_set("test/host");
+        registry.value("identity", move || {
+            called.fetch_add(1, Ordering::SeqCst) as u32
+        });
+        let source = "import { identity } from 'test/host'; if (identity !== EXPECTED) throw Error('wrong owner');";
+        let bytecode = crate::compile_bytecode_with(
+            &source.replace("EXPECTED", "0"),
+            false,
+            &[registry.clone()],
+        )
+        .unwrap();
+        let declarations = crate::type_definitions(&[registry.clone()]);
+        assert!(declarations.iter().any(|(path, body)| {
+            path == "test/host.d.ts" && body.contains("export declare const identity: number;")
+        }));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "tooling cannot acquire host capabilities"
+        );
+
+        let host = Host::with_options(HostOptions {
+            ui_sets: vec![registry.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "VM creation is not import");
+        host.eval_bytecode(&bytecode).unwrap();
+        host.eval_source(&source.replace("EXPECTED", "0")).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let other = Host::with_options(HostOptions {
+            ui_sets: vec![registry],
+            ..Default::default()
+        })
+        .unwrap();
+        other.eval_source(&source.replace("EXPECTED", "1")).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(Host::new().unwrap().eval_source(source).is_err());
+    }
+
+    struct Invalid;
+
+    impl Ret for Invalid {
+        fn ts_type(_: &mut TsTypes) -> String {
+            "never".into()
+        }
+        fn into_js<'a>(self, _: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+            Err(PropError("invalid host value".into()))
+        }
+    }
+
+    #[test]
+    fn host_value_failures_are_module_errors() {
+        for panic in [false, true] {
+            let mut registry = Registry::ui_set("test/bad-host");
+            registry.value("host", move || {
+                assert!(!panic, "host factory failed");
+                Invalid
+            });
+            let host = Host::with_options(HostOptions {
+                ui_sets: vec![registry],
+                ..Default::default()
+            })
+            .unwrap();
+            let error = host
+                .eval_source("import { host } from 'test/bad-host';")
+                .unwrap_err();
+            assert!(
+                error.message.contains(if panic {
+                    "host factory failed"
+                } else {
+                    "invalid host value"
+                }),
+                "{error}"
+            );
+            Host::new()
+                .unwrap()
+                .eval_source("if (globalThis.host !== undefined) throw Error('leaked host');")
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn conflicting_host_registries_do_not_choose_a_factory() {
+        let mut first = Registry::ui_set("test/host");
+        first.value("unrelated", || -> u32 {
+            panic!("module must not acquire host values")
+        });
+        first.value("host", || -> u32 { panic!("first factory must not run") });
+        let mut second = Registry::ui_set("test/host");
+        second.value("host", || -> u32 { panic!("second factory must not run") });
+        let host = Host::with_options(HostOptions {
+            ui_sets: vec![first, second],
+            ..Default::default()
+        })
+        .unwrap();
+        let error = host
+            .eval_source("import { host } from 'test/host';")
+            .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("host export 'host' is registered twice"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn nshs_own_modules_are_the_ones_the_bundler_knows() {
         let names: Vec<&str> = super::MODULES.iter().map(|m| m.name).collect();

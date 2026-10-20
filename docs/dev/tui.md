@@ -79,6 +79,13 @@ metadata and dev-server messages) and Rust roots. Full reloads after hot
 updates retain the latest bundle's id, keeping the same storage. Apps
 with different ids keep separate files in a shared data directory.
 
+`AppOptions::ui_sets` supplies registries to this view's engines and its development handshake.
+`None` uses the process's `set_ui_sets` fallback; `Some(vec![])` explicitly serves no custom modules.
+Use explicit per-view registries for host-owned values (`Registry::value`, [JS modules](js-modules.md#host-owned-values)):
+the factory captures the native capability granted to that view, creates its local wrapper on the
+engine thread at module evaluation, and runs again for each replacement VM. Stopping the view joins
+its engine thread; the embedding host separately closes external subscriptions and tracks service receipts.
+
 ## Coordinates and typography
 
 `CellMetrics::default()` is 8 points wide by 16 points high. A 120×40

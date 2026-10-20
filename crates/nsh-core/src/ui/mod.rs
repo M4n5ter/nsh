@@ -115,7 +115,7 @@ pub use self::{
     },
     component::{
         Api, Component, ComponentError, ComponentSpec, Event, EventSpec, Method, MethodSpec,
-        Methods, NoEvent, Param, PropDecode, PropKind, PropSpec, Props, Registry, Root,
+        Methods, NoEvent, Param, PropDecode, PropKind, PropSpec, Props, Registry, Root, ValueSpec,
         declarations,
     },
     element::{

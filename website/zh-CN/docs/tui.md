@@ -193,6 +193,27 @@ view.render(area, frame.buffer_mut());
 `AppView::register_component(name, factory)` 注册工厂。每个挂载叶子节点都有自己的实例，接收属性和命令，
 在裁剪区域内绘制，并可以向 TSX 返回原生事件。宿主可以为地图、浏览器页面、媒体控制等内容提供终端呈现。
 
+### 宿主管理的服务
+
+使用 `AppOptions::ui_sets` 为单个界面提供原生模块。注册表的 `value` 工厂可捕获宿主授予该界面的客户端，
+并将 Rust 类实例提供给 TSX：
+
+```rust
+use nsh_core::ui::{Instance, Registry};
+
+let mut native = Registry::ui_set("my-app/native");
+native.value("service", move || Instance::new(Service::from(client.clone())));
+let options = AppOptions {
+    ui_sets: Some(vec![native]),
+    ..Default::default()
+};
+```
+
+其中 `Service` 是宿主的 `#[class]` 包装类型。其方法（包括异步方法）自动生成 TypeScript 声明；TSX 通过
+`import { service } from "my-app/native"` 使用它。省略类构造函数可将客户端创建保留在宿主侧。
+工厂在每个虚拟机求值该模块时运行一次，重载会创建新值。取消、订阅清理及服务操作回执由宿主管理。
+`None` 使用进程的默认模块，`Some(vec![])` 则选择空集合。
+
 ## 可复现的交互
 
 宿主的 `--script` 在内存中的 Ratatui 缓冲区上运行，并保存 UTF-8 文本快照。步骤用分号或换行分隔：

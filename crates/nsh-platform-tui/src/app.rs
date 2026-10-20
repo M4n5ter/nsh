@@ -96,6 +96,10 @@ pub struct AppOptions {
     pub appearance: Appearance,
     /// Resource limits of a JavaScript app.
     pub limits: Limits,
+    /// Native modules and UI sets available to this view's JS VMs. `None`
+    /// uses [`set_ui_sets`]'s process default; `Some(Vec::new())` serves none.
+    /// Reloads construct new values from the same registry factories.
+    pub ui_sets: Option<Vec<nsh_core::ui::Registry>>,
     /// Virtual point dimensions of one terminal cell.
     pub metrics: CellMetrics,
     /// Native terminal components available through `nsh/native`, scoped
@@ -124,6 +128,7 @@ impl Default for AppOptions {
             script: None,
             appearance: Appearance::System,
             limits: Limits::default(),
+            ui_sets: None,
             metrics: CellMetrics::default(),
             components: Default::default(),
             reduce_motion: false,
@@ -252,7 +257,7 @@ impl AppView {
                 self.options.metrics.height() * 2.0,
             ),
             limits: self.options.limits,
-            ui_sets: ui_sets(),
+            ui_sets: self.options.ui_sets.clone().unwrap_or_else(ui_sets),
             runtime: None,
             data_dir: self.options.data_dir.clone().or_else(nsh_engine::data_dir),
             storage: self.options.storage.clone(),
@@ -297,7 +302,11 @@ impl AppView {
             device: "Terminal".into(),
             platform: HostPlatform::Tui,
             bytecode_version: nsh_engine::BYTECODE_VERSION.into(),
-            ui_sets: ui_sets()
+            ui_sets: self
+                .options
+                .ui_sets
+                .clone()
+                .unwrap_or_else(ui_sets)
                 .iter()
                 .filter_map(|set| set.specifier().map(str::to_owned))
                 .collect(),
@@ -1557,6 +1566,130 @@ mod tests {
     use nsh_core::ui::prelude::*;
 
     use super::*;
+
+    #[cfg(feature = "js")]
+    #[class]
+    struct ScopedHost {
+        label: String,
+        count: u32,
+        closed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(feature = "js")]
+    #[class]
+    impl ScopedHost {
+        async fn query(this: Instance<Self>) -> Result<String, String> {
+            this.with_mut(|host| {
+                if host.closed.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("owner closed".into());
+                }
+                host.count += 1;
+                Ok(format!("{}:{}", host.label, host.count))
+            })
+        }
+    }
+
+    #[cfg(feature = "js")]
+    #[test]
+    fn embedded_views_receive_their_own_host_objects_and_reload_them() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let (created, creations) = mpsc::channel();
+        let closed = Arc::new(AtomicBool::new(false));
+        let options = |label: &str| {
+            let (label, created, closed) = (label.to_owned(), created.clone(), closed.clone());
+            let mut registry = nsh_core::ui::Registry::ui_set("test/host");
+            registry.value("host", move || {
+                created.send(std::thread::current().id()).unwrap();
+                Instance::new(ScopedHost {
+                    label: label.clone(),
+                    count: 0,
+                    closed: closed.clone(),
+                })
+            });
+            let declarations = nsh_core::ui::declarations(&registry, &[]);
+            assert!(declarations.contains("export declare const host: ScopedHost;"));
+            assert!(declarations.contains("private constructor();"));
+            AppOptions {
+                ui_sets: Some(vec![registry]),
+                ..Default::default()
+            }
+        };
+        let app = || {
+            App::Js(Bundle::source(
+                r#"
+            import { host, ScopedHost } from 'test/host';
+            import { mount, Text, signal } from 'nsh';
+            import { keymap } from 'nsh/keymap';
+            let result = signal('loading');
+            try { new ScopedHost(); throw Error('constructor exposed'); } catch(e) {
+                if (e.message === 'constructor exposed') throw e;
+            }
+            mount(() => Text({children: () => result()}));
+            keymap.bind('ctrl+x', async () => {
+                try { result.set(await host.query()); } catch(e) { result.set(e.message); }
+            });
+            (async () => {
+                await host.query();
+                result.set(await host.query());
+            })();
+        "#
+                .into(),
+            ))
+        };
+        let wait = |view: &mut AppView, expected: &str| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                view.poll().unwrap();
+                if view.snapshot().contains(expected) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{} / {:?}",
+                    view.snapshot(),
+                    view.last_error()
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let mut left = AppView::new(options("left"));
+        let mut right = AppView::new(options("right"));
+        left.load(app()).unwrap();
+        right.load(app()).unwrap();
+        wait(&mut left, "left:2");
+        wait(&mut right, "right:2");
+        left.load(app()).unwrap();
+        wait(&mut left, "left:2");
+        for _ in 0..3 {
+            assert_ne!(
+                creations.recv_timeout(Duration::from_secs(1)).unwrap(),
+                std::thread::current().id()
+            );
+        }
+        closed.store(true, Ordering::SeqCst);
+        for view in [&mut left, &mut right] {
+            view.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+            )));
+        }
+        wait(&mut left, "owner closed");
+        wait(&mut right, "owner closed");
+        let mut unbound = AppView::new(AppOptions {
+            ui_sets: Some(vec![]),
+            ..Default::default()
+        });
+        unbound.load(app()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unbound.last_error().is_none() {
+            unbound.poll().unwrap();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(unbound.last_error().unwrap().contains("test/host"));
+    }
 
     #[component]
     fn ScriptApp() -> impl IntoElement {

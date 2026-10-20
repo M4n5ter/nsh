@@ -71,6 +71,22 @@ the chunks of a split bundle (`Screen.js`: a name that is no native module, with
 - A module's exports are made when a bundle first imports it; what must always happen (the root's direction, the
   themes) is the renderer's (`dom.rs`, `setup`), not a module's.
 
+## Host-owned values
+
+An embedding host can add `Registry::value(name, factory)` to a registry it supplies through
+`EngineConfig::ui_sets` (or directly through `HostOptions::ui_sets`). The factory is a `Send + Sync` closure;
+it runs on the VM's thread once when that VM evaluates the module. Multiple imports share the value;
+a new VM or a reload constructs a new one. Compiling bytecode, generating declarations and enumerating
+exports never execute factories. The returned `Ret` value uses the same typed conversions as Rust methods;
+the classes it names and `export declare const` are generated with the registry's other declarations.
+
+Factories can capture a scoped native client and return `Instance::new(ClientHandle { ... })`. A class
+without a constructor exposes only the operations of that existing client. The embedding host owns the
+client's authority, cancellation and external resource cleanup; disposing a JS object or stopping the VM
+releases its local handles, while completion of an admitted operation belongs to the external service.
+Factory panics and conversion failures reject module evaluation. Conflicting host export names fail
+instead of selecting one registry's value.
+
 ## Where new things go
 
 - A primitive or environment both UI sets need: a module of NSH's own (`nsh/<module>`), natives in `crates/nsh-js`

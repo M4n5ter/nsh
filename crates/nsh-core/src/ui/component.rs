@@ -12,8 +12,8 @@ use rustc_hash::FxHashMap;
 
 use super::{
     Children, IntoElement, PropError, Slot, TsType, TsTypes,
-    call::{AnyValue, JsResult, MethodCall},
-    class::{Class, ClassDef, ClassSpec, MemberKind, Thrown},
+    call::{AnyValue, JsResult, MethodCall, ToJs},
+    class::{Class, ClassDef, ClassSpec, MemberKind, Ret, Thrown},
     element::{ComponentElement, ElNode},
     js::{JsHost, JsIn, JsOwned},
     module::{FunctionSpec, Module, ModuleSpec},
@@ -577,6 +577,23 @@ struct ClassType {
     type_name: &'static str,
 }
 
+/// An embedding host's export, made separately when each VM imports its module.
+#[derive(Clone)]
+pub struct ValueSpec {
+    /// The name apps import.
+    pub name: &'static str,
+    ty: String,
+    types: TsTypes,
+    make: Arc<dyn Fn() -> Box<dyn ToJs> + Send + Sync>,
+}
+
+impl ValueSpec {
+    /// Constructs the value on the VM's thread. The VM converts and owns it.
+    pub fn make(&self) -> Box<dyn ToJs> {
+        (self.make)()
+    }
+}
+
 /// What a UI set exports to JS: its components and modules, and what it
 /// passes on from the runtime. Cheap to clone.
 #[derive(Clone, Default)]
@@ -586,6 +603,7 @@ pub struct Registry {
     /// By the specifier of their set and their name: the sets merged for
     /// the core may have classes of the same name.
     classes: Arc<FxHashMap<(Option<&'static str>, &'static str), ClassType>>,
+    values: Arc<Vec<ValueSpec>>,
     /// Values and types of `nsh/_core` exported as they are.
     reexports: Arc<(Vec<&'static str>, Vec<&'static str>)>,
     /// Values `nsh-js` makes for the set (declared by hand, not generated
@@ -612,6 +630,73 @@ impl Registry {
         Self::default()
     }
 
+    /// Exports a value made by `make` once when each VM imports this registry.
+    ///
+    /// The factory runs on that VM's thread, before the importing app runs.
+    /// Capture the embedding host's authorized state; return an [`super::Instance`]
+    /// of a class without a constructor to expose an existing native capability.
+    /// Cloned registries share the factory, never its produced JS objects.
+    /// The host retains responsibility for closing external work and resources.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not an ASCII JavaScript binding identifier, or is already
+    /// exported by this registry.
+    #[track_caller]
+    pub fn value<T: Ret + 'static>(
+        &mut self,
+        name: &'static str,
+        make: impl Fn() -> T + Send + Sync + 'static,
+    ) -> &mut Self {
+        let valid = name.bytes().enumerate().all(|(i, c)| {
+            c.is_ascii_alphabetic() || matches!(c, b'_' | b'$') || (i > 0 && c.is_ascii_digit())
+        });
+        let keyword = concat!(
+            "await break case catch class const continue debugger default delete do else enum ",
+            "export extends false finally for function if implements import in instanceof interface ",
+            "let new null package private protected public return static super switch this throw ",
+            "true try typeof var void while with yield arguments eval"
+        ).split_ascii_whitespace().any(|word| word == name);
+        assert!(
+            !name.is_empty() && valid && !keyword,
+            "invalid export name `{name}`"
+        );
+        let occupied = self.values.iter().any(|v| v.name == name)
+            || self.types.values().any(|c| c.spec.export == name)
+            || self.classes.keys().any(|(_, class)| *class == name)
+            || self.modules.values().any(|m| {
+                if m.spec.flat {
+                    m.spec.functions.iter().any(|f| f.name == name)
+                } else {
+                    m.spec.name == name
+                }
+            })
+            || self.reexports.0.contains(&name)
+            || self.native_values.contains(&name);
+        assert!(!occupied, "export `{name}` is registered twice");
+        let mut refs = Vec::new();
+        T::classes(&mut refs);
+        self.classes_named(refs);
+        assert!(
+            !self.classes.keys().any(|(_, class)| *class == name),
+            "export `{name}` is named like its class"
+        );
+        let mut types = TsTypes::default();
+        let ty = T::ts_type(&mut types);
+        Arc::make_mut(&mut self.values).push(ValueSpec {
+            name,
+            ty,
+            types,
+            make: Arc::new(move || Box::new(make())),
+        });
+        self
+    }
+
+    /// The embedding host's exports, in registration order.
+    pub fn value_specs(&self) -> &[ValueSpec] {
+        &self.values
+    }
+
     /// Registers component `C` under its type's name, exported to JS as
     /// the type's own name ([`ComponentSpec::name`], [`ComponentSpec::export`]).
     ///
@@ -623,6 +708,7 @@ impl Registry {
     #[track_caller]
     pub fn register<C: Component>(&mut self) -> &mut Self {
         let spec = ComponentSpec::of::<C>();
+        self.check_value_name(&spec.export);
         let types = Arc::make_mut(&mut self.types);
         if let Some(old) = types.get(spec.name) {
             let set = self.ui_set.or(self.namespace);
@@ -667,6 +753,13 @@ impl Registry {
     /// When the set has a module of that name already.
     #[track_caller]
     pub fn module<M: Module>(&mut self) -> &mut Self {
+        if M::FLAT {
+            for f in M::FUNCTIONS {
+                self.check_value_name(f.name);
+            }
+        } else {
+            self.check_value_name(M::NAME);
+        }
         let type_name = std::any::type_name::<M>();
         if self.classes.keys().any(|(_, name)| *name == M::NAME) {
             panic!(
@@ -730,6 +823,7 @@ impl Registry {
 
     #[track_caller]
     fn class_def(&mut self, def: &'static ClassDef) -> &mut Self {
+        self.check_value_name(def.name);
         let type_name = (def.type_name)();
         let set = self.ui_set.or(self.namespace);
         if let Some(old) = self.classes.get(&(set, def.name)) {
@@ -765,10 +859,20 @@ impl Registry {
     /// Exports `values` and `types` of the runtime as they are (accessors
     /// such as `safeArea`, hooks, types such as `Insets`).
     pub fn reexport(&mut self, values: &[&'static str], types: &[&'static str]) -> &mut Self {
+        for value in values {
+            self.check_value_name(value);
+        }
         let r = Arc::make_mut(&mut self.reexports);
         r.0.extend_from_slice(values);
         r.1.extend_from_slice(types);
         self
+    }
+
+    fn check_value_name(&self, name: &str) {
+        assert!(
+            !self.values.iter().any(|value| value.name == name),
+            "export `{name}` is registered twice"
+        );
     }
 
     /// The components of all of `sets`, for making them by name (the
@@ -820,6 +924,9 @@ impl Registry {
     /// Exports `values` `nsh-js` makes for the set (`Stack`, `Screen`),
     /// declared by hand rather than generated from a spec.
     pub fn native_values(&mut self, values: &[&'static str]) -> &mut Self {
+        for value in values {
+            self.check_value_name(value);
+        }
         Arc::make_mut(&mut self.native_values).extend_from_slice(values);
         self
     }
@@ -955,6 +1062,9 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
     for c in &classes {
         types.merge(&c.types);
     }
+    for value in registry.value_specs() {
+        types.merge(&value.types);
+    }
     for declaration in types.declarations() {
         let _ = write!(out, "{declaration}\n\n");
     }
@@ -1086,6 +1196,13 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
     }
     for c in classes.iter().filter(|c| !omit.contains(&c.name)) {
         class_declaration(&mut out, c);
+    }
+    for value in registry
+        .value_specs()
+        .iter()
+        .filter(|v| !omit.contains(&v.name))
+    {
+        let _ = writeln!(out, "export declare const {}: {};", value.name, value.ty);
     }
     out
 }
@@ -1297,6 +1414,51 @@ mod tests {
         let _ = Registry::merged(&[r]);
     }
 
+    #[test]
+    fn host_values_cannot_shadow_registered_exports_in_either_order() {
+        for value_first in [false, true] {
+            for name in ["Lonely", "Maker", "Stepper", "native"] {
+                let result = std::panic::catch_unwind(|| {
+                    let mut registry = Registry::ui_set("test/host");
+                    if value_first {
+                        registry.value(name, || 1_u32);
+                    }
+                    match name {
+                        "Lonely" => {
+                            registry.class::<Lonely>();
+                        }
+                        "Maker" => {
+                            registry.module::<Maker>();
+                        }
+                        "native" => {
+                            registry.native_values(&["native"]);
+                        }
+                        _ => {
+                            registry.register::<Stepper>();
+                        }
+                    }
+                    if !value_first {
+                        registry.value(name, || 1_u32);
+                    }
+                });
+                assert!(result.is_err(), "{name}, value first: {value_first}");
+            }
+        }
+    }
+
+    #[test]
+    fn host_value_names_generate_valid_bindings() {
+        for name in ["", "bad-name", "a\0b", "default", "await", "eval"] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    Registry::ui_set("test/host").value(name, || 0_u32);
+                })
+                .is_err(),
+                "{name:?}"
+            );
+        }
+    }
+
     mod clash {
         /// Another class named `Lonely`.
         #[crate::ui::class]
@@ -1381,7 +1543,9 @@ mod tests {
         b.register::<other::Stepper>();
         let merged = Registry::merged(&[a.clone(), b]);
         assert_eq!(merged.specs().len(), 2);
-        let twice = std::panic::catch_unwind(|| Registry::merged(&[a.clone(), a]));
+        let twice = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Registry::merged(&[a.clone(), a])
+        }));
         let message = *twice.unwrap_err().downcast::<String>().unwrap();
         assert_eq!(
             message,

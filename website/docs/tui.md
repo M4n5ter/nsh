@@ -220,6 +220,28 @@ For [native components](./native-components.md), implement `NativeComponent` and
 receives props and commands, paints into its clipped region, and can return native events to TSX. Hosts can supply
 terminal presentations for content such as maps, browser pages and media controls.
 
+### Host-owned services
+
+Supply native modules for one view with `AppOptions::ui_sets`. A registry's `value` factory can capture
+the host's scoped client and expose a Rust class instance to TSX:
+
+```rust
+use nsh_core::ui::{Instance, Registry};
+
+let mut native = Registry::ui_set("my-app/native");
+native.value("service", move || Instance::new(Service::from(client.clone())));
+let options = AppOptions {
+    ui_sets: Some(vec![native]),
+    ..Default::default()
+};
+```
+
+Here `Service` is the host's `#[class]` wrapper. Its methods, including async methods, generate TypeScript
+declarations; TSX uses `import { service } from "my-app/native"`. A class without a constructor keeps
+client creation in the host. The factory runs once per VM when the module is evaluated; reloads create
+new values. The host retains cancellation, subscription cleanup and service-operation receipts.
+`None` uses the process's default modules, while `Some(vec![])` selects an empty set.
+
 ## Reproducible interaction
 
 The host's `--script` runs against an in-memory Ratatui buffer and saves UTF-8 text snapshots. Steps are separated
