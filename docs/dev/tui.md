@@ -152,6 +152,13 @@ Return follows `submitBehavior`; Shift/Alt+Return inserts a multiline
 newline. Scrollable views accept arrows, Page Up/Down and Home/End;
 wheel detents scroll three rows or three columns. App keymaps are checked
 before ordinary input defaults, with text-input and repeat restrictions.
+`keymap.bind(..., { within: node })` adds a native focus predicate: the node
+itself or a mounted descendant must have focus. A scope miss continues
+through older eligible bindings and ordinary input defaults.
+`keymap.focusedWithin(node)` reads the latest host-supplied focus path as a
+nonreactive boolean snapshot; reading it adds no dependency to an effect.
+Both focus APIs use real `YNode` references. Supplying `within` or calling
+`focusedWithin` on another renderer throws `TypeError`.
 Terminal protocols may merge key combinations or consume them before the
 application receives them.
 
@@ -368,6 +375,9 @@ runners remain console applications.
 | `Surface::new(u16, u16, CellMetrics)` | Retained rendering/input layer for hosts supplying their own engine wiring |
 | `Surface::apply(MountBatch)`, `tick(f64)`, `animating()`, `render(Rect, &mut Buffer)` | Mount and draw the scene |
 | `Surface::metrics`, `viewport`, `resize`, `snapshot`, `focused`, `should_quit` | Geometry and interaction inspection |
+| `Surface::focus_path() -> Vec<NodeId>` | Focused node followed by its mounted ancestors, or an empty path when no node has focus |
+| `EngineControl::set_focus_path(Vec<NodeId>)` | Queue the native focus snapshot before input events or environment updates |
+| `LocalEngine::set_focus_path_now(&[NodeId])` | Replace the VM's focus snapshot synchronously without entering JS, pumping the engine or advancing timers |
 | `Surface::set_assets`, `set_access`, `set_dark`, `set_components`, `set_reduce_motion(bool)` | Engine resources, capability access and host components |
 | `Surface::input_context() -> Option<InputContext>` | Snapshot editing hints and generation; secure text is omitted |
 | `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
@@ -409,6 +419,16 @@ pointing at newer items. During otherwise idle probes,
 `LocalEngine::needs_pump() -> bool` reads queued messages and due deadlines
 without running app code; native input and synchronous dispatch still
 require a pump.
+
+Keep keymap focus snapshots in the same input order. After native focus changes,
+take `Surface::focus_path()` and pass it to `EngineControl::set_focus_path`
+before enqueueing events or environment updates that can run JS; those messages
+are handled in FIFO order. A host driving a `LocalEngine` uses
+`set_focus_path_now(&path)` before synchronous dispatch or resize work and
+before a pump that can enter JS. The setter only replaces the snapshot:
+it runs no JS, pumps no work and advances no timers. `AppView` forwards the
+surface's path automatically. Empty paths clear the snapshot, so no focus
+and removed scopes cannot keep a terminal binding eligible.
 
 Ordinary left presses using [`inputAction`](js-modules.md#captured-input-actions)
 can instead use a presentation lease. Sample `Surface::input_snapshot()`

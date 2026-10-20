@@ -288,6 +288,10 @@ mod imp {
             self.host.set_environment(environment);
         }
 
+        pub(crate) fn set_focus_path(&self, path: &[NodeId]) {
+            self.host.set_focus_path(path);
+        }
+
         pub(crate) fn take_fonts(&self, out: &mut Vec<String>) {
             self.host.take_fonts(out);
         }
@@ -435,6 +439,10 @@ mod stub {
         }
 
         pub(crate) fn set_environment(&self, _: &Environment) {
+            match *self {}
+        }
+
+        pub(crate) fn set_focus_path(&self, _: &[NodeId]) {
             match *self {}
         }
 

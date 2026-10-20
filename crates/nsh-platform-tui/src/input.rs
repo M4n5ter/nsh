@@ -91,6 +91,20 @@ pub(crate) struct Pointer {
 }
 
 impl Surface {
+    /// The focused node followed by its mounted ancestors, including itself.
+    /// Native system dialogs and menus own focus while open, so their path
+    /// contains no application nodes. Hosts publish this same path before
+    /// delivering application input and environment changes.
+    pub fn focus_path(&self) -> Vec<NodeId> {
+        if self.dialog.is_some() || self.service_overlay_open() {
+            return Vec::new();
+        }
+        self.focus
+            .filter(|id| self.node(*id).is_some())
+            .map(|id| self.ancestors(id))
+            .unwrap_or_default()
+    }
+
     /// Returns the focused input's hints and current generation. Secure
     /// fields expose their selection and hints while redacting text.
     pub fn input_context(&self) -> Option<InputContext> {
@@ -564,10 +578,12 @@ impl Surface {
             })
         });
         if let Some(stroke) = keystroke(key) {
+            let focus_path = self.focus_path();
             match self
                 .keymap
-                .find(stroke, editing, key.kind == KeyEventKind::Repeat)
-            {
+                .find_with(stroke, editing, key.kind == KeyEventKind::Repeat, |node| {
+                    focus_path.contains(&node)
+                }) {
                 KeyMatch::Fire(id) => {
                     self.emit(
                         ROOT_ID,
@@ -2187,6 +2203,67 @@ mod tests {
     }
 
     #[test]
+    fn scoped_keymaps_use_native_descendant_focus_and_leave_other_inputs_alone() {
+        use std::sync::Arc;
+
+        use nsh_core::{
+            MountBatch, MountItem,
+            keymap::{KeyBinding, Keymap, When},
+        };
+
+        let mut surface = form();
+        let mut items = create(6, ViewKind::View, ROOT_ID, 80.0);
+        items.extend(create(8, ViewKind::Input, 6, 0.0));
+        surface.apply(MountBatch { items });
+        let stroke = Keystroke::parse_with("ctrl+k", false).unwrap();
+        let mut scoped = KeyBinding::new(2, stroke, When::Always, false);
+        scoped.within = Some(6);
+        let mut typing = KeyBinding::new(
+            3,
+            Keystroke::parse_with("a", false).unwrap(),
+            When::Always,
+            false,
+        );
+        typing.within = Some(6);
+        surface.keymap = Arc::new(Keymap::new(vec![
+            KeyBinding::new(1, stroke, When::Always, false),
+            scoped,
+            typing,
+        ]));
+        let command = |surface: &mut Surface| {
+            surface.drain_events().find_map(|event| match event {
+                SurfaceEvent::Event(
+                    ROOT_ID,
+                    EventKind::KeyCommand,
+                    EventPayload::Value(PayloadValue::Number(id)),
+                ) => Some(id),
+                _ => None,
+            })
+        };
+        surface.set_focus(Some(8));
+        assert_eq!(surface.focus_path(), [8, 6, ROOT_ID]);
+        key(&mut surface, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(command(&mut surface), Some(2.0));
+        surface.set_focus(Some(2));
+        key(&mut surface, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(command(&mut surface), Some(1.0));
+        key(&mut surface, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(surface.node(2).unwrap().editor.text(), "a");
+        assert_eq!(command(&mut surface), None);
+        surface.set_focus(None);
+        assert!(surface.focus_path().is_empty());
+        key(&mut surface, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(command(&mut surface), Some(1.0));
+        surface.set_focus(Some(8));
+        surface.apply(MountBatch {
+            items: vec![MountItem::Remove { id: 6 }],
+        });
+        assert!(!surface.focus_path().contains(&6));
+        key(&mut surface, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(command(&mut surface), Some(1.0));
+    }
+
+    #[test]
     fn input_return_obeys_submit_and_multiline_rules() {
         let mut surface = form();
         let mut config = nsh_core::InputConfig {
@@ -2254,6 +2331,7 @@ mod tests {
             cancelable: false,
             sheet: false,
         });
+        assert!(surface.focus_path().is_empty());
         key(&mut surface, KeyCode::Esc, KeyModifiers::NONE);
         assert!(surface.dialog.is_some());
         surface.handle_event(Event::Paste("blocked".into()));
@@ -2262,6 +2340,7 @@ mod tests {
         assert_eq!(surface.dialog_selection, 1);
         key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
         assert!(surface.dialog.is_none());
+        assert_eq!(surface.focus_path(), [2, ROOT_ID]);
         assert!(surface.events.iter().any(|event| matches!(event, SurfaceEvent::Event(ROOT_ID, EventKind::Dialog, EventPayload::Map(fields)) if fields.contains(&("index", PayloadValue::Number(1.0))))));
     }
 

@@ -9,6 +9,7 @@ order: 8.7
 `nsh/keymap` 绑定应用的键盘快捷键：一个按键组合（如 `"mod+k"`）和它要运行的函数。
 
 ```ts
+import type { YNode } from "nsh";
 import { keymap } from "nsh/keymap";
 ```
 
@@ -16,12 +17,14 @@ import { keymap } from "nsh/keymap";
 const keymap: {
   bind(keystroke: string, handler: (keystroke: string) => void, options?: KeyBindingOptions): () => void;
   bind(bindings: Record<string, (keystroke: string) => void>, options?: KeyBindingOptions): () => void;
+  focusedWithin(node: YNode): boolean;
   label(keystroke: string): string;
 };
 
 interface KeyBindingOptions {
   when?: "always" | "notEditing";
   repeat?: boolean;
+  within?: YNode;
 }
 ```
 
@@ -66,6 +69,43 @@ function Editor() {
 ```
 
 使用开发服务器时，修改一个模块会在它重新运行之前移除它顶层代码创建的绑定，因此热重载不会留下过期的快捷键。
+
+### 终端焦点范围
+
+在终端中，`within` 把绑定限制在指定节点及其后代拥有键盘焦点时。传入当前应用的真实 `YNode`。
+每次收到按键，NSH 都在原生代码中结合 `when`、`repeat` 检查焦点路径。范围不匹配时，会继续尝试相同
+按键组合的较旧绑定，然后执行普通输入处理。范围内没有焦点时（包括范围节点已经移除），这些后续路径仍然有效。
+
+```tsx
+import { Scroll, Text } from "nsh";
+import { keymap } from "nsh/keymap";
+
+function ActivityPanel() {
+  const panel = Scroll({
+    style: { height: 160 },
+    children: <Text>Activity</Text>,
+  });
+  keymap.bind("mod+end", () => panel.scrollToEnd({ animated: false }), {
+    within: panel,
+    when: "always",
+  });
+  return panel;
+}
+```
+
+`within` 仅用于终端；在其他渲染器上传入它会抛出 `TypeError`。省略 `within` 的绑定保留原有的应用级行为。
+
+## keymap.focusedWithin
+
+```ts
+focusedWithin(node: YNode): boolean;
+```
+
+在终端中，读取宿主最新的焦点快照，判断 `node` 或其后代是否拥有键盘焦点。没有节点拥有焦点，或者节点
+不在该路径上（包括已经移除）时返回 `false`。参数是当前应用的真实 `YNode`；在其他渲染器上调用会抛出 `TypeError`。
+
+这是一次非响应式快照读取。在 effect 中调用不会订阅焦点；其他响应式读取（如 `windowSize()`）决定 effect
+何时运行。每次调用都会读取宿主最近提供的快照。
 
 ## keymap.label
 

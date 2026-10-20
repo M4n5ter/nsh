@@ -1084,6 +1084,16 @@ impl Host {
         out.ops.append(&mut self.shared.net.borrow_mut().ops);
     }
 
+    /// Replaces the terminal's native focus path without running JS jobs,
+    /// reactive effects, event handlers or timers. Hosts report it before
+    /// delivering input or an environment change that may read the snapshot.
+    pub fn set_focus_path(&self, path: &[NodeId]) {
+        if self.ctx.is_live() {
+            self.ctx
+                .with(|ctx| crate::keymap::set_focus_path(ctx.as_raw().as_ptr(), path));
+        }
+    }
+
     /// Publishes the surface's environment to JS. Call once before
     /// evaluating the bundle (the runtime reads the initial value), then on
     /// every change.
@@ -1771,6 +1781,117 @@ const report = (v) => text(String(v));
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn terminal_focus_snapshots_do_not_run_jobs_or_subscribe_effects() {
+        use nsh_core::{Prop, ROOT_ID, platform::Renderer};
+
+        let host = Host::new().unwrap();
+        host.set_environment(&Environment {
+            renderer: Renderer::Terminal,
+            ..Environment::default()
+        });
+        host.eval_source(
+            r#"import { effect, mount, signal } from "nsh";
+            import { append, element } from "nsh:rt";
+            import { keymap } from "nsh/keymap";
+            globalThis.keymap = keymap;
+            globalThis.surface = element("view");
+            globalThis.panel = element("view");
+            globalThis.editor = element("input");
+            globalThis.other = element("input");
+            append(panel, editor);
+            append(surface, panel);
+            append(surface, other);
+            mount(() => surface);
+            keymap.bind("mod+enter", () => {}, { within: panel, when: "always" });
+            globalThis.tick = signal(0);
+            globalThis.effectRuns = 0;
+            globalThis.effectFocused = false;
+            globalThis.jobRuns = 0;
+            effect(() => {
+                tick();
+                effectRuns++;
+                effectFocused = keymap.focusedWithin(panel);
+            });
+            globalThis.focusErrors = [];
+            globalThis.captureFocusError = (run) => {
+                try { run(); focusErrors.push("accepted"); }
+                catch (error) { focusErrors.push(`${error.name}: ${error.message}`); }
+            };"#,
+        )
+        .unwrap();
+        let [surface, panel, editor, other] = host.ctx.with(|ctx| {
+            ["surface", "panel", "editor", "other"].map(|name| {
+                let node: Value = ctx.globals().get(name).unwrap();
+                crate::dom::node_id(ctx.as_raw().as_ptr(), node.as_raw()).unwrap()
+            })
+        });
+        let table = ops(&host)
+            .into_iter()
+            .find_map(|op| match op {
+                Op::SetProp {
+                    id: ROOT_ID,
+                    prop: Prop::Keymap(table),
+                } => Some(table),
+                _ => None,
+            })
+            .expect("mounted keymap");
+        assert_eq!(table.bindings().len(), 1);
+        assert_eq!(table.bindings()[0].within, Some(panel));
+        let snapshot = || {
+            host.ctx.with(|ctx| {
+                ctx.eval::<String, _>(
+                    "[keymap.focusedWithin(panel), keymap.focusedWithin(editor), \
+                     keymap.focusedWithin(other), effectRuns, effectFocused, jobRuns].join(',')",
+                )
+                .unwrap()
+            })
+        };
+        assert_eq!(snapshot(), "false,false,false,1,false,0");
+        // Queue a real job without Host's normal evaluation drain. Publishing
+        // focus must neither enter it nor rerun the effect that read focus.
+        host.ctx.with(|ctx| {
+            ctx.eval::<(), _>("Promise.resolve().then(() => jobRuns++);")
+                .unwrap();
+        });
+        host.set_focus_path(&[editor, panel, surface, ROOT_ID]);
+        assert_eq!(snapshot(), "true,true,false,1,false,0");
+        host.set_focus_path(&[other, surface, ROOT_ID]);
+        assert_eq!(snapshot(), "false,false,true,1,false,0");
+        host.set_focus_path(&[]);
+        assert_eq!(snapshot(), "false,false,false,1,false,0");
+        host.run_jobs();
+        assert_eq!(snapshot(), "false,false,false,1,false,1");
+        host.set_focus_path(&[editor, panel, surface, ROOT_ID]);
+        assert_eq!(snapshot(), "true,true,false,1,false,1");
+        host.eval_source("tick.set(1);").unwrap();
+        assert_eq!(snapshot(), "true,true,false,2,true,1");
+
+        host.eval_source(
+            r#"captureFocusError(() => keymap.focusedWithin({}));
+            captureFocusError(() => keymap.bind("mod+j", () => {}, { within: {} }));"#,
+        )
+        .unwrap();
+        host.set_environment(&Environment::default());
+        host.eval_source(
+            r#"captureFocusError(() => keymap.focusedWithin(panel));
+            captureFocusError(() => keymap.bind("mod+j", () => {}, { within: panel }));"#,
+        )
+        .unwrap();
+        let errors = host
+            .ctx
+            .with(|ctx| ctx.globals().get::<_, Vec<String>>("focusErrors").unwrap());
+        assert_eq!(
+            errors,
+            [
+                "TypeError: keymap.focusedWithin: expected a YNode",
+                "TypeError: keymap.bind within: expected a YNode",
+                "TypeError: keymap.focusedWithin: requires the terminal renderer",
+                "TypeError: keymap.bind within: requires the terminal renderer",
+            ],
+        );
     }
 
     #[test]

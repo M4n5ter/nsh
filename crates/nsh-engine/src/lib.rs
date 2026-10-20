@@ -793,6 +793,7 @@ enum Message {
     /// A component's task was woken: it runs in the loop.
     Wake,
     Environment(Environment),
+    FocusPath(Vec<NodeId>),
     RootSize(NodeId, Size<Points>, EdgeInsets),
     ScreenHeader(NodeId, Option<Points>),
     Frame,
@@ -880,6 +881,14 @@ impl EngineControl {
     /// appearance...).
     pub fn set_environment(&self, environment: Environment) {
         let _ = self.tx.send(Message::Environment(environment));
+    }
+
+    /// Publishes the terminal's native focus path in FIFO order before
+    /// related input or environment messages. This snapshot runs no JS.
+    /// Local hosts delivering input immediately use
+    /// [`LocalEngine::set_focus_path_now`] instead of queueing this message.
+    pub fn set_focus_path(&self, path: Vec<NodeId>) {
+        let _ = self.tx.send(Message::FocusPath(path));
     }
 
     /// The platform presents root `id` (a modal) at `size`, with `insets`
@@ -1116,6 +1125,16 @@ impl<M: TextEngine + 'static> LocalEngine<M> {
     /// A handle for sending input.
     pub fn control(&self) -> EngineControl {
         self.control.clone()
+    }
+
+    /// Replaces the terminal's native focus snapshot synchronously, without
+    /// processing queued messages, running JS or committing a frame. Report
+    /// the current surface path before immediate input and environment changes.
+    /// Use this path consistently rather than mixing it with queued snapshots.
+    pub fn set_focus_path_now(&mut self, path: &[NodeId]) {
+        if let Some(script) = &self.driver.script {
+            script.set_focus_path(path);
+        }
     }
 
     /// Delivers an event from the currently presented UI before queued work.
@@ -2278,6 +2297,11 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             state.core.set_environment(ui_environment(&env, window));
             if let Some(script) = script {
                 script.set_environment(&env);
+            }
+        }
+        Message::FocusPath(path) => {
+            if let Some(script) = script {
+                script.set_focus_path(&path);
             }
         }
         Message::RootSize(id, size, insets) => state.core.set_root_size(id, size, insets),

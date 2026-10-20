@@ -9,6 +9,7 @@ order: 8.7
 `nsh/keymap` binds the app's keyboard shortcuts: a keystroke such as `"mod+k"` and the function it runs.
 
 ```ts
+import type { YNode } from "nsh";
 import { keymap } from "nsh/keymap";
 ```
 
@@ -16,12 +17,14 @@ import { keymap } from "nsh/keymap";
 const keymap: {
   bind(keystroke: string, handler: (keystroke: string) => void, options?: KeyBindingOptions): () => void;
   bind(bindings: Record<string, (keystroke: string) => void>, options?: KeyBindingOptions): () => void;
+  focusedWithin(node: YNode): boolean;
   label(keystroke: string): string;
 };
 
 interface KeyBindingOptions {
   when?: "always" | "notEditing";
   repeat?: boolean;
+  within?: YNode;
 }
 ```
 
@@ -66,6 +69,46 @@ function Editor() {
 ```
 
 With the dev server, editing a module removes the bindings its top-level code made before it runs again, so hot reload never leaves stale shortcuts behind.
+
+### Terminal focus scopes
+
+On a terminal, `within` limits a binding to keyboard focus on that node or one of its descendants. Pass a `YNode`
+from the running app. NSH checks the native focus path when each key arrives, together with `when` and `repeat`.
+If the scope does not match, NSH tries older bindings of the same keystroke, then its ordinary input handling.
+A scope with no focused descendant, including a removed scope, leaves those routes available.
+
+```tsx
+import { Scroll, Text } from "nsh";
+import { keymap } from "nsh/keymap";
+
+function ActivityPanel() {
+  const panel = Scroll({
+    style: { height: 160 },
+    children: <Text>Activity</Text>,
+  });
+  keymap.bind("mod+end", () => panel.scrollToEnd({ animated: false }), {
+    within: panel,
+    when: "always",
+  });
+  return panel;
+}
+```
+
+`within` is terminal-only; supplying it on another renderer throws `TypeError`. A binding with no `within`
+keeps its existing app-wide behavior.
+
+## keymap.focusedWithin
+
+```ts
+focusedWithin(node: YNode): boolean;
+```
+
+On a terminal, reads whether `node` or one of its descendants has keyboard focus in the host's latest focus
+snapshot. It returns `false` when no node has focus or the node is outside that path, including after removal.
+The argument is a `YNode` from the running app; calling it on another renderer throws `TypeError`.
+
+This is a nonreactive snapshot read. Calling it inside an effect adds no focus dependency; other reactive reads,
+such as `windowSize()`, determine when that effect runs. Each call reads the latest snapshot supplied by the host.
 
 ## keymap.label
 

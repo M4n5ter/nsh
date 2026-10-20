@@ -183,6 +183,8 @@ pub struct AppView {
     status: Option<String>,
     theme: Option<nsh_base::Theme>,
     image_protocol: Option<crate::ImageProtocol>,
+    /// Last path sent to this engine; transport deduplication only.
+    focus_path: Vec<nsh_core::NodeId>,
     services: Option<ServiceManager>,
     service_output: VecDeque<ServiceOutput>,
     #[cfg(feature = "dev")]
@@ -212,6 +214,7 @@ impl AppView {
             status: None,
             theme: None,
             image_protocol: None,
+            focus_path: Vec::new(),
             services: None,
             service_output: VecDeque::new(),
             #[cfg(feature = "dev")]
@@ -229,6 +232,7 @@ impl AppView {
         );
         surface.inherit_image_protocol(&mut self.surface);
         self.surface = surface;
+        self.focus_path.clear();
         self.surface
             .set_dark(self.environment.color_scheme == ColorScheme::Dark);
         self.surface.set_components(self.options.components.clone());
@@ -424,6 +428,7 @@ impl AppView {
         let size = self.surface.viewport();
         self.environment.window = size;
         if let Some(control) = self.control() {
+            self.publish_focus(&control);
             control.resize(size);
             control.set_environment(self.environment);
         }
@@ -500,6 +505,7 @@ impl AppView {
         self.surface
             .set_dark(self.environment.color_scheme == ColorScheme::Dark);
         if let Some(control) = self.control() {
+            self.publish_focus(&control);
             control.set_environment(self.environment);
         }
     }
@@ -520,6 +526,7 @@ impl AppView {
         self.environment.reduce_motion = reduce_motion;
         self.surface.set_reduce_motion(reduce_motion);
         if let Some(control) = self.control() {
+            self.publish_focus(&control);
             control.set_environment(self.environment);
         }
     }
@@ -604,6 +611,7 @@ impl AppView {
         let Some(control) = self.control() else {
             return;
         };
+        self.publish_focus(&control);
         for event in events {
             match event {
                 SurfaceEvent::Event(id, kind, payload) => control.dispatch_event(id, kind, payload),
@@ -615,6 +623,14 @@ impl AppView {
                 SurfaceEvent::RootSize(id, size, insets) => control.set_root_size(id, size, insets),
                 SurfaceEvent::Service(request) => self.service_request(request),
             }
+        }
+    }
+
+    fn publish_focus(&mut self, control: &EngineControl) {
+        let path = self.surface.focus_path();
+        if path != self.focus_path {
+            control.set_focus_path(path.clone());
+            self.focus_path = path;
         }
     }
 
@@ -1741,6 +1757,61 @@ mod tests {
         assert!(view.control().is_none());
         assert_eq!(view.environment.renderer, Renderer::Terminal);
         assert!(view.image_protocol_cleanup().is_empty());
+    }
+
+    #[cfg(feature = "js")]
+    #[test]
+    fn scoped_shortcuts_and_resize_read_the_same_native_focus_without_observing_it() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut view = AppView::new(AppOptions::default());
+        view.load(App::Js(Bundle::source(r#"
+            import { mount, signal, effect, View, Input, Text } from 'nsh';
+            import { windowSize } from 'nsh/device';
+            import { keymap } from 'nsh/keymap';
+            const result = signal('starting');
+            let reads = 0;
+            const search = Input({autoFocus: true, style: {height: 32}});
+            const browser = View({children: search});
+            const composer = Input({style: {height: 32}});
+            keymap.bind('ctrl+k', () => result.set(`read ${keymap.focusedWithin(browser)} #${reads}`), {when: 'always'});
+            keymap.bind('ctrl+k', () => result.set(`scoped #${reads}`), {when: 'always', within: search});
+            effect(() => {
+                const width = windowSize().width;
+                result.set(`resize ${width} browser=${keymap.focusedWithin(browser)} #${++reads}`);
+            });
+            mount(() => View({children: [browser, composer, Text({children: () => result()})]}));
+        "#.into()))).unwrap();
+        let wait = |view: &mut AppView, expected: &str| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                view.poll().unwrap();
+                if view.snapshot().contains(expected) {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{} / {:?}",
+                    view.snapshot(),
+                    view.last_error()
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        wait(&mut view, "resize 960 browser=false #1");
+        let key = |view: &mut AppView, code, modifiers| {
+            view.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+        };
+        key(&mut view, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        wait(&mut view, "scoped #1");
+        key(&mut view, KeyCode::Tab, KeyModifiers::NONE);
+        key(&mut view, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        wait(&mut view, "read false #1");
+        view.resize(60, 30);
+        wait(&mut view, "resize 480 browser=false #2");
+        key(&mut view, KeyCode::BackTab, KeyModifiers::SHIFT);
+        view.resize(70, 30);
+        wait(&mut view, "resize 560 browser=true #3");
     }
 
     #[test]

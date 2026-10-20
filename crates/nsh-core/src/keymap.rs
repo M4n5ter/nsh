@@ -20,7 +20,7 @@
 
 use std::fmt;
 
-use crate::platform::Os;
+use crate::{NodeId, platform::Os};
 
 /// The modifiers of a keystroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -461,6 +461,9 @@ pub struct KeyBinding {
     /// It fires again on the auto-repeats of a held key; else once until
     /// the key is released.
     pub repeat: bool,
+    /// A terminal binding fires only while focus is on this node or one
+    /// of its descendants. Platforms without native scope matching skip it.
+    pub within: Option<NodeId>,
 }
 
 impl KeyBinding {
@@ -477,6 +480,7 @@ impl KeyBinding {
             keystroke,
             in_text,
             repeat,
+            within: None,
         }
     }
 }
@@ -526,13 +530,24 @@ impl Keymap {
     /// What a key does: the newest binding of `keystroke` that fires while
     /// `editing` (a text input or hosted native view has the keyboard
     /// focus) takes it; `repeat` is an auto-repeat of a held key, which only
-    /// fires bindings that ask for it.
+    /// fires bindings that ask for it. Scoped bindings are skipped: a
+    /// platform supporting them uses [`Self::find_with`].
     pub fn find(&self, keystroke: Keystroke, editing: bool, repeat: bool) -> KeyMatch {
-        let found = self
-            .bindings
-            .iter()
-            .rev()
-            .find(|b| b.keystroke == keystroke && (b.in_text || !editing));
+        self.find_with(keystroke, editing, repeat, |_| false)
+    }
+
+    /// Matches a key with the platform's current native focus predicate.
+    /// A rejected scope leaves older bindings and native defaults eligible.
+    pub fn find_with(
+        &self,
+        keystroke: Keystroke,
+        editing: bool,
+        repeat: bool,
+        within: impl Fn(NodeId) -> bool,
+    ) -> KeyMatch {
+        let found = self.bindings.iter().rev().find(|b| {
+            b.keystroke == keystroke && (b.in_text || !editing) && b.within.is_none_or(&within)
+        });
         match found {
             None => KeyMatch::None,
             Some(b) if repeat && !b.repeat => KeyMatch::Held,
@@ -741,5 +756,20 @@ mod tests {
         assert_eq!(map.find(e, false, true), KeyMatch::Fire(2));
         let always = Keymap::new(vec![KeyBinding::new(4, e, When::Always, false)]);
         assert_eq!(always.find(e, true, false), KeyMatch::Fire(4));
+
+        let mut scoped = KeyBinding::new(6, e, When::Always, false);
+        scoped.within = Some(10);
+        let map = Keymap::new(vec![KeyBinding::new(5, e, When::Always, true), scoped]);
+        assert_eq!(
+            map.find_with(e, true, false, |id| id == 10),
+            KeyMatch::Fire(6)
+        );
+        assert_eq!(map.find_with(e, true, true, |id| id == 10), KeyMatch::Held);
+        assert_eq!(map.find_with(e, true, true, |_| false), KeyMatch::Fire(5));
+        assert_eq!(map.find(e, true, false), KeyMatch::Fire(5));
+        assert_eq!(
+            Keymap::new(vec![scoped]).find(e, false, false),
+            KeyMatch::None
+        );
     }
 }

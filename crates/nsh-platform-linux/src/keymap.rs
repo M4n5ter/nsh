@@ -54,6 +54,10 @@ pub(crate) fn set(surface: &Rc<Surface>, keymap: Arc<Keymap>) {
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     let display = surface.root.display();
     for binding in keymap.bindings().iter().rev() {
+        // Focus-scoped shortcuts are currently supported by the terminal.
+        if binding.within.is_some() {
+            continue;
+        }
         // The dev host's Ctrl+R reloads, whatever the app binds.
         if cfg!(feature = "dev") && binding.keystroke.reloads(Os::Linux) {
             continue;
