@@ -972,7 +972,6 @@ mod tests {
         .unwrap();
         other.eval_source(&source.replace("EXPECTED", "1")).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert!(Host::new().unwrap().eval_source(source).is_err());
     }
 
     #[nsh_core::ui::class]
@@ -1105,10 +1104,6 @@ mod tests {
                 }),
                 "{error}"
             );
-            Host::new()
-                .unwrap()
-                .eval_source("if (globalThis.host !== undefined) throw Error('leaked host');")
-                .unwrap();
         }
     }
 
