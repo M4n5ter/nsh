@@ -1324,8 +1324,11 @@ impl Surface {
                     .find(|id| self.node(*id).is_some_and(|node| node.media.is_some()))
                 {
                     self.set_focus_from(Some(id), FocusSource::Pointer);
-                } else {
-                    self.set_focus_from(self.scroll_ancestor(Some(target)), FocusSource::Pointer);
+                } else if let Some(id) = path.iter().copied().find(|id| {
+                    self.node(*id)
+                        .is_some_and(|node| node.kind == ViewKind::Scroll && node.scroll.enabled)
+                }) {
+                    self.set_focus_from(Some(id), FocusSource::Pointer);
                 }
                 let pan_candidate = path.into_iter().find(|id| {
                     self.node(*id).is_some_and(|n| {
@@ -2125,6 +2128,73 @@ mod tests {
         );
         key(&mut surface, KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(surface.node(2).unwrap().editor.selected(), "中文😀");
+    }
+
+    #[test]
+    fn inert_pointer_drags_preserve_input_focus_and_caret_but_scroll_background_focuses() {
+        use nsh_core::{MountBatch, MountItem};
+
+        for touch_listener in [false, true] {
+            let mut surface = form();
+            surface.node_mut(2).unwrap().events = mask(&[EventKind::Blur]);
+            surface.node_mut(4).unwrap().events = if touch_listener {
+                mask(&[EventKind::Touch])
+            } else {
+                Default::default()
+            };
+            let mut items = Vec::new();
+            for (scroll, background, y) in [(6, 8, 96.0), (10, 12, 144.0)] {
+                items.extend(create(scroll, ViewKind::Scroll, ROOT_ID, y));
+                items.extend(create(background, ViewKind::View, scroll, 0.0));
+                items.push(MountItem::ScrollContent {
+                    id: scroll,
+                    size: Size::new(px(160.0), px(1000.0)),
+                });
+            }
+            surface.apply(MountBatch { items });
+            surface.handle_event(Event::Paste("abcdef".into()));
+            key(&mut surface, KeyCode::Left, KeyModifiers::NONE);
+            key(&mut surface, KeyCode::Left, KeyModifiers::NONE);
+            surface.events.clear();
+            let mouse = |kind, column, row| {
+                Event::Mouse(MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                })
+            };
+            for (kind, column) in [
+                (MouseEventKind::Down(MouseButton::Left), 1),
+                (MouseEventKind::Drag(MouseButton::Left), 5),
+                (MouseEventKind::Up(MouseButton::Left), 5),
+            ] {
+                surface.handle_event(mouse(kind, column, 3));
+                assert_eq!(surface.focused(), Some(2));
+                assert_eq!(surface.node(2).unwrap().editor.selection(), (4, 4));
+                assert_eq!(surface.node(2).unwrap().editor.text(), "abcdef");
+            }
+            assert!(
+                !surface
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, SurfaceEvent::Event(2, EventKind::Blur, _)))
+            );
+
+            key(&mut surface, KeyCode::Char('x'), KeyModifiers::NONE);
+            assert_eq!(surface.node(2).unwrap().editor.text(), "abcdxef");
+
+            surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 9));
+            surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 1, 9));
+            assert_eq!(surface.focused(), Some(10));
+            assert_eq!(surface.node(2).unwrap().editor.selection(), (5, 5));
+            assert!(
+                surface
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, SurfaceEvent::Event(2, EventKind::Blur, _)))
+            );
+        }
     }
 
     #[test]
