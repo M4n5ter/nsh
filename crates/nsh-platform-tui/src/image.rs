@@ -944,11 +944,8 @@ pub(crate) fn paint(
             else {
                 continue;
             };
-            let mask = block_mask(cell.symbol()).unwrap_or(0);
-            let palette = [rgb(cell.bg), rgb(cell.fg)];
-            let old: [[u8; 3]; 4] =
-                std::array::from_fn(|q| palette[usize::from(mask & (1 << q) != 0)]);
-            let mut colors = old.map(|color| color.map(f32::from));
+            let mut underlay = None;
+            let mut colors = [[0.0; 3]; 4];
             let mut painted = false;
             for quadrant in 0..4 {
                 let mut sampled = [0.0f32; 4];
@@ -984,9 +981,26 @@ pub(crate) fn paint(
                 }
                 if sampled[3] > 0.0 {
                     painted = true;
-                    for (k, value) in colors[quadrant].iter_mut().enumerate() {
-                        *value = (sampled[k] * 255.0
-                            + old[quadrant][k] as f32 * (1.0 - sampled[3]))
+                }
+                // An opaque sample replaces this quadrant completely; only
+                // transparent or clipped content needs the existing cell.
+                if sampled[3] == 1.0 {
+                    colors[quadrant] = [
+                        (sampled[0] * 255.0).clamp(0.0, 255.0),
+                        (sampled[1] * 255.0).clamp(0.0, 255.0),
+                        (sampled[2] * 255.0).clamp(0.0, 255.0),
+                    ];
+                } else {
+                    let (mask, palette) = underlay.get_or_insert_with(|| {
+                        (
+                            block_mask(cell.symbol()).unwrap_or(0),
+                            [rgb(cell.bg), rgb(cell.fg)],
+                        )
+                    });
+                    let old = palette[usize::from(*mask & (1 << quadrant) != 0)];
+                    for k in 0..3 {
+                        colors[quadrant][k] = (sampled[k] * 255.0
+                            + f32::from(old[k]) * (1.0 - sampled[3]))
                             .clamp(0.0, 255.0);
                     }
                 }
@@ -1015,32 +1029,63 @@ pub(crate) fn block_mask(symbol: &str) -> Option<u8> {
 }
 
 fn fit_block(samples: [[f32; 3]; 4]) -> (&'static str, [u8; 3], [u8; 3]) {
+    #[inline(always)]
+    fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+    let [a, b, c, d] = samples;
+    let (ab, ac, ad, bc, bd, cd) = (
+        add(a, b),
+        add(a, c),
+        add(a, d),
+        add(b, c),
+        add(b, d),
+        add(c, d),
+    );
     let mut best = ("▀", [0; 3], [0; 3]);
     let mut error = f32::INFINITY;
     // A mask and its complement reconstruct the same two-color cell.
     // Prefer half blocks on ties, including uniform colors and horizontal edges.
-    for mask in [3u8, 5, 1, 2, 4, 6, 7] {
-        let mut sums = [[0.0; 3]; 2];
-        for (q, sample) in samples.iter().enumerate() {
-            let group = usize::from(mask & (1 << q) != 0);
-            for (sum, value) in sums[group].iter_mut().zip(sample) {
-                *sum += value;
-            }
-        }
-        let count = mask.count_ones() as f32;
-        let colors: [[u8; 3]; 2] = std::array::from_fn(|group| {
-            let count = if group == 0 { 4.0 - count } else { count };
-            sums[group].map(|value| (value / count).round() as u8)
-        });
+    // These sums retain each group's original reading-order arithmetic while
+    // avoiding repeated grouping and iterator work for every partition.
+    for (mask, fg_sum, bg_sum, count) in [
+        (3, ab, cd, 2.0),
+        (5, ac, bd, 2.0),
+        (1, a, add(bc, d), 1.0),
+        (2, b, add(ac, d), 1.0),
+        (4, c, add(ab, d), 1.0),
+        (6, bc, ad, 2.0),
+        (7, add(ab, c), d, 3.0),
+    ] {
+        let fg = [
+            (fg_sum[0] / count).round() as u8,
+            (fg_sum[1] / count).round() as u8,
+            (fg_sum[2] / count).round() as u8,
+        ];
+        let bg_count = 4.0 - count;
+        let bg = [
+            (bg_sum[0] / bg_count).round() as u8,
+            (bg_sum[1] / bg_count).round() as u8,
+            (bg_sum[2] / bg_count).round() as u8,
+        ];
         let mut candidate = 0.0;
-        for (q, sample) in samples.iter().enumerate() {
-            let color = colors[usize::from(mask & (1 << q) != 0)];
-            for (value, channel) in sample.iter().zip(color) {
-                candidate += (value - f32::from(channel)).powi(2);
-            }
+        macro_rules! accumulate {
+            ($sample:ident, $bit:expr) => {{
+                let color = if mask & $bit != 0 { fg } else { bg };
+                let r = $sample[0] - f32::from(color[0]);
+                let g = $sample[1] - f32::from(color[1]);
+                let b = $sample[2] - f32::from(color[2]);
+                candidate += r * r;
+                candidate += g * g;
+                candidate += b * b;
+            }};
         }
+        accumulate!(a, 1);
+        accumulate!(b, 2);
+        accumulate!(c, 4);
+        accumulate!(d, 8);
         if candidate < error {
-            best = (BLOCKS[mask as usize], colors[1], colors[0]);
+            best = (BLOCKS[mask as usize], fg, bg);
             error = candidate;
         }
         if error == 0.0 {
