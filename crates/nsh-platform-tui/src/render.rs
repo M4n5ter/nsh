@@ -2839,6 +2839,139 @@ mod tests {
     }
 
     #[test]
+    fn unicode_images_preserve_directional_edges_and_compose_transparent_layers() {
+        use crate::image::Raster;
+
+        let (red, blue, green, yellow) = ([255, 0, 0], [0, 0, 255], [0, 255, 0], [255, 255, 0]);
+        let patches = [
+            [red, blue, red, blue],
+            [red, red, blue, blue],
+            [red, blue, blue, red],
+            [red, red, red, blue],
+            [red, green, blue, yellow],
+            [[0; 3], [85; 3], [170; 3], [255; 3]],
+            [green, yellow, yellow, green],
+            [blue; 4],
+        ];
+        let mut source = Raster {
+            width: 32,
+            height: 32,
+            rgba: Vec::new(),
+        };
+        for y in 0..32usize {
+            for x in 0..32usize {
+                let patch = patches[y / 16 * 4 + x / 8];
+                source
+                    .rgba
+                    .extend_from_slice(&patch[(y % 16 / 8) * 2 + x % 8 / 4]);
+                source.rgba.push(255);
+            }
+        }
+        let mut surface = Surface::new(4, 2, CellMetrics::default());
+        let frame = Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(32.0), px(32.0)));
+        surface.apply(MountBatch {
+            items: mount_node(2, ViewKind::Canvas, ROOT_ID, frame),
+        });
+        surface.node_mut(2).unwrap().canvas_raster = Some(Arc::new(source.clone()));
+        let area = CellRect::new(0, 0, 4, 2);
+        let mut buffer = Buffer::empty(area);
+        surface.render(area, &mut buffer);
+        let reconstructed =
+            crate::text::rasterize_cells(&buffer, surface.metrics, &surface.fonts).unwrap();
+        let pixel = |x: usize, y: usize| &reconstructed.rgba[(y * 32 + x) * 4..][..3];
+        assert_eq!(pixel(1, 1), red);
+        assert_eq!(pixel(6, 1), blue);
+        assert_eq!(pixel(1, 12), red);
+        assert_eq!(pixel(6, 12), blue);
+        assert_eq!(pixel(17, 1), red);
+        assert_eq!(pixel(22, 1), blue);
+        assert_eq!(pixel(17, 12), blue);
+        assert_eq!(pixel(22, 12), red);
+        assert_eq!(buffer[(1, 0)].symbol(), "▀");
+        assert_eq!(buffer[(3, 1)].symbol(), "▀");
+
+        // Independent baseline: the best RGB mean in each half of this bitmap.
+        // Both reconstructions idealize filled blocks, not emulator/font pixels.
+        let mut halfblocks = source.clone();
+        for cy in 0..2 {
+            for cx in 0..4 {
+                for half in 0..2 {
+                    let mut sum = [0u32; 3];
+                    for y in cy * 16 + half * 8..cy * 16 + half * 8 + 8 {
+                        for x in cx * 8..cx * 8 + 8 {
+                            for (k, channel) in sum.iter_mut().enumerate() {
+                                *channel += u32::from(source.rgba[(y * 32 + x) * 4 + k]);
+                            }
+                        }
+                    }
+                    let color = sum.map(|value| (value as f32 / 64.0).round() as u8);
+                    for y in cy * 16 + half * 8..cy * 16 + half * 8 + 8 {
+                        for x in cx * 8..cx * 8 + 8 {
+                            halfblocks.rgba[(y * 32 + x) * 4..][..3].copy_from_slice(&color);
+                        }
+                    }
+                }
+            }
+        }
+        let error = |raster: &Raster| -> u64 {
+            source
+                .rgba
+                .iter()
+                .zip(&raster.rgba)
+                .enumerate()
+                .filter(|(i, _)| i % 4 != 3)
+                .map(|(_, (a, b))| (i64::from(*a) - i64::from(*b)).pow(2) as u64)
+                .sum()
+        };
+        let (half_error, block_error) = (error(&halfblocks), error(&reconstructed));
+        assert!(block_error * 2 < half_error);
+        assert!(
+            block_error > 0,
+            "four source colors still cannot fit in a two-color cell"
+        );
+        if let Some(path) = std::env::var_os("NSH_UNICODE_IMAGE_EVIDENCE") {
+            let path = std::path::PathBuf::from(path);
+            std::fs::create_dir_all(&path).unwrap();
+            for (name, raster) in [
+                ("source.png", &source),
+                ("halfblock-ideal.png", &halfblocks),
+                ("unicode-ideal.png", &reconstructed),
+            ] {
+                raster.pixmap().unwrap().save_png(path.join(name)).unwrap();
+            }
+            std::fs::write(
+                path.join("comparison.txt"),
+                format!(
+                    "RGB squared error: halfblock={half_error}, Unicode={block_error}\n\
+                 Source bitmap -> real Surface buffer -> ideal filled-block reconstruction.\n\
+                 This is not an emulator screenshot or a font/palette fidelity measurement.\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        // A second real surface layer must compose over both halves of ▌.
+        surface.apply(MountBatch {
+            items: mount_node(
+                4,
+                ViewKind::Canvas,
+                ROOT_ID,
+                Bounds::new(frame.origin, Size::new(px(8.0), px(16.0))),
+            ),
+        });
+        surface.node_mut(4).unwrap().canvas_raster = Some(Arc::new(Raster {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 255, 255, 128],
+        }));
+        surface.render(area, &mut buffer);
+        let cell = &buffer[(0, 0)];
+        assert_eq!(cell.symbol(), "▌");
+        assert_eq!(cell.fg, CellColor::Rgb(255, 128, 128));
+        assert_eq!(cell.bg, CellColor::Rgb(128, 128, 255));
+    }
+
+    #[test]
     fn image_and_canvas_prefer_protocols_through_transparent_layout_containers() {
         let mut surface = protocol_scene(crate::ProtocolType::Iterm2);
         let area = CellRect::new(0, 0, 20, 8);

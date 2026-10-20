@@ -1,8 +1,9 @@
-//! Bounded image decoding, asset reads and terminal half-block composition.
+//! Bounded image decoding, asset reads and terminal block composition.
 //!
 //! IO and decoding run on the surface's workers. The painter only samples
 //! already decoded pixels, preserving aspect ratio and composing alpha into
-//! the buffer's existing foreground/background half blocks.
+//! the buffer's existing foreground/background blocks. Each cell selects the
+//! least-error half or quadrant block while retaining its two-color limit.
 
 use std::{
     io::Read,
@@ -876,7 +877,7 @@ pub(crate) fn fitted_frame(
     )
 }
 
-/// Composes an image into half-height terminal samples. `frame` and `clip`
+/// Composes an image into two-color terminal blocks. `frame` and `clip`
 /// use virtual points; `area` is the surface's destination in the buffer.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint(
@@ -943,28 +944,26 @@ pub(crate) fn paint(
             else {
                 continue;
             };
-            let old = match cell.symbol() {
-                "▀" => [rgb(cell.fg), rgb(cell.bg)],
-                "▄" => [rgb(cell.bg), rgb(cell.fg)],
-                "█" => [rgb(cell.fg); 2],
-                _ => [rgb(cell.bg); 2],
-            };
-            let mut colors = old;
+            let mask = block_mask(cell.symbol()).unwrap_or(0);
+            let palette = [rgb(cell.bg), rgb(cell.fg)];
+            let old: [[u8; 3]; 4] =
+                std::array::from_fn(|q| palette[usize::from(mask & (1 << q) != 0)]);
+            let mut colors = old.map(|color| color.map(f32::from));
             let mut painted = false;
-            for half in 0..2 {
+            for quadrant in 0..4 {
                 let mut sampled = [0.0f32; 4];
                 // Supersampling prevents one-point wide chart strokes and
-                // small image details disappearing between terminal samples.
-                const SAMPLES: usize = 4;
-                for sy in 0..SAMPLES {
+                // small details disappearing. Splitting the existing 4 × 8
+                // sample grid keeps the sampling cost unchanged.
+                for sy in 0..4 {
                     let py =
-                        (y as f32 + half as f32 * 0.5 + (sy as f32 + 0.5) / (2 * SAMPLES) as f32)
-                            * ch;
+                        (y as f32 + (quadrant / 2) as f32 * 0.5 + (sy as f32 + 0.5) / 8.0) * ch;
                     if py < top || py >= bottom {
                         continue;
                     }
-                    for sx in 0..SAMPLES {
-                        let px = (x as f32 + (sx as f32 + 0.5) / SAMPLES as f32) * cw;
+                    for sx in 0..2 {
+                        let px =
+                            (x as f32 + (quadrant % 2) as f32 * 0.5 + (sx as f32 + 0.5) / 4.0) * cw;
                         if px < left || px >= right {
                             continue;
                         }
@@ -979,26 +978,76 @@ pub(crate) fn paint(
                             ];
                         }
                         for k in 0..4 {
-                            sampled[k] += color[k] * opacity / (SAMPLES * SAMPLES) as f32;
+                            sampled[k] += color[k] * opacity / 8.0;
                         }
                     }
                 }
                 if sampled[3] > 0.0 {
                     painted = true;
-                    for (k, value) in colors[half].iter_mut().enumerate() {
-                        *value = (sampled[k] * 255.0 + old[half][k] as f32 * (1.0 - sampled[3]))
-                            .round()
-                            .clamp(0.0, 255.0) as u8;
+                    for (k, value) in colors[quadrant].iter_mut().enumerate() {
+                        *value = (sampled[k] * 255.0
+                            + old[quadrant][k] as f32 * (1.0 - sampled[3]))
+                            .clamp(0.0, 255.0);
                     }
                 }
             }
             if painted {
-                cell.set_symbol("▀")
-                    .set_fg(TerminalColor::Rgb(colors[0][0], colors[0][1], colors[0][2]))
-                    .set_bg(TerminalColor::Rgb(colors[1][0], colors[1][1], colors[1][2]));
+                let (symbol, fg, bg) = fit_block(colors);
+                cell.set_symbol(symbol)
+                    .set_fg(TerminalColor::Rgb(fg[0], fg[1], fg[2]))
+                    .set_bg(TerminalColor::Rgb(bg[0], bg[1], bg[2]));
             }
         }
     }
+}
+
+const BLOCKS: [&str; 16] = [
+    " ", "▘", "▝", "▀", "▖", "▌", "▞", "▛", "▗", "▚", "▐", "▜", "▄", "▙", "▟", "█",
+];
+
+/// Foreground quadrants in reading order, shared with backdrop rasterization.
+pub(crate) fn block_mask(symbol: &str) -> Option<u8> {
+    BLOCKS
+        .iter()
+        .position(|block| *block == symbol)
+        .filter(|&i| i != 0)
+        .map(|i| i as u8)
+}
+
+fn fit_block(samples: [[f32; 3]; 4]) -> (&'static str, [u8; 3], [u8; 3]) {
+    let mut best = ("▀", [0; 3], [0; 3]);
+    let mut error = f32::INFINITY;
+    // A mask and its complement reconstruct the same two-color cell.
+    // Prefer half blocks on ties, including uniform colors and horizontal edges.
+    for mask in [3u8, 5, 1, 2, 4, 6, 7] {
+        let mut sums = [[0.0; 3]; 2];
+        for (q, sample) in samples.iter().enumerate() {
+            let group = usize::from(mask & (1 << q) != 0);
+            for (sum, value) in sums[group].iter_mut().zip(sample) {
+                *sum += value;
+            }
+        }
+        let count = mask.count_ones() as f32;
+        let colors: [[u8; 3]; 2] = std::array::from_fn(|group| {
+            let count = if group == 0 { 4.0 - count } else { count };
+            sums[group].map(|value| (value / count).round() as u8)
+        });
+        let mut candidate = 0.0;
+        for (q, sample) in samples.iter().enumerate() {
+            let color = colors[usize::from(mask & (1 << q) != 0)];
+            for (value, channel) in sample.iter().zip(color) {
+                candidate += (value - f32::from(channel)).powi(2);
+            }
+        }
+        if candidate < error {
+            best = (BLOCKS[mask as usize], colors[1], colors[0]);
+            error = candidate;
+        }
+        if error == 0.0 {
+            break;
+        }
+    }
+    best
 }
 
 /// Terminal colors as RGB, including the xterm 256-color palette.

@@ -217,14 +217,14 @@ has a 600 ms deadline and a 16 KiB input budget, and leaves no background
 reader. It never changes tmux pane options. `NSH_IMAGE_PROTOCOL` accepts
 `auto`, `halfblocks`, `kitty`, `sixel` and `iterm2`; `halfblocks` skips the
 probe. Graphics protocols require measured physical cell dimensions;
-unsupported terminals and headless scripts use half blocks.
+unsupported terminals and headless scripts use Unicode blocks.
 
 Embedding performs no capability query. The host supplies an
 `ImageProtocol` through `AppView::set_image_protocol` or
 `Surface::set_image_protocol`, including the pixel dimensions per cell;
 it updates that configuration if the terminal font changes. Encoded
 graphics are prepared asynchronously; unmatched or occluded content uses
-the half-block painter so clipping and overlay composition stay intact.
+the Unicode block painter so clipping and overlay composition stay intact.
 Kitty image identifiers come from a bounded per-surface pool, reused for
 new frames and across app reloads. Embedded hosts write
 `image_protocol_cleanup()`'s returned commands when releasing the view's
@@ -242,8 +242,21 @@ rounded/continuous descendant clips. Composition is asynchronous and
 bounded: 2 million output pixels, 24 million working pixels, 32 layers,
 32 cached groups / 64 MiB and 8 pending jobs per surface. Larger groups
 downsample; a previous complete frame remains visible while work runs.
-Output uses the selected image protocol or half blocks. Terminal glyphs,
+Output uses the selected image protocol or Unicode blocks. The portable
+painter retains 32 samples per cell and selects the lowest RGB squared-error
+two-color partition among half and quadrant blocks. Half blocks win ties.
+Existing block masks are decoded for transparent overlays and rasterized
+backdrops; they are filled rectangles rather than font-rasterized glyphs.
+Each terminal cell still has only a foreground and background color, so
+four differently colored quadrants cannot be reproduced exactly. Terminal glyphs,
 physical resolution and colors remain controlled by the emulator.
+
+The `unicode_images_preserve_directional_edges_and_compose_transparent_layers`
+Surface regression compares a source bitmap against the actual rendered cells
+and an independent half-block baseline. Setting `NSH_UNICODE_IMAGE_EVIDENCE`
+to an output directory when running that test also saves all three PNGs and
+their RGB squared errors. These are ideal filled-block reconstructions,
+not emulator screenshots or a measurement of font/palette fidelity.
 
 Built-in WebView provides a readable HTML presentation for inline HTML
 and URI sources. HTTP(S) navigation and redirects enforce the mounted

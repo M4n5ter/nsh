@@ -61,9 +61,9 @@ ordered filters and backdrop filters are composited on the graphics worker.
 On startup, the interactive host detects image protocols and the terminal's physical cell dimensions. Images and
 recorded canvas drawings use
 [`ratatui-image`](https://docs.rs/ratatui-image/11.1.0/ratatui_image/) with Kitty, Sixel or iTerm2 graphics when
-available. Encoding runs on the graphics worker. Colored upper and lower half blocks provide a portable drawing
-path and preserve composition where text or overlays overlap a graphic. The terminal controls how RGB colors map
-to its palette.
+available. Encoding runs on the graphics worker. Colored half and quadrant blocks provide a portable drawing
+path and preserve composition where text or overlays overlap a graphic. Each cell selects the lower-error block
+but still has only two colors. The terminal controls glyph shapes and how RGB colors map to its palette.
 
 `NSH_IMAGE_PROTOCOL` selects `auto` (the default), `halfblocks`, `kitty`, `sixel` or `iterm2`. `halfblocks` starts
 directly with ordinary text rendering. Selecting a graphics protocol uses the terminal's reported pixel dimensions.

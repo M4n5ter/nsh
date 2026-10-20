@@ -651,6 +651,7 @@ pub(crate) fn rasterize_cells(
 ) -> Result<Raster, String> {
     let size = metrics.viewport(buffer.area.width, buffer.area.height);
     let mut pixmap = raster_pixmap(size.width.0, size.height.0)?;
+    let mut block_path = tiny_skia::PathBuilder::new();
     for y in buffer.area.y..buffer.area.bottom() {
         for x in buffer.area.x..buffer.area.right() {
             let cell = &buffer[(x, y)];
@@ -709,15 +710,65 @@ pub(crate) fn rasterize_cells(
             }
             style.decoration.underline = cell.modifier.contains(Modifier::UNDERLINED);
             style.decoration.line_through = cell.modifier.contains(Modifier::CROSSED_OUT);
-            // Half blocks already represent image pixels, not font glyphs.
-            let half = match text.as_str() {
-                "▀" => Some((py, metrics.height().0 / 2.0)),
-                "▄" => Some((py + metrics.height().0 / 2.0, metrics.height().0 / 2.0)),
-                "█" => Some((py, metrics.height().0)),
-                _ => None,
-            };
-            if let Some((top, height)) = half {
-                fill_raster_rect(&mut pixmap, px, top, metrics.width().0, height, style.color);
+            // Image blocks represent filled pixels, independent of font glyphs.
+            if let Some(mask) = crate::image::block_mask(&text) {
+                // Keep rectangular masks whole: independently antialiasing
+                // touching pieces would leave seams at fractional cell sizes.
+                let rectangle = match mask {
+                    1 => Some((0.0, 0.0, 0.5, 0.5)),
+                    2 => Some((0.5, 0.0, 0.5, 0.5)),
+                    3 => Some((0.0, 0.0, 1.0, 0.5)),
+                    4 => Some((0.0, 0.5, 0.5, 0.5)),
+                    8 => Some((0.5, 0.5, 0.5, 0.5)),
+                    12 => Some((0.0, 0.5, 1.0, 0.5)),
+                    5 => Some((0.0, 0.0, 0.5, 1.0)),
+                    10 => Some((0.5, 0.0, 0.5, 1.0)),
+                    15 => Some((0.0, 0.0, 1.0, 1.0)),
+                    _ => None,
+                };
+                if let Some((x, y, width, height)) = rectangle {
+                    fill_raster_rect(
+                        &mut pixmap,
+                        px + x * metrics.width().0,
+                        py + y * metrics.height().0,
+                        width * metrics.width().0,
+                        height * metrics.height().0,
+                        style.color,
+                    );
+                } else {
+                    for q in 0..4 {
+                        if mask & (1 << q) != 0
+                            && let Some(rect) = tiny_skia::Rect::from_xywh(
+                                px + (q % 2) as f32 * metrics.width().0 / 2.0,
+                                py + (q / 2) as f32 * metrics.height().0 / 2.0,
+                                metrics.width().0 / 2.0,
+                                metrics.height().0 / 2.0,
+                            )
+                        {
+                            block_path.push_rect(rect);
+                        }
+                    }
+                    if let Some(path) = block_path.finish() {
+                        let c = style.color.0;
+                        let mut paint = tiny_skia::Paint::default();
+                        paint.set_color_rgba8(
+                            (c >> 24) as u8,
+                            (c >> 16) as u8,
+                            (c >> 8) as u8,
+                            c as u8,
+                        );
+                        pixmap.fill_path(
+                            &path,
+                            &paint,
+                            tiny_skia::FillRule::Winding,
+                            tiny_skia::Transform::identity(),
+                            None,
+                        );
+                        block_path = path.clear();
+                    } else {
+                        block_path = tiny_skia::PathBuilder::new();
+                    }
+                }
             } else {
                 paint_raster_run(
                     &mut pixmap,
@@ -1286,19 +1337,40 @@ mod tests {
     }
 
     #[test]
-    fn rasterized_buffer_keeps_half_block_pixels_and_transparent_reset_backgrounds() {
+    fn rasterized_buffer_keeps_block_pixels_and_transparent_reset_backgrounds() {
         let metrics = CellMetrics::default();
-        let mut buffer = Buffer::empty(CellRect::new(4, 3, 2, 1));
+        let mut buffer = Buffer::empty(CellRect::new(4, 3, 3, 1));
         buffer[(4, 3)]
             .set_symbol("▀")
             .set_fg(TerminalColor::Rgb(255, 0, 0))
             .set_bg(TerminalColor::Rgb(0, 0, 255));
-        let raster = rasterize_cells(&buffer, metrics, &FontCatalog::default()).unwrap();
+        buffer[(5, 3)]
+            .set_symbol("▚")
+            .set_fg(TerminalColor::Rgb(255, 0, 0))
+            .set_bg(TerminalColor::Rgb(0, 0, 255));
+        let fonts = FontCatalog::default();
+        let raster = rasterize_cells(&buffer, metrics, &fonts).unwrap();
         let pixel = |x: usize, y: usize| &raster.rgba[(y * raster.width as usize + x) * 4..][..4];
-        assert_eq!((raster.width, raster.height), (16, 16));
+        assert_eq!((raster.width, raster.height), (24, 16));
         assert_eq!(pixel(2, 2), [255, 0, 0, 255]);
         assert_eq!(pixel(2, 12), [0, 0, 255, 255]);
-        assert_eq!(pixel(12, 2), [0, 0, 0, 0]);
+        assert_eq!(pixel(10, 2), [255, 0, 0, 255]);
+        assert_eq!(pixel(14, 2), [0, 0, 255, 255]);
+        assert_eq!(pixel(10, 12), [0, 0, 255, 255]);
+        assert_eq!(pixel(14, 12), [255, 0, 0, 255]);
+        assert_eq!(pixel(20, 2), [0, 0, 0, 0]);
+
+        for (symbol, x, y) in [("▀", 3, 2), ("█", 3, 7), ("▌", 1, 7), ("▛", 1, 7)] {
+            buffer[(4, 3)].set_symbol(symbol);
+            let raster = rasterize_cells(
+                &buffer,
+                CellMetrics::new(px(7.0), px(15.0)).unwrap(),
+                &fonts,
+            )
+            .unwrap();
+            let pixel = &raster.rgba[(y * raster.width as usize + x) * 4..][..4];
+            assert_eq!(pixel, [255, 0, 0, 255], "no internal seam in {symbol}");
+        }
     }
 
     #[test]
