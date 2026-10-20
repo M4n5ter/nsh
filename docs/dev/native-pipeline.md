@@ -73,7 +73,10 @@ One Oxc pass removes TypeScript and lowers JSX (`plugin.rs` `compile_native`):
   component path. Lowercase tags are errors with the import to write (`<view>`: write `<View>` and `import { View }
   from "nsh"`; for another, the closest binding, primitive or UI set component). Why: TypeScript checks a lowercase
   tag against one global type per name, so generic components (`List`, `Each`) and local ones would lose their types.
-  Props keep their camelCase names.
+  Props keep their camelCase names. Only `<Text>` shows text (the core lays out raw text in a text block alone): text
+  written in another host element (`<View>Hi</View>`, a string, number or template literal) is an error saying where it
+  goes (`check_unshown_text`); a string an expression puts there is reported once per tag at run time (`dom.rs`
+  `report_unshown_text`), except in a Rust component's view or slots (`places`), which place what they get.
 - **Host elements** become one arrow function making the element and its host children: static props and children
   are set once (`prop`, `append`), changing ones are functions the renderer follows natively (`bindProp`, `insert`).
   An expression changes when it calls something or reads a member outside nested functions (Solid's rule). Event
@@ -83,6 +86,10 @@ One Oxc pass removes TypeScript and lowers JSX (`plugin.rs` `compile_native`):
   or an import, which cannot be assigned, passes its name, so a value that is neither is an error saying what to write.
   Other expressions are the `ref` prop, which `apply_ref` handles likewise; a component's `ref` is a method doing the
   same with what the component gives. Consecutive dynamic children share one `insert`, before the next static child.
+- **Components** that take their props apart in their first parameter (`function Title({ text })`, top-level
+  functions and arrows with JSX and a PascalCase name, as `hot.rs` finds them) get a build warning naming the props
+  to read instead (`props.rs`, logged by the plugin with the module's path, target `nsh::build`): each would be read
+  once. Taking them apart in the body (`const { id } = props;`) is left alone, as a choice the code states.
 - **Components** are called untracked with a props object: static props as values, the others as getters, children as
   the `children` getter; spreads go through `merge`, which keeps getters. Among several children, an expression that
   changes is a function of its own (`["one ", () => s()]`), so the getter, which makes every sibling, reads none of
