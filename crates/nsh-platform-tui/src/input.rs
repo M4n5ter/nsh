@@ -163,6 +163,17 @@ impl Surface {
     /// Handles an event in this surface's terminal coordinates. Embedded
     /// hosts translate mouse coordinates to the surface before forwarding.
     pub fn handle_event(&mut self, event: Event) -> bool {
+        if let Event::Mouse(mouse) = &event
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            )
+        {
+            return self.handle_wheel(*mouse, 1) != 0;
+        }
         if self.service_event(&event) {
             return true;
         }
@@ -1030,6 +1041,118 @@ impl Surface {
         }
     }
 
+    /// Handles consecutive identical wheel detents against one hit-tested target.
+    ///
+    /// The host groups only events with the same coordinates, direction and
+    /// modifiers from one presented frame. Native scrolling applies their total
+    /// delta once, so moving content cannot retarget later detents to a nested
+    /// scroll view. Returns the number consumed; zero steps and non-wheel events
+    /// do nothing. Host components accept only one detent per call, allowing the
+    /// host to dispatch their events before admitting more input.
+    pub fn handle_wheel(&mut self, mouse: MouseEvent, mut steps: u16) -> u16 {
+        if steps == 0
+            || !matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            )
+        {
+            return 0;
+        }
+        if self.service_wheel(mouse, steps) {
+            return steps;
+        }
+        if self.dialog.is_some() {
+            self.dialog_mouse(mouse);
+            return steps;
+        }
+        let x = (mouse.column as f32 + 0.5) * self.metrics.width();
+        let y = (mouse.row as f32 + 0.5) * self.metrics.height();
+        let hit = self.hit_test(x, y);
+        self.set_hover(hit);
+        let native = self
+            .pointer
+            .as_ref()
+            .and_then(|pointer| pointer.native)
+            .or_else(|| {
+                hit.and_then(|id| {
+                    self.ancestors(id)
+                        .into_iter()
+                        .find(|id| self.node(*id).is_some_and(|node| node.native.is_some()))
+                })
+            });
+        if let Some(id) = native {
+            steps = 1;
+            let captured = self
+                .pointer
+                .as_ref()
+                .is_some_and(|pointer| pointer.native == Some(id));
+            if self.native_event(id, &Event::Mouse(mouse)) || captured {
+                return 1;
+            }
+        }
+        if !mouse.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(media) = hit.and_then(|id| {
+                self.ancestors(id)
+                    .into_iter()
+                    .find(|id| self.node(*id).is_some_and(|node| node.media.is_some()))
+            })
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+            && self.media_scroll(
+                media,
+                if mouse.kind == MouseEventKind::ScrollUp {
+                    -3 * i32::from(steps)
+                } else {
+                    3 * i32::from(steps)
+                },
+            )
+        {
+            return steps;
+        }
+        let Some(id) = self.scroll_ancestor(hit.or(self.focus)) else {
+            return 0;
+        };
+        if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+            let factor: f32 = if matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollRight
+            ) {
+                1.1
+            } else {
+                1.0 / 1.1
+            };
+            return if self.zoom_scroll_at(id, factor.powi(i32::from(steps)), x, y) {
+                steps
+            } else {
+                0
+            };
+        }
+        let Some(node) = self.node(id) else {
+            return 0;
+        };
+        let (mut x, mut y) = (node.scroll.x, node.scroll.y);
+        let horizontal = node.scroll.horizontal || mouse.modifiers.contains(KeyModifiers::SHIFT);
+        let horizontal_step = self.metrics.width() * 3.0 * f32::from(steps);
+        let vertical_step = self.metrics.height() * 3.0 * f32::from(steps);
+        let physical_step = horizontal_step * if node.scroll.mirrored { -1.0 } else { 1.0 };
+        match mouse.kind {
+            MouseEventKind::ScrollLeft => x -= physical_step,
+            MouseEventKind::ScrollRight => x += physical_step,
+            MouseEventKind::ScrollUp if horizontal => x -= horizontal_step,
+            MouseEventKind::ScrollDown if horizontal => x += horizontal_step,
+            MouseEventKind::ScrollUp => y -= vertical_step,
+            MouseEventKind::ScrollDown => y += vertical_step,
+            _ => {}
+        }
+        self.user_scroll(id, x, y);
+        steps
+    }
+
     fn mouse_event(&mut self, mouse: MouseEvent) -> bool {
         let x = (mouse.column as f32 + 0.5) * self.metrics.width();
         let y = (mouse.row as f32 + 0.5) * self.metrics.height();
@@ -1302,69 +1425,6 @@ impl Surface {
                 }
                 self.set_pressed(None);
                 self.drag_input = None;
-                true
-            }
-            MouseEventKind::ScrollUp
-            | MouseEventKind::ScrollDown
-            | MouseEventKind::ScrollLeft
-            | MouseEventKind::ScrollRight => {
-                if !mouse.modifiers.contains(KeyModifiers::CONTROL)
-                    && let Some(media) = hit.and_then(|id| {
-                        self.ancestors(id)
-                            .into_iter()
-                            .find(|id| self.node(*id).is_some_and(|node| node.media.is_some()))
-                    })
-                    && matches!(
-                        mouse.kind,
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                    )
-                    && self.media_scroll(
-                        media,
-                        if mouse.kind == MouseEventKind::ScrollUp {
-                            -3
-                        } else {
-                            3
-                        },
-                    )
-                {
-                    return true;
-                }
-                let Some(id) = self.scroll_ancestor(hit.or(self.focus)) else {
-                    return false;
-                };
-                if mouse.modifiers.contains(KeyModifiers::CONTROL) {
-                    return self.zoom_scroll_at(
-                        id,
-                        if matches!(
-                            mouse.kind,
-                            MouseEventKind::ScrollUp | MouseEventKind::ScrollRight
-                        ) {
-                            1.1
-                        } else {
-                            1.0 / 1.1
-                        },
-                        x,
-                        y,
-                    );
-                }
-                let Some(node) = self.node(id) else {
-                    return false;
-                };
-                let (mut x, mut y) = (node.scroll.x, node.scroll.y);
-                let horizontal =
-                    node.scroll.horizontal || mouse.modifiers.contains(KeyModifiers::SHIFT);
-                let physical_step =
-                    self.metrics.width() * 3.0 * if node.scroll.mirrored { -1.0 } else { 1.0 };
-                match mouse.kind {
-                    MouseEventKind::ScrollLeft => x -= physical_step,
-                    MouseEventKind::ScrollRight => x += physical_step,
-                    MouseEventKind::ScrollUp if horizontal => x -= self.metrics.width() * 3.0,
-                    MouseEventKind::ScrollDown if horizontal => x += self.metrics.width() * 3.0,
-                    MouseEventKind::ScrollUp => y -= self.metrics.height() * 3.0,
-                    MouseEventKind::ScrollDown => y += self.metrics.height() * 3.0,
-                    _ => {}
-                }
-                self.user_scroll(id, x, y);
                 true
             }
             MouseEventKind::Moved => hit.is_some(),
@@ -2260,6 +2320,174 @@ mod tests {
         assert_eq!(surface.node(2).unwrap().scroll.x, 0.0);
         key(&mut surface, KeyCode::End, KeyModifiers::NONE);
         assert_eq!(surface.node(2).unwrap().scroll.x, 840.0);
+    }
+
+    #[test]
+    fn wheel_burst_keeps_the_initial_scroll_target_when_a_nested_view_moves_under_pointer() {
+        use nsh_core::{MountBatch, MountItem, Size};
+        let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+        let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+        items.extend(create(4, ViewKind::Scroll, 2, 48.0));
+        for id in [2, 4] {
+            items.push(MountItem::ScrollContent {
+                id,
+                size: Size::new(160.0, 1000.0),
+            });
+        }
+        surface.apply(MountBatch { items });
+        surface.events.clear();
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(surface.handle_wheel(mouse, 0), 0);
+        assert_eq!(
+            surface.handle_wheel(
+                MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    ..mouse
+                },
+                3
+            ),
+            0
+        );
+        assert_eq!(surface.hovered, None);
+        assert_eq!(surface.events.len(), 0);
+        assert_eq!(surface.handle_wheel(mouse, 3), 3);
+        assert_eq!(surface.node(2).unwrap().scroll.y, 144.0);
+        assert_eq!(surface.node(4).unwrap().scroll.y, 0.0);
+        let offsets: Vec<_> = surface
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SurfaceEvent::Scroll(id, x, y, count) => Some((*id, *x, *y, *count)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offsets, [(2, 0.0, 144.0, 0)]);
+
+        surface.node_mut(2).unwrap().scroll.y = 0.0;
+        surface.events.clear();
+        assert_eq!(surface.handle_wheel(mouse, 1), 1);
+        assert!(surface.handle_event(Event::Mouse(mouse)));
+        assert_eq!(surface.node(2).unwrap().scroll.y, 48.0);
+        assert_eq!(surface.node(4).unwrap().scroll.y, 48.0);
+    }
+
+    #[test]
+    fn wheel_burst_counts_horizontal_rtl_shift_and_zoom_with_mounted_limits() {
+        use nsh_core::{MountBatch, MountItem, Size};
+        let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+        let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+        items.push(MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(1000.0, 1000.0),
+        });
+        surface.apply(MountBatch { items });
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollRight,
+            column: 2,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        let scroll = &mut surface.node_mut(2).unwrap().scroll;
+        scroll.x = 100.0;
+        scroll.horizontal = true;
+        scroll.mirrored = true;
+        assert_eq!(surface.handle_wheel(mouse, 3), 3);
+        assert_eq!(surface.node(2).unwrap().scroll.x, 28.0);
+        assert_eq!(
+            surface.handle_wheel(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    modifiers: KeyModifiers::SHIFT,
+                    ..mouse
+                },
+                2
+            ),
+            2
+        );
+        assert_eq!(surface.node(2).unwrap().scroll.x, 76.0);
+        let behavior = &mut surface.node_mut(2).unwrap().scroll.behavior;
+        behavior.min_zoom = 0.5;
+        behavior.max_zoom = 2.0;
+        behavior.pinch = true;
+        assert_eq!(
+            surface.handle_wheel(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    modifiers: KeyModifiers::CONTROL,
+                    ..mouse
+                },
+                10
+            ),
+            10
+        );
+        assert_eq!(surface.node(2).unwrap().scroll.physics.zoom, 2.0);
+        assert_eq!(
+            surface.handle_wheel(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    modifiers: KeyModifiers::CONTROL,
+                    ..mouse
+                },
+                u16::MAX
+            ),
+            u16::MAX
+        );
+        assert_eq!(surface.node(2).unwrap().scroll.physics.zoom, 0.5);
+    }
+
+    #[test]
+    fn wheel_burst_yields_after_one_host_component_detent() {
+        use nsh_core::{MountBatch, MountItem, Size};
+
+        use crate::native::{ComponentContext, ComponentResponse, NativeComponent};
+        struct Wheel;
+        impl NativeComponent for Wheel {
+            fn render(&self, _: &ComponentContext, _: &mut ratatui::buffer::Buffer) {}
+            fn handle_event(&mut self, _: &Event, _: &ComponentContext) -> ComponentResponse {
+                ComponentResponse::event("wheel", serde_json::json!({"detent": 1}))
+            }
+        }
+        let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+        let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+        items.extend(create(4, ViewKind::View, 2, 0.0));
+        items.push(MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(160.0, 1000.0),
+        });
+        surface.apply(MountBatch { items });
+        surface.node_mut(4).unwrap().native = Some(Box::new(Wheel));
+        surface.events.clear();
+        assert_eq!(
+            surface.handle_wheel(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 2,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                3
+            ),
+            1
+        );
+        assert_eq!(surface.node(2).unwrap().scroll.y, 0.0);
+        let native: Vec<_> = surface
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(
+                    id,
+                    EventKind::NativeEvent,
+                    EventPayload::Native { name, data },
+                ) => Some((*id, name.as_ref(), data)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(native, [(4, "wheel", &serde_json::json!({"detent": 1}))]);
     }
 
     #[test]

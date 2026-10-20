@@ -13,7 +13,9 @@ use std::{
 };
 
 use base64::Engine as _;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use nsh_core::{
     AccessibilityActionDef, AccessibilityRole, AccessibilityState, AccessibilityValue, EventKind,
     EventPayload, NodeId, PayloadValue, ROOT_ID, Rect, ViewKind,
@@ -869,6 +871,21 @@ impl Surface {
         self.services.popup.is_some()
     }
 
+    pub(crate) fn service_wheel(&mut self, mouse: MouseEvent, steps: u16) -> bool {
+        if !self.service_event(&Event::Mouse(mouse)) {
+            return false;
+        }
+        let direction = match mouse.kind {
+            MouseEventKind::ScrollUp => -1,
+            MouseEventKind::ScrollDown => 1,
+            _ => return true,
+        };
+        for _ in 1..steps {
+            self.move_menu(direction);
+        }
+        true
+    }
+
     pub(crate) fn service_event(&mut self, event: &Event) -> bool {
         if let Event::Mouse(mouse) = event {
             self.services.pointer = Some((
@@ -1313,6 +1330,51 @@ mod tests {
         assert!(
             matches!(&events[..], [SurfaceEvent::Event(ROOT_ID,EventKind::Menu,EventPayload::Map(chosen)),SurfaceEvent::Event(ROOT_ID,EventKind::Menu,EventPayload::Map(closed))] if chosen.contains(&("id",PayloadValue::Number(42.0))) && closed.contains(&("closed",PayloadValue::Bool(true))))
         );
+    }
+
+    #[test]
+    fn wheel_burst_moves_each_menu_detent_past_disabled_entries() {
+        let mut surface = surface();
+        let items = (0..5)
+            .map(|id| {
+                MenuItem::Action(MenuAction {
+                    id,
+                    label: format!("Item {id}"),
+                    shortcut: None,
+                    enabled: id != 1,
+                    checked: None,
+                    role: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        surface.desktop_command(DesktopCommand::PopupMenu {
+            items: items.into(),
+            at: None,
+        });
+        assert_eq!(
+            surface.handle_wheel(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 2,
+                    row: 2,
+                    modifiers: KeyModifiers::NONE,
+                },
+                3
+            ),
+            3
+        );
+        assert_eq!(surface.services.popup.as_ref().unwrap().selected, 4);
+        assert!(surface.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        ))));
+        let chosen = surface.drain_events().find_map(|event| match event {
+            SurfaceEvent::Event(ROOT_ID, EventKind::Menu, EventPayload::Map(fields)) => fields
+                .into_iter()
+                .find_map(|(key, value)| (key == "id").then_some(value)),
+            _ => None,
+        });
+        assert_eq!(chosen, Some(PayloadValue::Number(4.0)));
     }
 
     #[test]
