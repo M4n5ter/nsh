@@ -200,6 +200,16 @@ Forward keyboard and paste events with `view.handle_event(event)`. Translate mou
 relative to the view's region before forwarding them; route events only to the surface that should receive them.
 Dropping the view or calling `stop()` ends its engine.
 
+Hosts driving `Surface` and `LocalEngine` directly can preserve ordinary left presses with
+[`inputAction`](../modules/nsh.md#inputaction). Take `Surface::input_snapshot()` with the rendered frame and
+publish its `InputSnapshot` only after the corresponding terminal bytes have flushed successfully. At mouse
+Down, resolve `snapshot.press_at(column, row)` and keep that same `PressLease` for Down, Drag and Up through
+`Surface::handle_presented_mouse`. Before entering its callback, validate the lease's `binding()` with
+`LocalEngine::dispatch_bound_event_now`; `target()` identifies its native activation owner. Revoke the remaining
+admitted input from that presentation as soon as the first application callback enters. A stale lease rejects
+the press. Events with no ordinary press lease, including keyboard, wheel, selection and gesture input, continue
+through the host's exact-presentation input path.
+
 `AppOptions::asset_base` resolves `asset:/` URIs from an asset directory or HTTP base.
 `AppOptions::limits` configures the VM limits; embedding defaults to `Limits::default()`, while the standalone
 hosts use `Limits::standalone()`. `nsh run --target tui --limits` uses the embedding defaults for a TSX entry;

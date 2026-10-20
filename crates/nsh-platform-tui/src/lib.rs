@@ -19,6 +19,7 @@ mod motion;
 mod native;
 mod navigation;
 mod net;
+mod presented;
 mod protocol;
 mod render;
 mod script;
@@ -42,6 +43,7 @@ pub use crate::{
         ComponentContext, ComponentEvent, ComponentFactory, ComponentResponse, Components,
         NativeComponent,
     },
+    presented::{InputSnapshot, PressLease},
     protocol::{ImageProtocol, ProtocolType},
     services::{
         AccessibleNode, ClipboardContent, HostServices, ServiceCancellation, ServiceOutput,

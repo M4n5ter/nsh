@@ -142,6 +142,31 @@ function Clock() {
 }
 ```
 
+## inputAction
+
+```ts
+function inputAction<A>(handler: (args: A) => unknown, args: A): () => void;
+```
+
+捕获兼容 JSON 的 `args`，返回一个回调，调用时只将这份快照传给 `handler`。必须显式提供第二个参数；
+没有参数的操作使用 `null` 或 `[]`。捕获会求值 getter 和 Proxy trap，复制 JSON 值，并递归冻结其中的对象和数组。
+上限为 64 层、1,048,576 个条目以及 8 MiB 的规范 UTF-8 JSON。传入回调的事件参数和 handler 的返回值会被忽略。
+
+```tsx
+import { inputAction, signal, Text } from "nsh";
+
+const selected = signal("");
+
+function Row(props: { id: string }) {
+  const choose = ({ id }: { id: string }) => selected.set(id);
+  return <Text onPress={inputAction(choose, { id: props.id })}>{props.id}</Text>;
+}
+```
+
+保持 handler 稳定：同一个 handler 和相等的 JSON 捕获值会保留当前挂载操作的本地绑定。操作及其目标必须完全
+由捕获参数决定。读取当前可变状态只用于拒绝已经过期的操作，不能重新选择目标或改写操作参数。这样，嵌入宿主
+可以将普通点击与用户看到的操作核对；参见[终端嵌入](../docs/tui.md#嵌入-ratatui-应用)。
+
 ## context
 
 ```ts

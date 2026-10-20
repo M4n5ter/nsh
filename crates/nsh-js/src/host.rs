@@ -641,6 +641,59 @@ impl Host {
         }
     }
 
+    /// Checks a node's currently installed sealed input action without
+    /// reading props, calling app code or running pending jobs.
+    pub fn input_action_matches(&self, id: NodeId, token: u64) -> bool {
+        self.ctx
+            .with(|ctx| crate::dom::input_action_event(ctx.as_raw().as_ptr(), id, token).is_some())
+    }
+
+    /// Delivers an event to the sealed action captured by a presented input.
+    /// `None` rejects a changed binding or mismatched route before app entry;
+    /// `Some(false)` is an unsubscribed phase. Component event names and drops
+    /// must be inert, as with the core's closed event forwarders.
+    pub fn deliver_bound_now(
+        &self,
+        event: nsh_core::ui::JsEvent,
+        node: NodeId,
+        token: u64,
+    ) -> Option<bool> {
+        let press = self.ctx.with(|ctx| {
+            let owner = crate::dom::input_action_event(ctx.as_raw().as_ptr(), node, token)?;
+            match &event {
+                nsh_core::ui::JsEvent::Event(id, kind, _)
+                    if *id == node && owner == EventKind::Press =>
+                {
+                    Some(*kind == EventKind::Press)
+                }
+                nsh_core::ui::JsEvent::Component { host, event }
+                    if *host == node && owner == EventKind::NativeEvent =>
+                {
+                    Some(event.name() == "press")
+                }
+                _ => None,
+            }
+        })?;
+        if !press {
+            return Some(false);
+        }
+        self.guarded(Phase::Call, || {
+            let entered = self.ctx.with(|ctx| {
+                let callable = crate::dom::bound_input_action(ctx.as_raw().as_ptr(), node, token)?;
+                // SAFETY: the selected handler owns a sealed callable duplicate.
+                let callable = unsafe { Value::from_raw(ctx.clone(), callable) };
+                let callable = callable.into_function()?;
+                self.report(&ctx, callable.call::<_, ()>(()));
+                Some(true)
+            });
+            if entered == Some(true) {
+                self.run_jobs();
+            }
+            entered
+        })
+        .unwrap_or(Some(false))
+    }
+
     fn dispatch_event_now(&self, id: NodeId, event: EventKind, payload: &EventPayload) -> bool {
         self.guarded(Phase::Call, || {
             let entered = self.ctx.with(|ctx| {
@@ -1748,12 +1801,17 @@ const report = (v) => text(String(v));
         host.eval_source(
             r#"import { Button } from "nsh/base";
             globalThis.log = [];
+            globalThis.delivering = false;
             globalThis.undefinedButton = Button({
-                get onPress() { log.push("undefined"); return undefined; }
+                get onPress() { if (delivering) log.push("undefined"); return undefined; }
             });
             globalThis.throwingButton = Button({
-                get onPress() { log.push("throw"); throw Error("getter failed"); }
-            });"#,
+                get onPress() {
+                    if (delivering) { log.push("throw"); throw Error("getter failed"); }
+                    return undefined;
+                }
+            });
+            delivering = true;"#,
         )
         .unwrap();
         let ids = host.ctx.with(|ctx| {
@@ -1789,6 +1847,175 @@ const report = (v) => text(String(v));
         assert!(host.deliver_now(event(ids[1], "press")));
         assert_eq!(conversions.get(), 2);
         assert_eq!(log(), "undefined,job,throw");
+    }
+
+    #[test]
+    fn sealed_input_actions_preserve_snapshots_and_reject_changed_bindings() {
+        use nsh_core::{
+            Prop,
+            ui::{EventToJs, JsEvent, JsHost, JsOwned, PropError},
+        };
+
+        struct Press(Rc<Cell<u32>>);
+
+        impl EventToJs for Press {
+            fn name(&self) -> &'static str {
+                "press"
+            }
+
+            fn data_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+                self.0.set(self.0.get() + 1);
+                Ok(JsOwned::new(host, host.undefined()))
+            }
+        }
+
+        let host = Host::with_options(HostOptions {
+            ui_sets: vec![nsh_base::registry()],
+            ..Default::default()
+        })
+        .unwrap();
+        host.eval_source(
+            r#"import { Button } from "nsh/base";
+            import { inputAction, signal } from "nsh";
+            globalThis.log = [];
+            globalThis.reads = 0;
+            globalThis.source = { target: "A", nested: { value: 1 }, text: "x".repeat(70000) };
+            globalThis.args = signal(source);
+            globalThis.tick = signal(0);
+            const press = (captured) => log.push([
+                captured.target, captured.nested.value, captured.text.length,
+                Object.isFrozen(captured), Object.isFrozen(captured.nested)
+            ].join(":"));
+            let rejected = false;
+            try { inputAction(press); } catch { rejected = true; }
+            if (!rejected) throw Error("missing captured args accepted");
+            const sparse = []; sparse.length = 2 ** 31;
+            rejected = false;
+            try { inputAction(press, sparse); } catch { rejected = true; }
+            if (!rejected) throw Error("oversized sparse capture accepted");
+            globalThis.bound = Button({
+                get onPress() { tick(); reads++; return inputAction(press, args()); }
+            });"#,
+        )
+        .unwrap();
+        let node = host.ctx.with(|ctx| {
+            let node: Value = ctx.globals().get("bound").unwrap();
+            crate::dom::node_id(ctx.as_raw().as_ptr(), node.as_raw()).unwrap()
+        });
+        let published = |updates: Vec<Op>| {
+            updates.into_iter().find_map(|op| match op {
+                Op::SetProp {
+                    id,
+                    prop: Prop::InputAction(Some(token)),
+                } if id == node => Some(token),
+                _ => None,
+            })
+        };
+        let token = published(ops(&host)).unwrap();
+        let conversions = Rc::new(Cell::new(0));
+        host.eval_source("tick.set(1);").unwrap();
+        assert_eq!(published(ops(&host)), None);
+        host.eval_source("source.nested.value = 99;").unwrap();
+        let reads = host
+            .ctx
+            .with(|ctx| ctx.globals().get::<_, u32>("reads").unwrap());
+        host.ctx.with(|ctx| {
+            ctx.eval::<(), _>("Promise.resolve().then(() => log.push('job'));")
+                .unwrap();
+        });
+        assert!(host.input_action_matches(node, token));
+        assert_eq!(
+            host.deliver_bound_now(
+                JsEvent::Children {
+                    host: node,
+                    wanted: true
+                },
+                node,
+                token
+            ),
+            None,
+        );
+        assert_eq!(
+            host.ctx
+                .with(|ctx| ctx.eval::<String, _>("log.join(',')").unwrap()),
+            "",
+        );
+        assert_eq!(
+            host.deliver_bound_now(
+                JsEvent::Component {
+                    host: node,
+                    event: Box::new(Press(conversions.clone())),
+                },
+                node,
+                token,
+            ),
+            Some(true),
+        );
+        assert_eq!(
+            host.ctx
+                .with(|ctx| ctx.eval::<String, _>("log.join(',')").unwrap()),
+            "A:1:70000:true:true,job",
+        );
+        assert_eq!(
+            host.ctx
+                .with(|ctx| ctx.globals().get::<_, u32>("reads").unwrap()),
+            reads,
+        );
+        assert_eq!(conversions.get(), 0);
+
+        host.eval_source("args.set({ ...source, target: 'B' });")
+            .unwrap();
+        let replacement = published(ops(&host)).unwrap();
+        assert_ne!(replacement, token);
+        assert!(!host.input_action_matches(node, token));
+        assert!(host.input_action_matches(node, replacement));
+        host.ctx.with(|ctx| {
+            ctx.eval::<(), _>("Promise.resolve().then(() => log.push('replacement job'));")
+                .unwrap();
+        });
+        assert_eq!(
+            host.deliver_bound_now(
+                JsEvent::Component {
+                    host: node,
+                    event: Box::new(nsh_base::ButtonEvent::Press),
+                },
+                node,
+                token,
+            ),
+            None,
+        );
+        assert_eq!(
+            host.deliver_bound_now(
+                JsEvent::Component {
+                    host: node,
+                    event: Box::new(nsh_base::ButtonEvent::PressDown),
+                },
+                node,
+                replacement,
+            ),
+            Some(false),
+        );
+        assert_eq!(
+            host.ctx
+                .with(|ctx| ctx.eval::<String, _>("log.join(',')").unwrap()),
+            "A:1:70000:true:true,job",
+        );
+        assert_eq!(
+            host.deliver_bound_now(
+                JsEvent::Component {
+                    host: node,
+                    event: Box::new(nsh_base::ButtonEvent::Press),
+                },
+                node,
+                replacement,
+            ),
+            Some(true),
+        );
+        assert_eq!(
+            host.ctx
+                .with(|ctx| ctx.eval::<String, _>("log.join(',')").unwrap()),
+            "A:1:70000:true:true,job,B:99:70000:true:true,replacement job",
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

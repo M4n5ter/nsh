@@ -24,6 +24,7 @@ mod env;
 mod error;
 mod host;
 mod hot;
+mod input_action;
 mod keymap;
 mod list;
 mod modules;

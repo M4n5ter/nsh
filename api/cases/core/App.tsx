@@ -8,6 +8,7 @@ import Context from "./context";
 import CoreAnimated from "./core-animated";
 import CoreCanvas from "./core-canvas";
 import CoreElements from "./core-elements";
+import CoreInputAction from "./core-input-action";
 import CoreList from "./core-list";
 import CoreReactive from "./core-reactive";
 import CoreRef from "./core-ref";
@@ -20,6 +21,7 @@ const cases: Record<string, () => JSX.Element> = {
   "core-animated": CoreAnimated,
   "core-canvas": CoreCanvas,
   "core-elements": CoreElements,
+  "core-input-action": CoreInputAction,
   "core-list": CoreList,
   "core-reactive": CoreReactive,
   "core-ref": CoreRef,

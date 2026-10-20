@@ -27,7 +27,7 @@ globals.
 
 | Module | Exports | Implemented in (`crates/nsh-js/src`) |
 |---|---|---|
-| `nsh` | `signal`, `computed`, `effect`, `batch`, `untracked`, `cleanup`, `context`, `split`, `mount`, `resource` (`resource.rs`: a callable object over four signals, its loads kept by `nsh_core::resource::Runs`); `View`, `Text`, `Scroll`, `Input` (host elements as components: `dom::host_component`); `YNode`, `Accessor`, `Signal`, `Context`, `Component`, the types of styles, element props, events and `JSX` | `reactive.rs`, `dom.rs` |
+| `nsh` | `signal`, `computed`, `effect`, `batch`, `untracked`, `cleanup`, `context`, `split`, `mount`, `inputAction` (a callback over captured JSON arguments), `resource` (`resource.rs`: a callable object over four signals, its loads kept by `nsh_core::resource::Runs`); `View`, `Text`, `Scroll`, `Input` (host elements as components: `dom::host_component`); `YNode`, `Accessor`, `Signal`, `Context`, `Component`, the types of styles, element props, events and `JSX` | `reactive.rs`, `dom.rs`, `input_action.rs` |
 | `nsh:rt` | what compiled JSX calls (`element`, `insert`, `spread`, `cond`, `each`, `list`, `font`, ...); apps never import it | `dom.rs`, `list.rs` |
 | (globals) | `If`, `Each` (control flow; their tags compile to `cond` / `each`) | `dom.rs` |
 | `nsh/animated` | `createAnimatedValue`, `AnimatedValue`, `AnimatedNode`, `Animated`, `Easing`, `LayoutAnimation` | `animated.rs` |
@@ -86,6 +86,22 @@ client's authority, cancellation and external resource cleanup; disposing a JS o
 releases its local handles, while completion of an admitted operation belongs to the external service.
 Factory panics and conversion failures reject module evaluation. Conflicting host export names fail
 instead of selecting one registry's value.
+
+## Captured input actions
+
+`inputAction<A>(handler: (args: A) => unknown, args: A): () => void` captures explicit JSON-compatible
+arguments and returns a callable that passes only that snapshot to `handler`; incoming event arguments and
+the handler's return value are ignored. Use `null` or `[]` for an action with no arguments. Capture reads
+getters and Proxy traps, copies the normalized JSON and freezes every captured object and array. The native
+JSON bounds apply: 64 levels, 1,048,576 entries and 8 MiB of canonical UTF-8 JSON.
+
+When installed on a node, the same handler object and equal canonical arguments retain that binding's
+node-local binding. Keep the handler stable and read the action's target and arguments from the capture.
+Mutable ambient state may reject stale work, never choose a different action or retarget its arguments.
+The capture describes the action; it grants no service authority. Hosts validate the native presentation
+and the engine's binding before entering the handler, and revoke the presentation's remaining admitted
+inputs on the first application callback. Other input routes retain their exact-presentation path
+([terminal embedding](tui.md#public-embedding-api)).
 
 ## Where new things go
 

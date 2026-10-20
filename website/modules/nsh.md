@@ -142,6 +142,34 @@ function Clock() {
 }
 ```
 
+## inputAction
+
+```ts
+function inputAction<A>(handler: (args: A) => unknown, args: A): () => void;
+```
+
+Captures JSON-compatible `args` and returns a callback that calls `handler` with that snapshot as its only
+argument. Pass the second argument explicitly; use `null` or `[]` for an action with no arguments. Capture
+evaluates getters and Proxy traps, copies the JSON value and deeply freezes its objects and arrays. It accepts
+up to 64 levels, 1,048,576 entries and 8 MiB of canonical UTF-8 JSON. Incoming event arguments and the handler's
+return value are ignored.
+
+```tsx
+import { inputAction, signal, Text } from "nsh";
+
+const selected = signal("");
+
+function Row(props: { id: string }) {
+  const choose = ({ id }: { id: string }) => selected.set(id);
+  return <Text onPress={inputAction(choose, { id: props.id })}>{props.id}</Text>;
+}
+```
+
+Keep the handler stable: the same handler and equal captured JSON retain the mounted action's local binding.
+Choose the action and its target exclusively from captured arguments. Current mutable state may be consulted
+to reject stale work, never to select another target or change those arguments. This lets an embedding host
+validate an ordinary press against the action the user saw; see [Terminal embedding](../docs/tui.md#embedding-in-a-ratatui-app).
+
 ## context
 
 ```ts

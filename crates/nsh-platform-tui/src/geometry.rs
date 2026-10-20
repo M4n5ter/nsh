@@ -4,11 +4,12 @@
 use std::cell::RefCell;
 
 use nsh_core::{
-    Bounds, Matrix, NodeId, Point, Points, Size, TransformKind, ViewKind,
+    Bounds, CornerRadii, EdgeInsets, Matrix, NodeId, Point, PointerEvents, Points, Size,
+    TransformKind, ViewKind,
     geometry::{REM_SIZE, Radians, px},
 };
 
-use crate::surface::Surface;
+use crate::{scroll::ScrollbarGeometry, surface::Surface};
 
 #[derive(Default)]
 pub(crate) struct GeometryCache {
@@ -56,7 +57,7 @@ pub(crate) fn project(matrix: &Matrix, x: f32, y: f32) -> Option<(f32, f32)> {
 }
 
 /// Invert the projected z=0 plane, including perspective.
-fn unproject(matrix: &Matrix, x: f32, y: f32) -> Option<(f32, f32)> {
+pub(crate) fn unproject(matrix: &Matrix, x: f32, y: f32) -> Option<(f32, f32)> {
     let m = matrix.0;
     let (x, y) = (x as f64, y as f64);
     let (a, b, c, d) = (
@@ -77,7 +78,175 @@ fn unproject(matrix: &Matrix, x: f32, y: f32) -> Option<(f32, f32)> {
     (point.0.is_finite() && point.1.is_finite()).then_some(point)
 }
 
+/// One immutable scene sample shared by live and queued pointer hit testing.
+/// Only visible nodes are candidates; their ancestors are retained once for
+/// pointer gates and exact rounded clipping, without cloning a chain per hit.
+#[derive(Clone, Debug)]
+pub(crate) struct HitSnapshot {
+    order: Vec<NodeId>,
+    records: Vec<HitRecord>,
+    index_by_id: Vec<Option<usize>>,
+}
+
+#[derive(Clone, Debug)]
+struct HitRecord {
+    parent: Option<NodeId>,
+    geometry: Option<(Matrix, Size<Points>)>,
+    opacity: f32,
+    pointer_events: PointerEvents,
+    clips_children: bool,
+    radii: CornerRadii,
+    modal: bool,
+    hit_slop: EdgeInsets,
+    clip: Bounds<Points>,
+    scrollbar: Option<ScrollbarGeometry>,
+}
+
+impl HitSnapshot {
+    fn record(&self, id: NodeId) -> Option<&HitRecord> {
+        let index = self.index_by_id.get(id as usize).copied().flatten()?;
+        self.records.get(index)
+    }
+
+    /// Visible nodes in paint order, before pointer and clip filtering.
+    pub(crate) fn visible_ids(&self) -> &[NodeId] {
+        &self.order
+    }
+
+    /// The same reverse paint order, pointer gates and clip tests as live input.
+    pub(crate) fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
+        self.order.iter().rev().copied().find(|&id| {
+            let Some(node) = self.record(id) else {
+                return false;
+            };
+            if node.opacity <= 0.0
+                || node.pointer_events == PointerEvents::None
+                || node.pointer_events == PointerEvents::BoxNone
+            {
+                return false;
+            }
+            let mut parent = node.parent;
+            while let Some(id) = parent {
+                let Some(ancestor) = self.record(id) else {
+                    return false;
+                };
+                if matches!(
+                    ancestor.pointer_events,
+                    PointerEvents::None | PointerEvents::BoxOnly
+                ) {
+                    return false;
+                }
+                if ancestor.clips_children
+                    && !ancestor.geometry.is_some_and(|(matrix, size)| {
+                        unproject(&matrix, x, y).is_some_and(|(x, y)| {
+                            crate::composite::rounded_contains(size, ancestor.radii, x, y)
+                        })
+                    })
+                {
+                    return false;
+                }
+                if ancestor.modal {
+                    break;
+                }
+                parent = ancestor.parent;
+            }
+            let Some((matrix, size)) = node.geometry else {
+                return false;
+            };
+            let Some((local_x, local_y)) = unproject(&matrix, x, y) else {
+                return false;
+            };
+            let frame = Bounds::new(
+                Point::new(-node.hit_slop.left, -node.hit_slop.top),
+                Size::new(
+                    size.width + (node.hit_slop.left + node.hit_slop.right),
+                    size.height + (node.hit_slop.top + node.hit_slop.bottom),
+                ),
+            );
+            crate::surface::contains(frame, local_x, local_y)
+                && crate::surface::contains(node.clip, x, y)
+        })
+    }
+
+    /// The composed transform and local size at the instant this sample was made.
+    pub(crate) fn geometry(&self, id: NodeId) -> Option<(Matrix, Size<Points>)> {
+        self.record(id)?.geometry
+    }
+
+    /// The viewport and ancestor rectangle intersection used by hit testing.
+    /// Rounded ancestor masks are also checked by [`Self::hit_test`].
+    pub(crate) fn clip_rect(&self, id: NodeId) -> Option<Bounds<Points>> {
+        Some(self.record(id)?.clip)
+    }
+
+    /// Uses the same native scrollbar geometry that takes pointer capture live.
+    pub(crate) fn scrollbar_hit(&self, id: NodeId, x: f32, y: f32) -> bool {
+        self.record(id)
+            .and_then(|node| node.scrollbar.as_ref())
+            .is_some_and(|scrollbar| scrollbar.contains(x, y))
+    }
+
+    /// Includes the node itself and its ancestors, matching input's owner lookup.
+    pub(crate) fn ancestors(&self, id: NodeId) -> Vec<NodeId> {
+        let mut result = Vec::new();
+        let mut next = Some(id);
+        while let Some(id) = next {
+            if result.contains(&id) {
+                break;
+            }
+            result.push(id);
+            next = self.record(id).and_then(|node| node.parent);
+        }
+        result
+    }
+}
+
 impl Surface {
+    /// Captures only immutable geometry and input gates, never scene owners.
+    pub(crate) fn hit_snapshot(&self) -> HitSnapshot {
+        // A render pass already samples one instant. Outside rendering, reuse
+        // its bounded matrix cache only for the duration of this capture.
+        let cache_active = self.geometry.borrow().active;
+        let _pass = (!cache_active).then(|| GeometryCache::begin(&self.geometry));
+        let order = self.visible_ids();
+        let mut pending = order.clone();
+        let mut snapshot = HitSnapshot {
+            records: Vec::with_capacity(order.len()),
+            index_by_id: vec![None; self.nodes.len()],
+            order,
+        };
+        while let Some(id) = pending.pop() {
+            if snapshot.record(id).is_some() {
+                continue;
+            }
+            let Some(node) = self.node(id) else {
+                continue;
+            };
+            let style = self.animated_style(id);
+            let geometry = self
+                .presentation_frame(id)
+                .and_then(|frame| self.local_to_surface(id).map(|matrix| (matrix, frame.size)));
+            snapshot.index_by_id[id as usize] = Some(snapshot.records.len());
+            snapshot.records.push(HitRecord {
+                parent: node.parent,
+                geometry,
+                opacity: style.opacity,
+                pointer_events: node.props.pointer_events,
+                clips_children: matches!(node.kind, ViewKind::Scroll | ViewKind::Stack)
+                    || node.style.overflow_hidden,
+                radii: style.radii(),
+                modal: node.kind == ViewKind::Modal,
+                hit_slop: node.props.hit_slop,
+                clip: self.clip_rect(id),
+                scrollbar: self.scrollbar_geometry(id),
+            });
+            if let Some(parent) = node.parent {
+                pending.push(parent);
+            }
+        }
+        snapshot
+    }
+
     /// Maps an untransformed local point to surface points. No intermediate
     /// axis-aligned bounds enter the matrix composition.
     pub(crate) fn local_to_surface(&self, id: NodeId) -> Option<Matrix> {

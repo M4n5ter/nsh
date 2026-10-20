@@ -90,6 +90,19 @@ export declare function untracked<T>(fn: () => T): T;
 export declare function cleanup(fn: () => void): void;
 
 /**
+ * Captures `args` as deeply frozen JSON and returns a callback that calls `handler`
+ * with that snapshot as its only argument, ignoring incoming event arguments. Capture
+ * reads getters and Proxy traps, sorts object keys, and allows at most 64 levels,
+ * 1048576 entries and 8 MiB of canonical UTF-8 JSON. Missing, undefined, function,
+ * symbol or bigint root arguments throw. In objects, undefined, function and symbol
+ * fields are omitted; in arrays they become null. Non-finite numbers and other
+ * unsupported primitive values become null. The handler must be a function other than
+ * an input action. Ambient reads may only reject an action; they must never retarget
+ * it or change the meaning of its captured arguments.
+ */
+export declare function inputAction<A>(handler: (args: A) => unknown, args: A): () => void;
+
+/**
  * A value loaded asynchronously by `fetcher`, again whenever `source` (an accessor) gives a
  * new value that is set (not `undefined`, `null` or `false`) and on `refetch()`. Only the
  * latest load counts: the one it supersedes is aborted (`info.signal`), and so is the running

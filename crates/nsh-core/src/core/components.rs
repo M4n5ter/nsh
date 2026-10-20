@@ -4052,6 +4052,55 @@ impl<M: TextEngine> Core<M> {
         dispatch.entered
     }
 
+    /// The JS press owner reached through closed native forwarders only.
+    /// This read-only preflight never evaluates a listener or property getter.
+    /// Other native routes keep the ordinary presented-input contract.
+    pub fn bound_press_target(&self, id: NodeId, kind: EventKind) -> Option<NodeId> {
+        let _entered = self.components.runtime.enter();
+        if !matches!(
+            kind,
+            EventKind::Press | EventKind::PressDown | EventKind::PressUp
+        ) || self.components.slot_hosts.contains_key(&id)
+        {
+            return None;
+        }
+        let native = self.base_of(id);
+        let owner = if self.is_host(id) {
+            Some(native)
+        } else {
+            self.components.owners.get(&id).copied()
+        };
+        let Some(owner) = owner else {
+            return Some(id);
+        };
+        let mut target = None;
+        // Admit the entire activation before Down, including a later Up
+        // listener that would otherwise become an opaque application entry.
+        for phase in [EventKind::Press, EventKind::PressDown, EventKind::PressUp] {
+            let mut from = 0;
+            while let Some((at, listener)) = self.next_handler(owner, native, phase, from) {
+                from = at + 1;
+                if !listener.is_live() || listener.enters_application() {
+                    return None;
+                }
+                if let Some(host) = listener.forward_host() {
+                    // Parent event handlers can contain arbitrary Rust code.
+                    // The first press lease supports direct JS owners.
+                    if self.components.owners.contains_key(&host)
+                        || target.is_some_and(|target| target != host)
+                    {
+                        return None;
+                    }
+                    target = Some(host);
+                }
+            }
+            if phase == EventKind::Press && target.is_none() {
+                return None;
+            }
+        }
+        target
+    }
+
     fn drain_component_emits(&mut self, dispatch: &mut EventDispatch<'_>) {
         loop {
             let emits = self

@@ -24,6 +24,7 @@ pub struct Listener<E: ?Sized> {
     f: Rc<dyn Fn(&E)>,
     owner: super::Owner,
     application: bool,
+    forward_host: Option<NodeId>,
 }
 
 impl<E: ?Sized + 'static> Listener<E> {
@@ -39,6 +40,7 @@ impl<E: ?Sized + 'static> Listener<E> {
             f,
             owner: super::Owner::current_or_detached(),
             application: true,
+            forward_host: None,
         }
     }
 
@@ -54,12 +56,21 @@ impl<E: ?Sized + 'static> Listener<E> {
             );
         }));
         listener.application = false;
+        listener.forward_host = Some(host);
         listener
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.owner == super::Owner::detached() || self.owner.is_live()
+    }
+
+    pub(crate) fn forward_host(&self) -> Option<NodeId> {
+        self.forward_host
     }
 
     /// Whether calling this live listener enters arbitrary application code.
     pub(crate) fn enters_application(&self) -> bool {
-        self.application && (self.owner == super::Owner::detached() || self.owner.is_live())
+        self.application && self.is_live()
     }
 
     /// Calls it with `event`, under its owner; not once that owner is
@@ -80,6 +91,7 @@ impl<E: ?Sized + 'static> Listener<E> {
             f: Rc::new(move |event: &F| f(&*inner, event)),
             owner: self.owner,
             application: self.application,
+            forward_host: self.forward_host,
         }
     }
 }
@@ -89,6 +101,7 @@ impl<E: 'static> Listener<E> {
     pub fn map<F: ?Sized + 'static>(self, f: impl Fn(&F) -> E + 'static) -> Listener<F> {
         let mut listener = self.wrap(move |inner, event: &F| inner(&f(event)));
         listener.application = true;
+        listener.forward_host = None;
         listener
     }
 }
@@ -149,6 +162,7 @@ impl<E: ?Sized> Clone for Listener<E> {
             f: self.f.clone(),
             owner: self.owner,
             application: self.application,
+            forward_host: self.forward_host,
         }
     }
 }

@@ -2,7 +2,9 @@
 //! dragging. Offsets stay in virtual points; terminal cells only determine
 //! pointer hit areas and the minimum useful movement.
 
-use nsh_core::{EventKind, EventPayload, KeyboardDismissMode, NodeId, Point, Points, ViewKind};
+use nsh_core::{
+    EventKind, EventPayload, KeyboardDismissMode, Matrix, NodeId, Point, Points, Size, ViewKind,
+};
 
 use crate::surface::{Node, Surface, SurfaceEvent};
 
@@ -11,6 +13,51 @@ const REFRESH_PULL: f32 = 64.0;
 const REFRESH_SPACE: f32 = 48.0;
 const MIN_GLIDE: f32 = 0.05;
 const STOP: f32 = 0.01;
+
+/// Immutable scroll-bar geometry shared by live and queued pointer input.
+#[derive(Clone, Debug)]
+pub(crate) struct ScrollbarGeometry {
+    matrix: Matrix,
+    frame: Size<Points>,
+    content: Size<Points>,
+    zoom: f32,
+    horizontal: bool,
+    enabled: bool,
+    shows_indicator: bool,
+    cell: (f32, f32),
+}
+
+impl ScrollbarGeometry {
+    pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
+        let Some((x, y)) = crate::geometry::unproject(&self.matrix, x, y) else {
+            return false;
+        };
+        if !self.enabled || (!self.shows_indicator && !self.horizontal) {
+            return false;
+        }
+        let frame = self.frame;
+        let (cell_width, cell_height) = self.cell;
+        let horizontal = self.horizontal;
+        let content = if horizontal {
+            self.content.width.0
+        } else {
+            self.content.height.0
+        } * self.zoom;
+        let viewport = if horizontal {
+            frame.width.0
+        } else {
+            frame.height.0
+        };
+        if content <= viewport {
+            return false;
+        }
+        if horizontal {
+            x >= 0.0 && x < frame.width.0 && y >= frame.height.0 - cell_height && y < frame.height.0
+        } else {
+            y >= 0.0 && y < frame.height.0 && x >= frame.width.0 - cell_width && x < frame.width.0
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Target {
@@ -517,46 +564,26 @@ impl Surface {
         true
     }
 
+    pub(crate) fn scrollbar_geometry(&self, id: NodeId) -> Option<ScrollbarGeometry> {
+        let node = self.node(id)?;
+        if node.kind != ViewKind::Scroll {
+            return None;
+        }
+        Some(ScrollbarGeometry {
+            matrix: self.local_to_surface(id)?,
+            frame: node.frame.size,
+            content: node.scroll.content,
+            zoom: node.scroll.physics.zoom,
+            horizontal: node.scroll.horizontal,
+            enabled: node.scroll.enabled,
+            shows_indicator: node.scroll.shows_indicator,
+            cell: self.scroll_local_cell(id),
+        })
+    }
+
     pub(crate) fn scrollbar_hit(&self, id: NodeId, x: f32, y: f32) -> bool {
-        let Some((x, y)) = self.surface_to_local(id, x, y) else {
-            return false;
-        };
-        let Some(node) = self.node(id) else {
-            return false;
-        };
-        if node.kind != ViewKind::Scroll
-            || !node.scroll.enabled
-            || (!node.scroll.shows_indicator && !node.scroll.horizontal)
-        {
-            return false;
-        }
-        let frame = node.frame;
-        let (cell_width, cell_height) = self.scroll_local_cell(id);
-        let horizontal = node.scroll.horizontal;
-        let content = if horizontal {
-            node.scroll.content.width.0
-        } else {
-            node.scroll.content.height.0
-        } * node.scroll.physics.zoom;
-        let viewport = if horizontal {
-            frame.size.width.0
-        } else {
-            frame.size.height.0
-        };
-        if content <= viewport {
-            return false;
-        }
-        if horizontal {
-            x >= 0.0
-                && x < frame.size.width.0
-                && y >= frame.size.height.0 - cell_height
-                && y < frame.size.height.0
-        } else {
-            y >= 0.0
-                && y < frame.size.height.0
-                && x >= frame.size.width.0 - cell_width
-                && x < frame.size.width.0
-        }
+        self.scrollbar_geometry(id)
+            .is_some_and(|geometry| geometry.contains(x, y))
     }
 
     fn scroll_local_cell(&self, id: NodeId) -> (f32, f32) {

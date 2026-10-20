@@ -6,8 +6,8 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use nsh_core::{
     AttributedText, Bounds, Color, Command, Dialog, EventKind, EventMask, EventPayload,
     GestureValues, InputConfig, ModalConfig, MountBatch, MountItem, NodeId, PayloadValue, Point,
-    PointerEvents, Points, ROOT_ID, ScreenConfig, ScrollBehavior, Size, StickyCell, TextLayout,
-    Transform, ViewKind, ViewProps, ViewStyle,
+    Points, ROOT_ID, ScreenConfig, ScrollBehavior, Size, StickyCell, TextLayout, Transform,
+    ViewKind, ViewProps, ViewStyle,
     access::Access,
     animation::{AnimationProp, AnimationValue, Graph},
     geometry::{point, px},
@@ -77,7 +77,7 @@ impl Default for ScrollState {
 }
 
 pub(crate) struct Node {
-    generation: u64,
+    pub(crate) generation: u64,
     pub(crate) kind: ViewKind,
     pub(crate) parent: Option<NodeId>,
     pub(crate) children: Vec<NodeId>,
@@ -148,6 +148,8 @@ impl Node {
 /// paint it into the host's buffer, then forward [`Self::drain_events`] to
 /// the engine. [`crate::AppView`] combines these steps with an engine.
 pub struct Surface {
+    pub(crate) input_instance: Arc<()>,
+    pub(crate) presented_press: Option<crate::PressLease>,
     pub(crate) nodes: Vec<Option<Node>>,
     pub(crate) metrics: CellMetrics,
     pub(crate) columns: u16,
@@ -209,6 +211,8 @@ impl Surface {
     pub fn new(columns: u16, rows: u16, metrics: CellMetrics) -> Self {
         let fonts = crate::fonts::FontCatalog::default();
         let mut surface = Self {
+            input_instance: Arc::new(()),
+            presented_press: None,
             nodes: vec![None, Some(Node::new(ViewKind::View))],
             metrics,
             columns,
@@ -1368,62 +1372,7 @@ impl Surface {
     }
 
     pub(crate) fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
-        self.visible_ids().into_iter().rev().find(|&id| {
-            let Some(node) = self.node(id) else {
-                return false;
-            };
-            if self.animated_style(id).opacity <= 0.0
-                || node.props.pointer_events == PointerEvents::None
-                || node.props.pointer_events == PointerEvents::BoxNone
-            {
-                return false;
-            }
-            let mut parent = node.parent;
-            while let Some(id) = parent {
-                let Some(ancestor) = self.node(id) else {
-                    return false;
-                };
-                if matches!(
-                    ancestor.props.pointer_events,
-                    PointerEvents::None | PointerEvents::BoxOnly
-                ) {
-                    return false;
-                }
-                if (matches!(ancestor.kind, ViewKind::Scroll | ViewKind::Stack)
-                    || ancestor.style.overflow_hidden)
-                    && !self.surface_to_local(id, x, y).is_some_and(|(x, y)| {
-                        self.presentation_frame(id).is_some_and(|frame| {
-                            crate::composite::rounded_contains(
-                                Size {
-                                    width: frame.size.width,
-                                    height: frame.size.height,
-                                },
-                                self.animated_style(id).radii(),
-                                x,
-                                y,
-                            )
-                        })
-                    })
-                {
-                    return false;
-                }
-                if ancestor.kind == ViewKind::Modal {
-                    break;
-                }
-                parent = ancestor.parent;
-            }
-            let Some(mut frame) = self.presentation_frame(id) else {
-                return false;
-            };
-            let Some((local_x, local_y)) = self.surface_to_local(id, x, y) else {
-                return false;
-            };
-            frame.origin.x = -node.props.hit_slop.left;
-            frame.origin.y = -node.props.hit_slop.top;
-            frame.size.width += node.props.hit_slop.left + node.props.hit_slop.right;
-            frame.size.height += node.props.hit_slop.top + node.props.hit_slop.bottom;
-            contains(frame, local_x, local_y) && contains(self.clip_rect(id), x, y)
-        })
+        self.hit_snapshot().hit_test(x, y)
     }
 
     fn dirty_canvas(&mut self, id: NodeId) {

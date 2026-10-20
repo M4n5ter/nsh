@@ -32,6 +32,7 @@ pub(crate) struct State {
     pub(crate) web: crate::web::Web,
     pub(crate) classes: crate::classes::Classes,
     pub(crate) hot: crate::hot::Hot,
+    pub(crate) actions: crate::input_action::Actions,
     pub(crate) keymap: crate::keymap::Keymap,
     pub(crate) chunks: crate::chunks::Chunks,
     /// The native modules the context serves (the loader reads it).
@@ -87,6 +88,7 @@ pub(crate) fn install(
             web: Default::default(),
             classes: crate::classes::Classes::new(posts),
             hot: Default::default(),
+            actions: crate::input_action::Actions::new(raw),
             keymap: Default::default(),
             chunks: Default::default(),
             modules: ModuleTable::new(ui_sets),

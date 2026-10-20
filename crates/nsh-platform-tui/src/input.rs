@@ -411,7 +411,7 @@ impl Surface {
             || self.pressable(id)
     }
 
-    fn pressable(&self, id: NodeId) -> bool {
+    pub(crate) fn pressable(&self, id: NodeId) -> bool {
         self.node(id).is_some_and(|n| {
             !n.props.accessibility.state.disabled
                 && [
@@ -1848,7 +1848,35 @@ impl Surface {
         }
     }
 
+    pub(crate) fn sealed_pointer_owner(&self) -> Option<NodeId> {
+        let pointer = self.pointer.as_ref()?;
+        if pointer.native.is_some()
+            || pointer.scroll.is_some()
+            || pointer.pan.is_some()
+            || pointer.link.is_some()
+            || pointer.navigation
+            || self.drag_input.is_some()
+        {
+            return None;
+        }
+        pointer.pressable
+    }
+
+    pub(crate) fn clear_sealed_pointer(&mut self) {
+        self.pointer = None;
+        self.presented_press = None;
+        self.drag_input = None;
+        self.set_pressed(None);
+    }
+
     fn cancel_pointer(&mut self) {
+        if self.presented_press.is_some() {
+            // An id may now denote another sealed action. Clear capture
+            // without dispatching an old PressUp, TouchCancel or PanEnd into
+            // that replacement binding.
+            self.clear_sealed_pointer();
+            return;
+        }
         if let Some(pointer) = self.pointer.as_ref().filter(|pointer| {
             pointer.scroll.is_none() && pointer.native.is_none() && !pointer.navigation_claimed
         }) {
@@ -1880,6 +1908,9 @@ impl Surface {
     }
 
     pub(crate) fn input_pending(&self) -> bool {
+        if self.presented_press.is_some() {
+            return false;
+        }
         self.pointer.as_ref().is_some_and(|pointer| {
             !pointer.moved
                 && !pointer.long_fired
@@ -1891,6 +1922,11 @@ impl Surface {
     }
 
     pub(crate) fn input_tick(&mut self) -> bool {
+        if self.presented_press.is_some() {
+            // A sealed ordinary press never owns a LongPress callback,
+            // including one subsequently installed on a recycled node id.
+            return false;
+        }
         let Some(pointer) = self.pointer.as_ref() else {
             return false;
         };

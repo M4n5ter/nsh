@@ -158,6 +158,14 @@ const NSH: &[Item] = &[
         ),
     ),
     (
+        "inputAction",
+        Export::Function(crate::input_action::input_action, 2),
+        Ts::function(
+            "Captures `args` as deeply frozen JSON and returns a callback that calls `handler`\nwith that snapshot as its only argument, ignoring incoming event arguments. Capture\nreads getters and Proxy traps, sorts object keys, and allows at most 64 levels,\n1048576 entries and 8 MiB of canonical UTF-8 JSON. Missing, undefined, function,\nsymbol or bigint root arguments throw. In objects, undefined, function and symbol\nfields are omitted; in arrays they become null. Non-finite numbers and other\nunsupported primitive values become null. The handler must be a function other than\nan input action. Ambient reads may only reject an action; they must never retarget\nit or change the meaning of its captured arguments.",
+            &["<A>(handler: (args: A) => unknown, args: A): () => void"],
+        ),
+    ),
+    (
         "resource",
         Export::Function(crate::resource::resource, 3),
         Ts::function(

@@ -178,6 +178,14 @@ view.render(area, frame.buffer_mut());
 使用 `view.handle_event(event)` 转发键盘和粘贴事件。转发鼠标事件前，将坐标转换为相对界面区域的位置；仅向
 应接收事件的界面转发事件。释放界面或调用 `stop()` 会结束其引擎。
 
+直接驱动 `Surface` 和 `LocalEngine` 的宿主可以通过 [`inputAction`](../modules/nsh.md#inputaction)
+保留普通左键点击对应的操作。随渲染帧取得 `Surface::input_snapshot()`，仅在对应终端字节成功刷新后发布这份
+`InputSnapshot`。左键按下时，通过 `snapshot.press_at(column, row)` 取得 `PressLease`，并在按下、拖动和松开
+整个过程中将同一份租约传给 `Surface::handle_presented_mouse`。进入回调前，还必须将租约的 `binding()` 交给
+`LocalEngine::dispatch_bound_event_now` 验证；`target()` 标识原生激活目标。首次进入应用回调时，撤销该呈现中
+剩余的已接纳输入。过期租约会拒绝这次点击。没有普通点击租约的事件，包括键盘、滚轮、选择和手势输入，继续
+使用宿主原有的精确呈现输入路径。
+
 `AppOptions::asset_base` 从资源目录或 HTTP 基地址解析 `asset:/` URI。`AppOptions::limits` 配置虚拟机限制；
 嵌入默认使用 `Limits::default()`，独立宿主使用 `Limits::standalone()`。`nsh run --target tui --limits` 让 TSX 入口
 使用嵌入默认限制，也可以传入各项限制的名称和值。`AppOptions::metrics` 接受验证过的

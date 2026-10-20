@@ -852,6 +852,20 @@ unsafe extern "C" fn props_run(
             qjs::JS_SetPropertyUint32(ctx, prev, i as u32, value);
         }
     }
+    if spec.events.iter().any(|event| event.name == "press") {
+        let value = Owned(ctx, get(ctx, props, "onPress"));
+        // SAFETY: an inline tag check of the property just read.
+        let threw = unsafe { qjs::JS_IsException(value.1) };
+        if let Some(id) = dom::node_id(ctx, node) {
+            let captured = if threw { UNDEFINED } else { value.1 };
+            if dom::set_component_input_action(ctx, id, captured).is_err() && failed(&mut first) {
+                return qjs::JS_EXCEPTION;
+            }
+        }
+        if threw && failed(&mut first) {
+            return qjs::JS_EXCEPTION;
+        }
+    }
     match first {
         Some(e) => {
             let _ = crate::web::js::throw(ctx, e);

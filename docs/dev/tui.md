@@ -358,6 +358,10 @@ runners remain console applications.
 | `Surface::input_context() -> Option<InputContext>` | Snapshot editing hints and generation; secure text is omitted |
 | `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
 | `Surface::handle_event(Event)`; `drain_events()` | Accept input and forward ordered `SurfaceEvent`s |
+| `Surface::input_snapshot() -> InputSnapshot` | Sample immutable native hit geometry and sealed ordinary press bindings |
+| `InputSnapshot::press_at(u16, u16) -> Option<PressLease>` | Resolve a cell in the published presentation to an ordinary left press |
+| `Surface::handle_presented_mouse(MouseEvent, &PressLease) -> Option<bool>` | Validate and deliver Down, Drag or Up using the same original lease |
+| `PressLease::target() -> NodeId`; `binding() -> u64` | Identify the native activation owner and VM-local binding for engine validation |
 | `Surface::handle_wheel(MouseEvent, u16) -> u16` | Apply identical frame-local wheel detents to one hit-tested owner and report consumed detents |
 | `Surface::set_host_services_enabled(bool)` | Route service requests to the embedding host without terminal IO |
 | `Surface::complete_clipboard(u32, bool, Result<ClipboardContent, String>)` | Complete a host clipboard read with capability and size checks |
@@ -381,8 +385,8 @@ cells relative to the assigned region; drawing uses the region's absolute
 Ratatui rectangle. Native components receive destination cell rectangles
 and must respect both their clip and the buffer bounds.
 
-Hosts driving a `Surface` with `nsh_engine::LocalEngine` can admit one UI
-turn per completed output frame. They deliver presented input through
+Hosts driving a `Surface` with `nsh_engine::LocalEngine` retain an
+exact-presentation path for input. They deliver presented input through
 `LocalEngine::dispatch_event_now(NodeId, EventKind, EventPayload)` before
 `pump()`, then apply every produced mount batch in order. The host keeps
 both the VM and surface at that presentation until its terminal output
@@ -390,7 +394,24 @@ completes; freezing the surface alone would leave recycled list callbacks
 pointing at newer items. During otherwise idle probes,
 `LocalEngine::needs_pump() -> bool` reads queued messages and due deadlines
 without running app code; native input and synchronous dispatch still
-require a pump. `Surface::handle_wheel` accepts consecutive wheel detents
+require a pump.
+
+Ordinary left presses using [`inputAction`](js-modules.md#captured-input-actions)
+can instead use a presentation lease. Sample `Surface::input_snapshot()`
+with the rendered frame and publish that snapshot only after its terminal
+bytes have flushed successfully. Resolve Down with `InputSnapshot::press_at`
+and keep the resulting `PressLease` unchanged for Down, Drag and Up.
+`Surface::handle_presented_mouse` validates the native route; before any
+resulting callback enters JS, the host must also use
+`LocalEngine::dispatch_bound_event_now(NodeId, EventKind, EventPayload, u64)`
+with the lease's binding. Revoke the presentation's remaining admitted
+inputs on the first application callback. A stale native or engine lease
+is rejected rather than retargeted. An absent lease uses the existing
+exact-presentation path, as do keyboard, wheel, selection, gestures and
+opaque callbacks. The snapshot owns geometry and binding data, not an
+engine or mutable scene.
+
+`Surface::handle_wheel` accepts consecutive wheel detents
 with identical coordinates, direction and modifiers from one presented
 frame. It hit-tests once and applies the accumulated scroll delta once;
 a host component receives at most one detent before the host dispatches

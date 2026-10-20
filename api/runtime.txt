@@ -58,6 +58,7 @@ cleanup function
 computed function
 context function
 effect function
+inputAction function
 mount function
 resource function
 signal function
