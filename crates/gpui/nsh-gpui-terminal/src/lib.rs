@@ -11,9 +11,11 @@
 #![cfg(target_os = "linux")]
 
 mod dispatcher;
+pub mod inline;
 pub mod kitty;
 mod platform;
 mod window;
+mod wire;
 
 use std::{
     hash::{Hash, Hasher},
@@ -24,6 +26,9 @@ pub use platform::TerminalPlatform;
 
 /// The maximum tightly packed RGBA allocation for one offscreen scene.
 pub const MAX_PIXEL_BYTES: usize = 64 * 1024 * 1024;
+
+/// The maximum complete per-frame wire transaction, including ANSI controls.
+pub const MAX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 
 /// An authentic draw's identity in one terminal viewport generation.
 ///

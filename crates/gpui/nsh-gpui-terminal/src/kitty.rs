@@ -7,19 +7,11 @@
 //! A missing or failed acknowledgement terminates this graphics session: do
 //! not reuse its slots and misattribute a late reply to a later frame.
 
-use std::io::{self, Write};
-
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use image::{
-    ExtendedColorType, ImageEncoder,
-    codecs::png::{CompressionType, FilterType, PngEncoder},
-};
 
-use crate::{CandidateFrame, FrameToken, MAX_PIXEL_BYTES};
-
-/// The maximum complete per-frame wire transaction, including ANSI controls.
-pub const MAX_WIRE_BYTES: usize = 8 * 1024 * 1024;
+pub use crate::MAX_WIRE_BYTES;
+use crate::{CandidateFrame, FrameToken, wire};
 const CHUNK_BYTES: usize = 4096;
 
 /// One fully admitted frame; upload and retirement must stay in this order.
@@ -53,25 +45,9 @@ impl KittyFrame {
             columns > 0 && rows > 0,
             "terminal cell dimensions must be nonzero"
         );
-        let width = u32::try_from(frame.size.width.0)?;
-        let height = u32::try_from(frame.size.height.0)?;
-        ensure!(
-            width > 0 && height > 0 && frame.token.sequence != 0,
-            "inert terminal frame"
-        );
-        let bytes = usize::try_from(width)?
-            .checked_mul(usize::try_from(height)?)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| anyhow::anyhow!("terminal pixel size overflow"))?;
-        ensure!(
-            bytes <= MAX_PIXEL_BYTES && frame.pixels.len() == bytes,
-            "invalid terminal RGBA frame size"
-        );
-        let mut png = PngBytes(Vec::new());
-        PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive)
-            .write_image(&frame.pixels, width, height, ExtendedColorType::Rgba8)?;
+        let (width, height) = wire::dimensions(frame)?;
+        let png = wire::png(frame, width, height)?;
         let encoded_bytes = png
-            .0
             .len()
             .checked_add(2)
             .and_then(|n| (n / 3).checked_mul(4))
@@ -99,7 +75,7 @@ impl KittyFrame {
             wire_bytes <= MAX_WIRE_BYTES,
             "terminal image exceeds its complete 8 MiB wire budget"
         );
-        let payload = STANDARD.encode(&png.0);
+        let payload = STANDARD.encode(&png);
         let mut upload = Vec::with_capacity(wire_bytes - retire.len());
         for (index, chunk) in payload.as_bytes().chunks(CHUNK_BYTES).enumerate() {
             if index == 0 {
@@ -163,23 +139,6 @@ pub fn cleanup(first: u32, second: u32) -> Result<Vec<u8>> {
         "invalid Kitty image slots"
     );
     Ok(format!("\x1b_Ga=d,d=I,i={first},q=2\x1b\\\x1b_Ga=d,d=I,i={second},q=2\x1b\\").into_bytes())
-}
-
-// Bound the compressor itself; a rejected image must not allocate arbitrary
-// memory before complete-wire admission, or emit a partial upload to stdout.
-struct PngBytes(Vec<u8>);
-
-impl Write for PngBytes {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > MAX_WIRE_BYTES.saturating_sub(self.0.len()) {
-            return Err(io::Error::other("terminal PNG exceeds its pending budget"));
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
