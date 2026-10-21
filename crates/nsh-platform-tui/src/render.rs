@@ -1237,6 +1237,8 @@ impl Surface {
         area: CellRect,
         buffer: &mut Buffer,
     ) {
+        let background = background_cells(frame, self.metrics, area)
+            .intersection(background_cells(clip, self.metrics, area));
         let rect = cells(frame, self.metrics, area);
         let clip = cells(clip, self.metrics, area).intersection(area);
         if rect.is_empty() || clip.is_empty() {
@@ -1291,8 +1293,8 @@ impl Surface {
             .filter(|g| g.stops.len() >= 2)
             .map(|g| (g, g.resolved_stops(frame.size)))
             .collect();
-        for y in rect.intersection(clip).y..rect.intersection(clip).bottom() {
-            for x in rect.intersection(clip).x..rect.intersection(clip).right() {
+        for y in background.y..background.bottom() {
+            for x in background.x..background.right() {
                 let mut color = filtered(style.background_color);
                 for (gradient, stops) in gradients.iter().rev() {
                     let px = (f32::from(x - area.x) + 0.5) * self.metrics.width() - frame.origin.x;
@@ -1575,6 +1577,32 @@ fn cells(rect: Bounds<Points>, metrics: CellMetrics, area: CellRect) -> CellRect
         .ceil()
         .max(0.0)
         .min(f32::from(area.height));
+    CellRect::new(
+        area.x + x as u16,
+        area.y + y as u16,
+        (right - x).max(0.0) as u16,
+        (bottom - y).max(0.0) as u16,
+    )
+}
+
+// Whole-cell backgrounds use the same center ownership as text and input.
+// Images and borders keep their conservative partial-cell coverage in `cells`.
+fn background_cells(rect: Bounds<Points>, metrics: CellMetrics, area: CellRect) -> CellRect {
+    if !finite_rect(rect) {
+        return CellRect::default();
+    }
+    let x = metrics
+        .column_at(rect.origin.x)
+        .clamp(0.0, f32::from(area.width));
+    let y = metrics
+        .row_at(rect.origin.y)
+        .clamp(0.0, f32::from(area.height));
+    let right = metrics
+        .column_at(rect.origin.x + rect.size.width)
+        .clamp(0.0, f32::from(area.width));
+    let bottom = metrics
+        .row_at(rect.origin.y + rect.size.height)
+        .clamp(0.0, f32::from(area.height));
     CellRect::new(
         area.x + x as u16,
         area.y + y as u16,
@@ -3272,6 +3300,136 @@ mod tests {
                     .all(|cell| !cell.symbol().contains('\u{10eeee}')
                         && !cell.symbol().contains('\u{1b}')),
                 "a later modal must still disable protocol placements"
+            );
+        }
+    }
+
+    #[test]
+    fn fractional_two_line_rows_keep_titles_in_recycled_paint_order() {
+        // A recycled cell's tree order may differ from its current visual order.
+        // Both orders must paint the same two non-overlapping 32pt rows.
+        for reversed in [false, true] {
+            let mut surface = Surface::new(16, 5, CellMetrics::default());
+            let engine = crate::TerminalTextEngine::default();
+            let rows = if reversed {
+                [
+                    (8, 40.0, "TITLE_B", "PATH_B"),
+                    (2, 8.0, "TITLE_A", "PATH_A"),
+                ]
+            } else {
+                [
+                    (2, 8.0, "TITLE_A", "PATH_A"),
+                    (8, 40.0, "TITLE_B", "PATH_B"),
+                ]
+            };
+            let mut items = Vec::new();
+            for (id, y, title, path) in rows {
+                items.extend(mount_node(
+                    id,
+                    ViewKind::View,
+                    ROOT_ID,
+                    Bounds::new(Point::new(px(0.0), px(y)), Size::new(px(128.0), px(32.0))),
+                ));
+                items.push(MountItem::ViewStyle {
+                    id,
+                    style: Box::new(ViewStyle {
+                        background_color: Color(0x2020_20ff),
+                        ..ViewStyle::default()
+                    }),
+                });
+                for (child, text_y, value) in [(id + 1, 0.0, title), (id + 2, 16.0, path)] {
+                    items.extend(mount_node(
+                        child,
+                        ViewKind::Text,
+                        id,
+                        Bounds::new(
+                            Point::new(px(0.0), px(text_y)),
+                            Size::new(px(128.0), px(16.0)),
+                        ),
+                    ));
+                    let mut text = nsh_core::AttributedText::default();
+                    text.push(
+                        value,
+                        ResolvedTextStyle {
+                            color: Color(0xffff_ffff),
+                            ..ResolvedTextStyle::default()
+                        },
+                    );
+                    items.push(MountItem::Text {
+                        id: child,
+                        layout: engine
+                            .layout(&engine.prepare(&text), Size::new(px(128.0), px(16.0))),
+                        text: Arc::new(text),
+                        content: Bounds::new(
+                            Point::new(px(0.0), px(0.0)),
+                            Size::new(px(128.0), px(16.0)),
+                        ),
+                    });
+                }
+            }
+            surface.apply(MountBatch { items });
+            surface.focus = None;
+            let order: Vec<_> = surface
+                .paint_ids()
+                .into_iter()
+                .filter(|id| [2, 8].contains(id))
+                .collect();
+            assert_eq!(order, if reversed { vec![8, 2] } else { vec![2, 8] });
+            let area = CellRect::new(0, 0, 16, 5);
+            let mut buffer = Buffer::empty(area);
+            surface.render_plain(area, &mut buffer);
+            let lines: Vec<_> = (0..5)
+                .map(|y| {
+                    (0..16)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect();
+            assert_eq!(
+                lines,
+                ["TITLE_A", "PATH_A", "TITLE_B", "PATH_B", ""],
+                "reversed={reversed}; screen=\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn fractional_background_edges_and_clip_preserve_neighbor_text() {
+        let surface = Surface::new(5, 1, CellMetrics::default());
+        let area = CellRect::new(0, 0, 5, 1);
+        let style = ViewStyle {
+            background_color: Color(0x2020_20ff),
+            ..ViewStyle::default()
+        };
+        // Cell centers are x=4,12,20,28,36. A start center belongs to
+        // the background; an end center belongs to its neighboring text.
+        for (frame_x, frame_width, clip_x, clip_width, expected) in [
+            (4.0, 16.0, 0.0, 40.0, "  CDE"),
+            (0.0, 40.0, 12.0, 8.0, "A CDE"),
+        ] {
+            let mut buffer = Buffer::empty(area);
+            buffer.set_string(0, 0, "ABCDE", Style::default());
+            surface.paint_decor(
+                Bounds::new(
+                    Point::new(px(frame_x), px(0.0)),
+                    Size::new(px(frame_width), px(16.0)),
+                ),
+                Bounds::new(
+                    Point::new(px(clip_x), px(0.0)),
+                    Size::new(px(clip_width), px(16.0)),
+                ),
+                &style,
+                1.0,
+                area,
+                &mut buffer,
+            );
+            let actual: String = (0..5).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert_eq!(
+                actual, expected,
+                "frame=({frame_x},{frame_width}) clip=({clip_x},{clip_width})"
             );
         }
     }
