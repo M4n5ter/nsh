@@ -300,11 +300,10 @@ fn opaque_native(state: &ViewState) -> bool {
                 let editor: Rc<dyn crate::view::Hosted> = input.clone();
                 !Rc::ptr_eq(&native.item, &editor)
             })
-    })
-        || matches!(
-            state.kind,
-            ViewKind::Native | ViewKind::WebView | ViewKind::Video
-        )
+    }) || matches!(
+        state.kind,
+        ViewKind::Native | ViewKind::WebView | ViewKind::Video
+    )
 }
 
 fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
