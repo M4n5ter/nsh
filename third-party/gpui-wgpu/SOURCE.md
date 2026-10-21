@@ -4,7 +4,9 @@ This directory receives one published package, `gpui-fast-wgpu` 0.1.10, from
 [the official crates.io archive](https://static.crates.io/crates/gpui-fast-wgpu/gpui-fast-wgpu-0.1.10.crate).
 The archive SHA-256 is
 `cac7d34083b2611b49b2f415a16aa9e33620b127a25e981f835db8fe72f07423`.
-Its package-local lockfile is omitted: the consuming workspace owns resolution.
+The archive's package-local lockfile is omitted. The consuming GPUI workspace
+owns production resolution; standalone renderer tests resolve this package
+directly, without application-specific dependency patches.
 Original license, README and both published manifests are retained.
 
 `upstream.json` records the 26 original package files and their unmodified
@@ -37,6 +39,29 @@ is unchanged, and diagnostics distinguish a software-emulated device.
 The archive omitted upstream's WGSL-validation test dev dependency; the local
 manifest restores Naga at the backend's exact 30.0.1 version with `wgsl-in`.
 Production uses `offscreen` without `test-support`; unit tests use
-`offscreen,test-support`. Five real headless GPU regressions preserve the reviewed offscreen
-implementation's color, odd-stride, RGBA/BGRA, invalid-destination recovery,
-target reuse and resize assertions. Their execution belongs to the receiving host.
+`offscreen,test-support`. Five real headless GPU regressions check color, odd-stride, RGBA/BGRA,
+invalid-destination recovery, target reuse and resize assertions.
+
+## Standalone verification
+
+From the repository root, enter the GPUI workspace to share its normal target
+and cache. These commands require only official GPUI core and this single
+renderer source package:
+
+```sh
+cd crates/gpui
+cargo check -p nsh-gpui-terminal --lib
+cargo test --manifest-path ../../third-party/gpui-wgpu/Cargo.toml \
+  --features offscreen,test-support --lib headless_ \
+  -- --test-threads=1 --nocapture
+```
+
+The existing GPUI Linux CI job runs the same five renderer tests explicitly:
+workspace tests do not execute dependency unit tests. It installs
+`mesa-vulkan-drivers` alongside `libvulkan1` from Ubuntu's repositories to
+provide a CPU Vulkan device without a physical GPU or display server. A
+renderer initialization error or failed pixel assertion fails the job. This
+checks actual rendering and readback correctness; software rendering does
+not establish hardware throughput or a frame-rate guarantee. With all
+package metadata and dependencies cached, the commands also accept
+`--offline`.
