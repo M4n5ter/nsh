@@ -2499,12 +2499,14 @@ mod image_ownership_tests {
                     id: 2,
                     source: Some(ImageSource {
                         uri: Arc::from("asset:/main"),
+                        scales: nsh_core::ImageScales::NONE,
                         size: None,
                     }),
                     resize_mode: ResizeMode::Contain,
                     options: nsh_core::ImageOptions {
                         placeholder: Some(ImageSource {
                             uri: Arc::from("asset:/placeholder"),
+                            scales: nsh_core::ImageScales::NONE,
                             size: None,
                         }),
                         fade_ms: Some(500.0),
@@ -2598,6 +2600,7 @@ mod image_ownership_tests {
                     id: 2,
                     source: Some(ImageSource {
                         uri: Arc::from("asset:/old"),
+                        scales: nsh_core::ImageScales::NONE,
                         size: None,
                     }),
                     resize_mode: ResizeMode::Contain,
@@ -2607,6 +2610,7 @@ mod image_ownership_tests {
                     id: 2,
                     source: Some(ImageSource {
                         uri: Arc::from("asset:/new"),
+                        scales: nsh_core::ImageScales::NONE,
                         size: None,
                     }),
                     resize_mode: ResizeMode::Contain,
