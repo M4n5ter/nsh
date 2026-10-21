@@ -121,7 +121,8 @@ inserts a newline into a multiline input.
 
 The interactive standalone host connects copying and pasting to the operating system clipboard through its
 clipboard helpers, with OSC 52 as a copy fallback. Embedded views and scripts start with a surface-local clipboard;
-an embedding host can connect its own clipboard through `HostServices`.
+an embedding host can connect its own clipboard through `HostServices`. NSH transfers the complete text;
+the operating system helper or terminal handles clipboard acceptance.
 
 The app's [`nsh/keymap`](../modules/nsh-keymap.md) bindings run before default handling. Terminal emulators decide
 which keys and modifiers reach an app; choose shortcuts that your supported terminal forwards.

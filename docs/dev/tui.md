@@ -155,6 +155,9 @@ Interactive standalone apps use supervised OS clipboard helpers, with
 OSC 52 as a write fallback. Embedded views and scripts use a local
 clipboard unless the host supplies `HostServices`. Clipboard reads check
 the current focus, selection and edit count before applying a late paste.
+Clipboard text is transferred in full through local storage, host callbacks
+and OSC 52 output; the selected operating system helper or terminal controls
+whether it accepts the transfer.
 Bracketed paste is one edit, and physical keys and paste preserve literal
 text. `input_context` exposes editing/autofill/correction hints to a host
 keyboard, omitting secure text; `apply_input_edit` validates its node,
@@ -410,7 +413,7 @@ runners remain console applications.
 | `PressLease::target() -> NodeId`; `binding() -> u64` | Identify the native activation owner and VM-local binding for engine validation |
 | `Surface::handle_wheel(MouseEvent, u16) -> u16` | Apply identical frame-local wheel detents to one hit-tested owner and report consumed detents |
 | `Surface::set_host_services_enabled(bool)` | Route service requests to the embedding host without terminal IO |
-| `Surface::complete_clipboard(u32, bool, Result<ClipboardContent, String>)` | Complete a host clipboard read with capability and size checks |
+| `Surface::complete_clipboard(u32, bool, Result<ClipboardContent, String>)` | Complete a host clipboard read with the current capability check |
 | `Surface::complete_paste(InputEdit, Result<ClipboardContent, String>)` | Complete a paste while its focused input, selection and edit count still match |
 | `SurfaceEvent::{Event, Scroll, States, AnimationsFinished, ComponentSize, Service, Zoom, RootSize, ScreenHeader}` | Ordered engine and host-service messages produced by a surface |
 | `InputContext`; `InputEdit` | UTF-16 selections, edit generation, keyboard/autofill hints and checked replacements |
@@ -418,7 +421,7 @@ runners remain console applications.
 | `ServiceCancellation::is_cancelled() -> bool`; `SystemServices` | Cancellation token and the standalone OS-service implementation |
 | `ClipboardContent::{Text(String), HasText(bool)}` | Clipboard read and format-query responses |
 | `ServiceRequest`; `ServiceOutput::{Title, Clipboard, Announcement}` | Explicit service requests and output payloads |
-| `ServiceOutput::terminal_sequence(bool) -> String` | Encode a title or bounded OSC 52 clipboard output, optionally through tmux |
+| `ServiceOutput::terminal_sequence(bool) -> String` | Encode a title or complete OSC 52 clipboard output, optionally through tmux |
 | `AccessibleNode` | Mounted role, label, hint, state, value, focus, actions and frame |
 | `AssetBase::{Directory(PathBuf), Http(String)}` | Resolve imported assets |
 | `Components::register(name, factory)`; `NativeComponent` | Per-view factories and mounted host leaves |

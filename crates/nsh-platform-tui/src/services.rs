@@ -31,7 +31,6 @@ use ratatui::{
 
 use crate::{InputEdit, Surface, SurfaceEvent};
 
-const MAX_CLIPBOARD: usize = 1 << 20;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A host operation requested by a terminal surface after capability checks.
@@ -137,11 +136,11 @@ pub enum ServiceOutput {
 
 impl ServiceOutput {
     /// Encodes a title or clipboard write, with tmux passthrough when requested.
-    /// Clipboard text is base64 data; oversized payloads produce no OSC output.
+    /// Clipboard text is encoded in full as base64 data.
     pub fn terminal_sequence(&self, tmux: bool) -> String {
         let sequence = match self {
             Self::Title(title) => format!("\x1b]2;{}\x1b\\", plain(title, false)),
-            Self::Clipboard(text) if text.len() <= 64 << 10 => format!(
+            Self::Clipboard(text) => format!(
                 "\x1b]52;c;{}\x1b\\",
                 base64::engine::general_purpose::STANDARD.encode(text)
             ),
@@ -346,9 +345,6 @@ impl SystemClipboard {
         Err(last)
     }
     fn write(&mut self, text: &str, cancel: &ServiceCancellation) -> Result<(), String> {
-        if text.len() > MAX_CLIPBOARD {
-            return Err("clipboard text exceeds 1 MiB".into());
-        }
         let mut last = "system clipboard helper is unavailable".to_owned();
         for (program, args) in clipboard_commands(true, false) {
             let retain = cfg!(target_os = "linux");
@@ -502,21 +498,14 @@ fn run_helper(
             .spawn()
             .map_err(|_| format!("cannot start clipboard helper {program}"))?,
     );
-    let stdout = child.0.stdout.take().expect("piped helper output");
+    let mut stdout = child.0.stdout.take().expect("piped helper output");
     let (read_tx, read_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let result = stdout
-            .take((MAX_CLIPBOARD + 1) as u64)
             .read_to_end(&mut bytes)
+            .map(|_| bytes)
             .map_err(|_| "cannot read clipboard helper output".to_owned());
-        let result = result.and_then(|_| {
-            if bytes.len() <= MAX_CLIPBOARD {
-                Ok(bytes)
-            } else {
-                Err("clipboard text exceeds 1 MiB".into())
-            }
-        });
         let _ = read_tx.send(result);
     });
     let mut written = input.is_none();
@@ -642,7 +631,7 @@ impl Surface {
     }
 
     pub(crate) fn write_clipboard(&mut self, text: String) {
-        if !self.access.allows_clipboard() || text.len() > MAX_CLIPBOARD {
+        if !self.access.allows_clipboard() {
             return;
         }
         self.clipboard = text.clone();
@@ -696,7 +685,7 @@ impl Surface {
             self.complete_paste(edit, Ok(ClipboardContent::Text(self.clipboard.clone())));
         }
     }
-    /// Completes a host clipboard read. Denied, failed or oversized results
+    /// Completes a host clipboard read. Denied or failed results
     /// become empty content through the existing clipboard event protocol.
     pub fn complete_clipboard(
         &mut self,
@@ -706,7 +695,7 @@ impl Surface {
     ) {
         let allowed = self.access.allows_clipboard();
         let (text, has) = match result {
-            Ok(ClipboardContent::Text(text)) if allowed && text.len() <= MAX_CLIPBOARD => {
+            Ok(ClipboardContent::Text(text)) if allowed => {
                 let has = !text.is_empty();
                 (text, has)
             }
@@ -723,7 +712,7 @@ impl Surface {
         self.emit(ROOT_ID, EventKind::Clipboard, EventPayload::Map(fields));
     }
     /// Completes a host paste only if its input, selection and edit count
-    /// still match the request. Capability and payload limits are rechecked.
+    /// still match the request and its clipboard capability remains granted.
     pub fn complete_paste(
         &mut self,
         mut edit: InputEdit,
@@ -739,9 +728,7 @@ impl Surface {
         }) {
             return;
         }
-        if let Ok(ClipboardContent::Text(text)) = result
-            && text.len() <= MAX_CLIPBOARD
-        {
+        if let Ok(ClipboardContent::Text(text)) = result {
             edit.replacement = text;
             self.apply_input_edit(edit);
         }
@@ -1262,12 +1249,31 @@ mod tests {
         surface.write_clipboard("first".into());
         assert_eq!(surface.clipboard, "first");
         assert!(surface.drain_events().next().is_none());
+        let large = "复制内容\n".repeat(100_000);
+        surface.write_clipboard(large.clone());
+        surface.read_clipboard(6, false);
+        assert!(matches!(
+            surface.drain_events().next(),
+            Some(SurfaceEvent::Event(ROOT_ID, EventKind::Clipboard, EventPayload::Map(fields)))
+                if fields.iter().any(|(key, value)| *key == "text" && matches!(value, PayloadValue::Str(text) if text == &large))
+        ));
         surface.set_host_services_enabled(true);
+        surface.write_clipboard(large.clone());
+        assert!(matches!(
+            surface.drain_events().next(),
+            Some(SurfaceEvent::Service(ServiceRequest::ClipboardWrite(text))) if text == large
+        ));
+        surface.complete_clipboard(8, false, Ok(ClipboardContent::Text(large.clone())));
+        assert!(matches!(
+            surface.drain_events().next(),
+            Some(SurfaceEvent::Event(ROOT_ID, EventKind::Clipboard, EventPayload::Map(fields)))
+                if fields.iter().any(|(key, value)| *key == "text" && matches!(value, PayloadValue::Str(text) if text == &large))
+        ));
         surface.set_access(denied());
         surface.write_clipboard("secret".into());
         surface.read_clipboard(7, false);
         let events: Vec<_> = surface.drain_events().collect();
-        assert_eq!(surface.clipboard, "first");
+        assert_eq!(surface.clipboard, large);
         assert!(
             matches!(&events[..], [SurfaceEvent::Event(ROOT_ID, EventKind::Clipboard, EventPayload::Map(fields))] if fields.iter().any(|(key,value)| *key == "text" && *value == PayloadValue::Str(String::new())))
         );
@@ -1295,11 +1301,31 @@ mod tests {
             ServiceOutput::Title("title\u{1b}]52;bad\u{7}".into()).terminal_sequence(false),
             "\u{1b}]2;title]52;bad\u{1b}\\"
         );
-        assert!(
-            ServiceOutput::Clipboard("x".repeat(70 << 10))
-                .terminal_sequence(false)
-                .is_empty()
-        );
+        let large = "复制内容\n".repeat(100_000);
+        for tmux in [false, true] {
+            let sequence = ServiceOutput::Clipboard(large.clone()).terminal_sequence(tmux);
+            let sequence = if tmux {
+                sequence
+                    .strip_prefix("\x1bPtmux;")
+                    .unwrap()
+                    .strip_suffix("\x1b\\")
+                    .unwrap()
+                    .replace("\x1b\x1b", "\x1b")
+            } else {
+                sequence
+            };
+            let encoded = sequence
+                .strip_prefix("\x1b]52;c;")
+                .unwrap()
+                .strip_suffix("\x1b\\")
+                .unwrap();
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+                large.as_bytes()
+            );
+        }
     }
 
     #[test]
@@ -1479,6 +1505,19 @@ mod tests {
             surface.input_context().unwrap().text.as_deref(),
             Some("abc")
         );
+        let context = surface.input_context().unwrap();
+        let edit = InputEdit {
+            node: 2,
+            expected_event_count: context.event_count,
+            selection: context.selection,
+            replacement: String::new(),
+        };
+        let large = "复制内容".repeat(100_000);
+        surface.complete_paste(edit, Ok(ClipboardContent::Text(large.clone())));
+        assert_eq!(
+            surface.input_context().unwrap().text,
+            Some(format!("a{large}bc"))
+        );
     }
 
     struct FakeHost(Arc<AtomicUsize>);
@@ -1543,6 +1582,11 @@ mod tests {
             epoch: 1,
             clipboard: true,
         };
+        let large = "复制内容\n".repeat(100_000).into_bytes();
+        let (copied, owner) =
+            run_helper("/bin/cat", &[], Some(large.clone()), false, &cancel).unwrap();
+        assert_eq!(copied, large);
+        assert!(owner.is_none());
         let worker = std::thread::spawn(move || {
             run_helper("/bin/sh", &["-c", "sleep 30"], None, false, &cancel)
         });
