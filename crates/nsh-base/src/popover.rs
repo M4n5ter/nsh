@@ -110,16 +110,28 @@ pub fn Popover(props: PopoverProps, cx: Scope<PopoverEvent>) -> impl IntoElement
         .child(when(
             move || open.get(),
             move || {
-                // Touch screens: the press outside is the popover's.
-                let backdrop = when(
-                    move || !desktop && props.close_on_press_outside.get(),
-                    move || {
+                let mut views = Vec::new();
+                if !desktop {
+                    // Keep the outside press below the popup for its whole opening.
+                    views.push(
                         overlay()
                             .inset_0()
                             .focusable(false)
-                            .on_press(move || cancel(OpenChangeReason::PressOutside, true))
-                    },
-                );
+                            .pointer_events(move || {
+                                if props.close_on_press_outside.get() {
+                                    PointerEvents::Auto
+                                } else {
+                                    PointerEvents::None
+                                }
+                            })
+                            .on_press(move || {
+                                if props.close_on_press_outside.get_untracked() {
+                                    cancel(OpenChangeReason::PressOutside, true);
+                                }
+                            })
+                            .into_element(),
+                    );
+                }
                 let popup = overlay()
                     .focus_return(true)
                     .anchor_content(&anchor)
@@ -143,7 +155,8 @@ pub fn Popover(props: PopoverProps, cx: Scope<PopoverEvent>) -> impl IntoElement
                         )
                     })
                     .child(props.children);
-                vec![backdrop.into_element(), popup.into_element()]
+                views.push(popup.into_element());
+                views
             },
         ))
 }
