@@ -368,6 +368,10 @@ fn a_presented_wheel_preserves_hover_feedback_and_the_next_keyboard_scroll_targe
             id: 8,
             states: nsh_core::tailwind::state::HOVERED,
         },
+        MountItem::Command {
+            id: 2,
+            command: Command::Blur,
+        },
     ]);
     surface.apply(MountBatch { items });
     surface.drain_events().for_each(drop);
