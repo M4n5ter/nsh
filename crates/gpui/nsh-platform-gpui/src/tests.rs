@@ -512,7 +512,11 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
     let (view, cx) =
         cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
     view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
-    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    cx.update(|window, cx| {
+        window.focus(&view.focus_handle(cx), cx);
+        // A TestWindow starts inactive even after a field receives native focus.
+        window.activate_window();
+    });
     wait_for_report(&view, cx, "0|0|editor:0||0|0|0|");
 
     let source = view.read_with(cx, |view, _| view.input_source());
@@ -556,36 +560,46 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
     wait_for_report(&view, cx, "0|1|editor:0|0:a|1|1|0|");
     source.dispatch(&before_move, &key("f9", false));
     let after_move = source.sample().unwrap();
+    // An explicit repeat remains held even after a discrete stroke's release.
+    let mut repeat = key("f9", true);
+    let gpui::PlatformInput::KeyDown(event) = &mut repeat else {
+        unreachable!();
+    };
+    event.is_held = true;
+    assert_eq!(source.dispatch(&after_move, &repeat), Handled);
+    source.dispatch(&after_move, &key("f9", false));
+    cx.simulate_keystrokes("f7");
+    wait_for_report(&view, cx, "0|2|editor:0|0:a|1|1|0|");
     assert_eq!(source.dispatch(&after_move, &key("f9", true)), Handled);
-    wait_for_report(&view, cx, "0|1|next|0:a|1|2|0|");
+    wait_for_report(&view, cx, "0|2|next|0:a|1|2|0|");
     source.dispatch(&source.sample().unwrap(), &key("f9", false));
 
     cx.simulate_keystrokes("shift-tab");
-    wait_for_report(&view, cx, "0|1|editor:0|0:a|1|2|0|");
+    wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|0|");
     let before_rebind = source.sample().unwrap();
     cx.simulate_keystrokes("f10");
-    wait_for_report(&view, cx, "0|1|editor:0|0:a|1|2|1|");
+    wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|1|");
     assert!(source.editor_matches(&before_rebind));
     assert_eq!(source.dispatch(&before_rebind, &key("f6", true)), Rejected);
     cx.simulate_keystrokes("f7");
-    wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|1|");
+    wait_for_report(&view, cx, "0|3|editor:0|0:a|1|2|1|");
     let rebound = source.sample().unwrap();
     assert_eq!(source.dispatch(&rebound, &key("f6", true)), Handled);
     source.dispatch(&rebound, &key("f6", false));
-    wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|1|0:1");
+    wait_for_report(&view, cx, "0|3|editor:0|0:a|1|2|1|0:1");
 
     let before_scope = source.sample().unwrap();
     cx.simulate_keystrokes("f8");
-    wait_for_report(&view, cx, "1|2|editor:1|0:a|1|2|1|0:1");
+    wait_for_report(&view, cx, "1|3|editor:1|0:a|1|2|1|0:1");
     assert!(!source.editor_matches(&before_scope));
     assert_eq!(source.dispatch(&before_scope, &key("f6", true)), Rejected);
     // A later engine callback makes a rejected callback's absence observable.
     cx.simulate_keystrokes("f7");
-    wait_for_report(&view, cx, "1|3|editor:1|0:a|1|2|1|0:1");
+    wait_for_report(&view, cx, "1|4|editor:1|0:a|1|2|1|0:1");
     let current = source.sample().unwrap();
     assert_eq!(source.dispatch(&current, &key("f6", true)), Handled);
     source.dispatch(&current, &key("f6", false));
-    wait_for_report(&view, cx, "1|3|editor:1|0:a|1|2|1|1:1");
+    wait_for_report(&view, cx, "1|4|editor:1|0:a|1|2|1|1:1");
     view.update(cx, |view, _| view.stop());
 }
 
