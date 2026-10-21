@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use crossbeam_channel::Receiver;
 use nsh_core::{ApproxTextEngine, MountBatch, MountItem, Size, geometry::px};
 use nsh_engine::{Bundle, Engine, EngineConfig, Environment, Idiom, Os, Renderer};
 
@@ -44,6 +45,17 @@ fn first_frame(os: Os, idiom: Idiom) -> (Vec<String>, Vec<String>) {
 }
 
 fn first_batch(environment: Environment, source: &str) -> MountBatch {
+    let (_engine, rx) = start(environment, source, Size::new(px(320.0), px(480.0)));
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("first frame")
+}
+
+fn start(
+    environment: Environment,
+    source: &str,
+    viewport: Size<nsh_core::Points>,
+) -> (Engine, Receiver<MountBatch>) {
+    static APPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let Environment {
         os,
         idiom,
@@ -51,9 +63,10 @@ fn first_batch(environment: Environment, source: &str) -> MountBatch {
         ..
     } = environment;
     let dir = std::env::temp_dir().join(format!(
-        "nsh-platform-{}-{}-{idiom:?}-{renderer:?}",
+        "nsh-platform-{}-{}-{idiom:?}-{renderer:?}-{}",
         std::process::id(),
-        os.name()
+        os.name(),
+        APPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("App.tsx");
@@ -68,7 +81,7 @@ fn first_batch(environment: Environment, source: &str) -> MountBatch {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: nsh_engine::App::Js(Bundle::source(bundle.code)),
-        viewport: Size::new(px(320.0), px(480.0)),
+        viewport,
         trace: false,
         network: None,
         websocket: None,
@@ -85,9 +98,10 @@ fn first_batch(environment: Environment, source: &str) -> MountBatch {
         pinned: Default::default(),
         clipboard: None,
     };
-    let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
-    rx.recv_timeout(Duration::from_secs(5))
-        .expect("first frame")
+    (
+        Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
+        rx,
+    )
 }
 
 fn frame_parts(batch: MountBatch) -> (Vec<String>, Vec<String>) {
@@ -104,6 +118,36 @@ fn frame_parts(batch: MountBatch) -> (Vec<String>, Vec<String>) {
         }
     }
     (texts, labels)
+}
+
+#[test]
+fn pixel_ratio_changes_keep_the_window_size() {
+    let app = r#"import { mount, Text } from "nsh";
+import { pixelRatio, windowSize } from "nsh/device";
+
+mount(() => <Text>{`${pixelRatio()} ${windowSize().width}x${windowSize().height}`}</Text>);
+"#;
+    let viewport = Size::new(px(390.0), px(844.0));
+    let mut environment = Environment {
+        window: viewport,
+        pixel_ratio: 1.0,
+        ..Environment::default()
+    };
+    let (engine, rx) = start(environment, app, viewport);
+    let expect_frame = |expected: &str| {
+        let batch = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("rendered environment change");
+        assert_eq!(frame_parts(batch).0, [expected]);
+    };
+    expect_frame("1 390x844");
+    // Platforms report the whole environment; moving to another screen
+    // changes the density, not the window's size in points.
+    for (ratio, expected) in [(2.0, "2 390x844"), (1.0, "1 390x844")] {
+        environment.pixel_ratio = ratio;
+        engine.control().set_environment(environment);
+        expect_frame(expected);
+    }
 }
 
 #[test]

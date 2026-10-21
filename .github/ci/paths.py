@@ -1,7 +1,8 @@
 """Checks that each workflow runs on every change that can affect what it tests.
 
 The Rust workflows run only when the crates they build change, listed one by
-one in their `paths`. A crate they build (directly or through a path
+one in their `paths` (or, for a workflow that runs on every pull request
+because its job is required, in the list of its `dorny/paths-filter` step). A crate they build (directly or through a path
 dependency, dev-dependencies included) that is missing from the list would
 let a change through untested, so this compares the lists with the
 workspace's dependency graph (`cargo metadata --no-deps`, no download).
@@ -28,7 +29,16 @@ WORKFLOWS = {
             "nsh-core", "nsh-macros", "nsh-js", "nsh-engine",
             "nsh-bundler", "nsh-package", "nsh-base", "nsh-testing",
         ],
-        "files": ["api/**", "examples/counter/**", "examples/gallery/**", "examples/bench/**"],
+        "files": ["examples/counter/**", "examples/gallery/**", "examples/bench/**"],
+    },
+    "compat.yml": {
+        # `nsh build` builds the apps, nsh-compat's checks link the rest.
+        "packages": ["nsh-cli", "nsh-core", "nsh-js", "nsh-base", "nsh-engine"],
+        # The apps it builds and runs.
+        "files": [
+            "tests/compat/**", "examples/counter/**", "examples/desktop/**",
+            "examples/gallery/**", "examples/hopper/**",
+        ],
     },
     "linux.yml": {
         "packages": [
@@ -54,10 +64,21 @@ WORKFLOWS = {
             "examples/rust-exports/**",
         ],
     },
+    "gpui.yml": {
+        # Shared main-workspace dependencies declared by crates/gpui.
+        "packages": [
+            "nsh-core", "nsh-dev", "nsh-testing", "nsh-engine",
+            "nsh-base", "nsh-bundler",
+        ],
+        "files": [
+            "crates/gpui/**", "third-party/gpui-wgpu/**",
+            "third-party/icy_sixel/**", "examples/embed-gpui/**",
+        ],
+    },
     "tui.yml": {
         "packages": ["nsh-platform-tui", "nsh-tui-host", "nsh-tui-app", "nsh-cli"],
         "files": [
-            "examples/terminal-workbench/**", "api/cases/layout/fonts/**",
+            "examples/terminal-workbench/**", "tests/compat/cases/layout/fonts/**",
             "third-party/icy_sixel/**",
         ],
     },
@@ -100,6 +121,16 @@ def covered(path, patterns):
     return any(fnmatch.fnmatch(probe, p) for p in patterns)
 
 
+def filtered(workflow):
+    """The patterns of a workflow's `dorny/paths-filter` step, if it has one."""
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            if step.get("uses", "").startswith("dorny/paths-filter"):
+                filters = yaml.safe_load(step["with"]["filters"])
+                return [p for patterns in filters.values() for p in patterns]
+    return None
+
+
 def main():
     graph = crates()
     failed = False
@@ -109,15 +140,19 @@ def main():
             print(f"{name}:")
             print("\n".join(f'      - "{p}"' for p in want))
             continue
-        on = yaml.safe_load((ROOT / ".github/workflows" / name).read_text())[True]
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text())
+        on = workflow[True]
         for event in ("push", "pull_request"):
-            patterns = on[event].get("paths", ["**"])
+            patterns = (on[event] or {}).get("paths")
+            if patterns is None and event == "pull_request":
+                patterns = filtered(workflow)
+            patterns = patterns or ["**"]
             missing = [p for p in want if not covered(p, patterns)]
             if missing:
                 failed = True
                 print(f"{name} ({event}) does not run on changes to: {', '.join(missing)}")
     if failed:
-        print("Add them to the workflow's paths (python3 .github/ci/paths.py --print).")
+        print("Add them to the workflow's paths or paths filter (python3 .github/ci/paths.py --print).")
         sys.exit(1)
 
 

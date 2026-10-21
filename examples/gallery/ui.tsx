@@ -3,7 +3,7 @@ import { computed, effect, Image, Scroll, signal, Text, View } from "nsh";
 import { createAnimatedValue, Easing } from "nsh/animated";
 import { colorScheme, platform, setColorScheme, windowSize } from "nsh/device";
 import { keymap } from "nsh/keymap";
-import { Button as BaseButton, Sheet as BaseSheet, safeArea } from "nsh/base";
+import { Button as BaseButton, Sheet as BaseSheet, safeArea, Switch, Tab, Tabs } from "nsh/base";
 import { nav } from "./nav";
 import { Icon, type IconName } from "./icons";
 import logoDark from "./logo-dark.svg";
@@ -437,6 +437,17 @@ export function Press(props: {
 }
 
 /**
+ * `Press`'s feedback for a `Tab` of `nsh/base`, which reports no press down
+ * to spring with: it sinks a little while pressed and eases back, and takes
+ * presses 4 pt around it without taking more room (a hit slop). Spread
+ * `style` and `activeStyle` into the tab's.
+ */
+export const tabPress = {
+  style: { margin: -4, padding: 4, transitionProperty: "transform", transitionDuration: 150, transitionTimingFunction: "ease-out" },
+  activeStyle: { transform: [{ scale: 0.97 }] },
+} satisfies { style: ViewStyle; activeStyle: ViewStyle };
+
+/**
  * Fades and lifts its content in once mounted; `index` staggers siblings
  * (40 ms apart). `flex` lets it wrap a page that fills its parent.
  */
@@ -643,8 +654,9 @@ export function Row(props: { first?: boolean; onPress?: () => void; children: JS
 export type ButtonVariant = "primary" | "secondary" | "accent" | "ghost";
 
 /**
- * A button, 44 pt tall: `primary` is light (the main action), `secondary`
- * dark, `accent` citrus. A `color` fills it with that color instead.
+ * A button, 44 pt tall (32 pt `small`, for pointer-sized surfaces):
+ * `primary` is light (the main action), `secondary` dark, `accent` citrus.
+ * A `color` fills it with that color instead.
  */
 export function Button(props: {
   label: string;
@@ -654,8 +666,10 @@ export function Button(props: {
   disabled?: boolean;
   /** Grows to share a row with its siblings. */
   flex?: number;
+  size?: "small" | "regular";
   onPress: () => void;
 }) {
+  const small = () => props.size === "small";
   // `nsh/base`'s Button gives the behavior (presses, disabled, the button
   // role); the look below is the gallery's own.
   const scale = createAnimatedValue(1);
@@ -674,14 +688,14 @@ export function Button(props: {
     >
       <View
         style={{
-          height: 44,
-          paddingHorizontal: 18,
-          borderRadius: radius.control,
+          height: small() ? 32 : 44,
+          paddingHorizontal: small() ? 12 : 18,
+          borderRadius: small() ? 8 : radius.control,
           borderCurve: "continuous",
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "center",
-          gap: 8,
+          gap: small() ? 6 : 8,
           backgroundColor: bg(),
           ...(props.color || variant() === "ghost"
             ? {}
@@ -695,9 +709,9 @@ export function Button(props: {
         }}
       >
         <If when={props.icon}>
-          <Icon name={props.icon!} size={16} tint={fg()} />
+          <Icon name={props.icon!} size={small() ? 14 : 16} tint={fg()} />
         </If>
-        <Text style={{ fontSize: 15, fontWeight: "600", color: fg() }}>{props.label}</Text>
+        <Text style={{ fontSize: small() ? 13 : 15, fontWeight: "600", color: fg() }}>{props.label}</Text>
       </View>
     </BaseButton>
   );
@@ -781,51 +795,78 @@ export function Section(props: { title: string; note?: string; style?: ViewStyle
   );
 }
 
-/** An on / off switch: the knob springs across, the track changes color natively. */
+/**
+ * An on / off switch (`nsh/base`'s `Switch`, in the gallery's look): the
+ * knob springs across, the track changes color natively.
+ */
 export function Toggle(props: { value: boolean; onChange: (value: boolean) => void; label?: string }) {
-  const t = createAnimatedValue(props.value ? 1 : 0);
-  let last = props.value;
+  const look = switchLook(() => props.value);
   return (
-    <View
-      onPress={() => {
-        last = !props.value;
-        t.spring(last ? 1 : 0, motion.settle);
-        props.onChange(last);
-      }}
-      role="switch"
+    <Switch
+      checked={props.value}
+      onChange={props.onChange}
       accessibilityLabel={props.label}
-      accessibilityState={{ checked: props.value }}
-      hitSlop={8}
-      style={{
-        width: 50,
-        height: 30,
-        borderRadius: 15,
-        padding: 3,
-        backgroundColor: t.interpolate({ inputRange: [0, 1], outputRange: [colors.track, colors.accentFill] }),
-        borderWidth: 1,
-        borderColor: colors.border,
-        ...finish.track,
-      }}
-    >
-      <View
-        style={{
-          width: 22,
-          height: 22,
-          borderRadius: 11,
-          backgroundColor: props.value ? colors.onAccent : colors.knob,
-          // A drop of glass: a specular top over the knob's color.
-          backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.202) 0%, rgba(255,255,255,0.098) 60%)",
-          boxShadow: isDark() ? "inset 0 1px 0 rgba(255,255,255,0.2), 0 1px 3px rgba(0,0,0,0.4)" : finish.knob.boxShadow,
-          transform: [{ translateX: t.interpolate({ inputRange: [0, 1], outputRange: [0, 20] }) }],
-        }}
-      />
-    </View>
+      // 8 pt more to press on every side (the hit slop of a 30 pt track),
+      // without taking more room.
+      style={{ margin: -8, padding: 8 }}
+      trackStyle={look.trackStyle}
+      thumbStyle={look.thumbStyle}
+    />
   );
 }
 
 /**
+ * The gallery's switch, as the styles of `Switch`'s parts: a 50 × 30
+ * track that turns citrus and a knob that springs across, both natively.
+ * `on` is the value the app owns: the knob follows it, from a press or from
+ * elsewhere. `small` is 38 × 22, for pointer-sized rows. Read the styles in
+ * JSX, so the appearance is followed.
+ */
+export function switchLook(on: () => boolean, size: "small" | "regular" = "regular"): { readonly trackStyle: ViewStyle; readonly thumbStyle: ViewStyle } {
+  // The track's size and inset, and the knob: it travels what is left inside
+  // the border and the padding.
+  const [width, height, inset, knob] = size === "small" ? [38, 22, 2, 16] : [50, 30, 3, 22];
+  const t = createAnimatedValue(on() ? 1 : 0);
+  const x = t.interpolate({ inputRange: [0, 1], outputRange: [0, width - 2 - 2 * inset - knob] });
+  let shown = on();
+  effect(() => {
+    const next = on();
+    if (next === shown) return;
+    shown = next;
+    t.spring(next ? 1 : 0, motion.settle);
+  });
+  return {
+    get trackStyle(): ViewStyle {
+      return {
+        width,
+        height,
+        borderRadius: height / 2,
+        padding: inset,
+        backgroundColor: t.interpolate({ inputRange: [0, 1], outputRange: [colors.track, colors.accentFill] }),
+        borderWidth: 1,
+        borderColor: colors.border,
+        ...finish.track,
+      };
+    },
+    get thumbStyle(): ViewStyle {
+      return {
+        width: knob,
+        height: knob,
+        borderRadius: knob / 2,
+        backgroundColor: on() ? colors.onAccent : colors.knob,
+        // A drop of glass: a specular top over the knob's color.
+        backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.202) 0%, rgba(255,255,255,0.098) 60%)",
+        boxShadow: isDark() ? "inset 0 1px 0 rgba(255,255,255,0.2), 0 1px 3px rgba(0,0,0,0.4)" : finish.knob.boxShadow,
+        transform: [{ translateX: x }],
+      };
+    },
+  };
+}
+
+/**
  * Equal segments with an indicator that springs to the selected one
- * (`count` shows a quiet number after a label).
+ * (`count` shows a quiet number after a label): `nsh/base`'s `Tabs`, a tab
+ * per segment, in the gallery's look.
  */
 export function Segmented<T extends string>(props: {
   options: readonly { value: T; label: string; count?: number }[];
@@ -853,9 +894,8 @@ export function Segmented<T extends string>(props: {
     placed = true;
   });
   return (
-    <View
+    <Tabs
       onLayout={(e) => width.set(e.size.width)}
-      role="tablist"
       style={{
         height,
         flexDirection: "row",
@@ -883,10 +923,9 @@ export function Segmented<T extends string>(props: {
       />
       <Each of={props.options}>
         {(option) => (
-          <View
+          <Tab
+            selected={props.value === option().value}
             onPress={() => props.onChange(option().value)}
-            role="tab"
-            accessibilityState={{ selected: props.value === option().value }}
             style={{ flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5 }}
           >
             <Text
@@ -902,10 +941,10 @@ export function Segmented<T extends string>(props: {
             <If when={option().count !== undefined}>
               <Text style={{ fontSize: 12, color: colors.faint, fontVariant: ["tabular-nums"] }}>{option().count}</Text>
             </If>
-          </View>
+          </Tab>
         )}
       </Each>
-    </View>
+    </Tabs>
   );
 }
 
