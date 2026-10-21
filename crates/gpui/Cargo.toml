@@ -94,3 +94,5 @@ opt-level = 3
 # The terminal renderer exposes its own production API, without a core fork.
 [patch.crates-io]
 gpui-fast-wgpu = { path = "../../third-party/gpui-wgpu" }
+# Same codec as ratatui-image; only its output sink is made fallible.
+icy_sixel = { path = "../../third-party/icy_sixel" }

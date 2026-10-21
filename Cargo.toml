@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "examples/gallery-rs/native", "examples/rust-exports/native", "examples/embed-gpui/run"]
 # The GPUI backend is a workspace of its own (`crates/gpui/Cargo.toml`).
-exclude = ["crates/gpui", "third-party/gpui-wgpu"]
+exclude = ["crates/gpui", "third-party/gpui-wgpu", "third-party/icy_sixel"]
 # `cargo run` runs the gallery (`crates/xtask/src/run.rs`).
 default-members = ["crates/xtask"]
 
@@ -448,3 +448,7 @@ strip = true
 panic = "abort"
 [profile.web.package.quickjs-jit-sys]
 opt-level = 3
+
+# Same codec as ratatui-image; only its output sink is made fallible.
+[patch.crates-io]
+icy_sixel = { path = "third-party/icy_sixel" }
