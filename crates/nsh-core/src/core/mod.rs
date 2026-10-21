@@ -1080,8 +1080,8 @@ impl<M: TextEngine> Core<M> {
     pub fn apply(&mut self, op: Op) -> Result<(), ApplyError> {
         let _entered = self.components.runtime.enter();
         // Ops on a component's host go to its component, calls of a UI
-        // set's modules to the module; the components learn whether JS
-        // listens to the back button.
+        // set's modules to the module. The surface's JS shortcuts and
+        // listeners are retained even before its first component exists.
         if self.components.instances.is_empty()
             && !matches!(
                 op,
@@ -1090,8 +1090,11 @@ impl<M: TextEngine> Core<M> {
                     ..
                 } | Op::Listen {
                     id: ROOT_ID,
-                    event: EventKind::BackPress,
+                    event: EventKind::BackPress | EventKind::KeyCommand,
                     ..
+                } | Op::SetProp {
+                    id: ROOT_ID,
+                    prop: Prop::Keymap(_),
                 }
             )
         {
