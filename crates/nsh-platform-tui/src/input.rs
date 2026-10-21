@@ -2795,7 +2795,7 @@ mod tests {
         use nsh_core::{
             AttributedText, MountBatch, MountItem, ResolvedTextStyle, Size, TextEngine, TextLink,
         };
-        for (x, y, column_origin, row) in [(0.0, 0.0, 0, 0), (14.0, 12.0, 2, 1)] {
+        for (x, y, column_origin, row) in [(0.0, 0.0, 0_u16, 0), (14.0, 12.0, 2, 1)] {
             let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
             let mut text = AttributedText {
                 selectable: Some(true),
