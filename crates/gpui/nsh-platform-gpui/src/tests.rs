@@ -348,6 +348,7 @@ fn windows(cx: &mut TestAppContext) {
     // The engine (and the settings portal) run on threads of their own.
     cx.executor().allow_parking();
     keys_reach_the_fields_of_a_surface_showing_a_native_component(cx);
+    synthetic_keys_type_printable_characters_after_shortcuts(cx);
     compositions_are_reported_and_hold_values_until_they_end(cx);
     configured_assets_stay_with_their_original_load(cx);
     buttons_keep_native_focus_and_live_key_scopes(cx);
@@ -671,6 +672,58 @@ fn keys_reach_the_fields_of_a_surface_showing_a_native_component(cx: &mut TestAp
     wait_for(&view, cx, "bc");
     cx.simulate_keystrokes("right shift-right backspace");
     wait_for(&view, cx, "b");
+}
+
+/// The test agent's synthetic path must translate keys only after shortcuts.
+fn synthetic_keys_type_printable_characters_after_shortcuts(cx: &mut TestAppContext) {
+    let source = r#"
+import { Input, mount, signal } from "nsh";
+import { keymap } from "nsh/keymap";
+function App() {
+  const text = signal("");
+  keymap.bind("shift+=", () => text.set("shortcut"), { when: "always" });
+  return <Input autoFocus value={text()} onChange={(t) => text.set(t)} style={{ height: 30 }} />;
+}
+mount(App);
+"#;
+    let code = nsh_bundler::compile_module("App.tsx", source, &[]).unwrap();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    wait_for(&view, cx, "");
+    for (vk, shift, expected) in [
+        (0xBF, false, "/"),
+        (0xBF, true, "/?"),
+        (0x31, true, "/?!"),
+        (0xBB, false, "/?!="),
+    ] {
+        view.update(cx, |view, _| {
+            crate::synth::press(
+                view.surface(),
+                vk,
+                crate::input::Modifiers {
+                    shift,
+                    ..Default::default()
+                },
+            );
+        });
+        wait_for(&view, cx, expected);
+    }
+    view.update(cx, |view, _| {
+        crate::synth::press(
+            view.surface(),
+            0xBB,
+            crate::input::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+    });
+    // The shortcut is asynchronous, but an accidental '+' insertion is immediate.
+    assert_eq!(field_text(&view, cx).as_deref(), Some("/?!="));
+    wait_for(&view, cx, "shortcut");
+    view.update(cx, |view, _| view.stop());
 }
 
 fn compositions_are_reported_and_hold_values_until_they_end(cx: &mut TestAppContext) {
