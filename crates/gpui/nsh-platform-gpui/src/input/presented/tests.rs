@@ -353,7 +353,9 @@ fn editor_text_lease_survives_its_own_edits_but_never_targets_a_different_focus_
     assert!(source.editor_matches(&first));
     crate::text_input::char_input(&surface, "🦀");
     assert_eq!(
-        crate::text_input::current_text(&editor).as_deref(),
+        crate::text_input::accessible_value(&editor)
+            .map(|value| value.text)
+            .as_deref(),
         Some("maka🦀")
     );
     crate::text_input::window_focus(&surface, false);
@@ -374,11 +376,15 @@ fn editor_text_lease_survives_its_own_edits_but_never_targets_a_different_focus_
     assert!(source.editor_matches(&second));
     crate::text_input::char_input(&surface, "other");
     assert_eq!(
-        crate::text_input::current_text(&other).as_deref(),
+        crate::text_input::accessible_value(&other)
+            .map(|value| value.text)
+            .as_deref(),
         Some("other")
     );
     assert_eq!(
-        crate::text_input::current_text(&editor).as_deref(),
+        crate::text_input::accessible_value(&editor)
+            .map(|value| value.text)
+            .as_deref(),
         Some("maka🦀")
     );
 
@@ -394,7 +400,9 @@ fn editor_text_lease_survives_its_own_edits_but_never_targets_a_different_focus_
     assert!(!source.editor_matches(&second));
     crate::text_input::char_input(&surface, "must not append");
     assert_eq!(
-        crate::text_input::current_text(&other).as_deref(),
+        crate::text_input::accessible_value(&other)
+            .map(|value| value.text)
+            .as_deref(),
         Some("other")
     );
 
@@ -412,11 +420,15 @@ fn editor_text_lease_survives_its_own_edits_but_never_targets_a_different_focus_
     assert!(source.editor_matches(&current));
     crate::text_input::char_input(&surface, "new");
     assert_eq!(
-        crate::text_input::current_text(&replacement).as_deref(),
+        crate::text_input::accessible_value(&replacement)
+            .map(|value| value.text)
+            .as_deref(),
         Some("new")
     );
     assert_eq!(
-        crate::text_input::current_text(&editor).as_deref(),
+        crate::text_input::accessible_value(&editor)
+            .map(|value| value.text)
+            .as_deref(),
         Some("maka🦀")
     );
 }
@@ -475,7 +487,9 @@ fn physical_mouse_cleanup_ends_native_selection_thumb_and_hover_without_a_new_hi
     assert!(crate::text_input::pointer(&surface, &editor, &movement));
     source.cancel_pointer();
     assert_eq!(
-        crate::text_input::current_text(&editor).as_deref(),
+        crate::text_input::accessible_value(&editor)
+            .map(|value| value.text)
+            .as_deref(),
         Some("maka")
     );
 
