@@ -583,10 +583,12 @@ impl Surface {
         });
         if let Some(stroke) = keystroke(key) {
             let focus_path = self.focus_path();
+            let visible = std::cell::OnceCell::new();
             match self
                 .keymap
                 .find_with(stroke, editing, key.kind == KeyEventKind::Repeat, |node| {
                     focus_path.contains(&node)
+                        && visible.get_or_init(|| self.visible_ids()).contains(&node)
                 }) {
                 KeyMatch::Fire(id) => {
                     self.emit(
@@ -2473,6 +2475,85 @@ mod tests {
         assert!(!surface.focus_path().contains(&6));
         key(&mut surface, KeyCode::Char('k'), KeyModifiers::CONTROL);
         assert_eq!(command(&mut surface), Some(1.0));
+    }
+
+    #[test]
+    fn modal_escape_ignores_late_parent_bindings_and_restores_them_after_closing() {
+        use std::sync::Arc;
+
+        use nsh_core::{
+            MountBatch, MountItem,
+            keymap::{KeyBinding, Keymap, When},
+        };
+
+        let mut surface = form();
+        let mut items = create(6, ViewKind::View, ROOT_ID, 80.0);
+        items.extend(create(8, ViewKind::Input, 6, 0.0));
+        surface.apply(MountBatch { items });
+        let escape = Keystroke::parse_with("escape", false).unwrap();
+        let mut parent = KeyBinding::new(1, escape, When::Always, false);
+        parent.within = Some(6);
+        surface.keymap = Arc::new(Keymap::new(vec![parent]));
+        let command = |surface: &mut Surface| {
+            surface.drain_events().find_map(|event| match event {
+                SurfaceEvent::Event(
+                    ROOT_ID,
+                    EventKind::KeyCommand,
+                    EventPayload::Value(PayloadValue::Number(id)),
+                ) => Some(id),
+                _ => None,
+            })
+        };
+        surface.set_focus(Some(8));
+        key(&mut surface, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(command(&mut surface), Some(1.0));
+
+        let mut items = create(10, ViewKind::Modal, 6, 0.0);
+        items.extend(create(12, ViewKind::Input, 10, 0.0));
+        surface.apply(MountBatch { items });
+        assert_eq!(surface.focus_path(), [12, 10, 6, ROOT_ID]);
+        let mut latest_parent = parent;
+        latest_parent.id = 3;
+        surface.apply(MountBatch {
+            items: vec![MountItem::Keymap(Arc::new(Keymap::new(vec![
+                parent,
+                KeyBinding::new(
+                    2,
+                    Keystroke::parse_with("ctrl+k", false).unwrap(),
+                    When::Always,
+                    false,
+                ),
+                latest_parent,
+            ])))],
+        });
+        key(&mut surface, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(command(&mut surface), Some(2.0));
+
+        key(&mut surface, KeyCode::Esc, KeyModifiers::NONE);
+        let dispatched = surface
+            .drain_events()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(id, kind, payload)
+                    if matches!(kind, EventKind::KeyCommand | EventKind::RequestClose) =>
+                {
+                    Some((id, kind, payload))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dispatched,
+            vec![(
+                10,
+                EventKind::RequestClose,
+                EventPayload::Map(vec![("reason", PayloadValue::Str("cancel".into()))]),
+            )]
+        );
+        assert!(surface.node(10).unwrap().popped);
+        surface.tick(1.0);
+        assert_eq!(surface.focus_path(), [8, 6, ROOT_ID]);
+        key(&mut surface, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(command(&mut surface), Some(3.0));
     }
 
     #[test]
