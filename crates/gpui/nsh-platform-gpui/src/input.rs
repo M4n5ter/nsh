@@ -1066,7 +1066,7 @@ fn tab(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     let trapped = scope != surface.root;
     collect_stops(surface, &scope, &mut stops);
     if stops.is_empty() {
-        return false;
+        return trapped;
     }
     let n = stops.len();
     let focused = crate::text_input::focused_view(surface)
