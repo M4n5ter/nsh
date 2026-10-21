@@ -802,7 +802,7 @@ impl InputSource {
                 hit.item.is_some()
                     || chain(&hit.view)
                         .iter()
-                        .any(|view| opaque(surface, view, false))
+                        .any(|view| opaque_content(surface, view, false))
                     || !chain(&hit.view).contains(view)
             })
         {
