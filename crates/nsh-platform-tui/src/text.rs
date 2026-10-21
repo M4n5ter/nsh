@@ -1228,15 +1228,16 @@ fn paint_runs<'a>(
         }
         let px = origin.x + run.x;
         let py = origin.y + run.y;
-        let column = (px / metrics.width()).floor() as i32;
-        let row = (py / metrics.height()).floor() as i32;
+        // Native mouse input resolves a cell's center. Keep visible text and
+        // its clipping in those same cells, including fractional layout origins.
+        let column = metrics.column_at(px) as i32;
+        let row = metrics.row_at(py) as i32;
         let x = area.x as i32 + column;
         let y = area.y as i32 + row;
-        if column < (clip.origin.x / metrics.width()).floor() as i32
-            || row < (clip.origin.y / metrics.height()).floor() as i32
-            || row >= ((clip.origin.y + clip.size.height) / metrics.height()).floor() as i32
-            || column + run.width as i32
-                > ((clip.origin.x + clip.size.width) / metrics.width()).floor() as i32
+        if column < metrics.column_at(clip.origin.x) as i32
+            || row < metrics.row_at(clip.origin.y) as i32
+            || row >= metrics.row_at(clip.origin.y + clip.size.height) as i32
+            || column + run.width as i32 > metrics.column_at(clip.origin.x + clip.size.width) as i32
             || x < bounds.x as i32
             || y < bounds.y as i32
             || y >= bounds.bottom() as i32
@@ -1551,6 +1552,19 @@ mod tests {
         assert_eq!(buffer[(1, 0)].symbol(), "x");
         assert_eq!(buffer[(1, 0)].fg, TerminalColor::Rgb(100, 50, 0));
         assert!(!buffer[(1, 0)].modifier.contains(Modifier::BOLD));
+
+        let mut buffer = Buffer::empty(CellRect::new(0, 0, 4, 3));
+        render_text(
+            &result,
+            Point::new(px(14.0), px(12.0)),
+            Bounds::new(Point::new(px(14.0), px(12.0)), Size::new(px(8.0), px(16.0))),
+            1.0,
+            CellMetrics::default(),
+            buffer.area,
+            &mut buffer,
+        );
+        assert_eq!(buffer[(2, 1)].symbol(), "x");
+        assert_eq!(buffer[(1, 0)].symbol(), " ");
     }
 
     #[test]

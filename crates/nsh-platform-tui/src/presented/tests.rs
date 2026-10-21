@@ -446,6 +446,52 @@ fn a_box_none_scroll_keeps_its_selectable_text_as_ordinary_wheel_content() {
 }
 
 #[test]
+fn a_fractional_button_keeps_its_visible_text_on_the_original_press_route() {
+    use std::sync::Arc;
+
+    use nsh_core::{AttributedText, ResolvedTextStyle, TextEngine};
+
+    let mut surface = Surface::new(8, 4, CellMetrics::default());
+    let mut text = AttributedText {
+        selectable: Some(false),
+        ..Default::default()
+    };
+    text.push("x", ResolvedTextStyle::default());
+    let engine = crate::TerminalTextEngine::default();
+    let layout = engine.layout(&engine.prepare(&text), Size::new(px(8.0), px(16.0)));
+    let mut items = mount(CLOSE, ViewKind::View, frame(14.0, 12.0, 8.0, 16.0));
+    items.extend([
+        events(CLOSE, &[EventKind::Press]),
+        action(CLOSE, CLOSE_ACTION),
+    ]);
+    items.extend(mount(4, ViewKind::Text, frame(0.0, 0.0, 8.0, 16.0)));
+    items.extend([
+        MountItem::Insert {
+            parent: CLOSE,
+            child: 4,
+            before: None,
+        },
+        MountItem::Text {
+            id: 4,
+            text: Arc::new(text),
+            layout,
+            content: frame(0.0, 0.0, 8.0, 16.0),
+        },
+    ]);
+    surface.apply(MountBatch { items });
+    assert_eq!(surface.snapshot().lines().nth(1), Some("  x"));
+    let snapshot = surface.input_snapshot();
+    assert!(snapshot.press_at(1, 0).is_none());
+    let lease = snapshot
+        .press_at(2, 1)
+        .expect("the visible label's original button");
+    assert_eq!(lease.target(), CLOSE);
+    assert!(surface.handle_presented_mouse(down(2, 1), &lease).is_some());
+    assert!(surface.handle_presented_mouse(up(2, 1), &lease).is_some());
+    assert_eq!(presses(&mut surface), [CLOSE]);
+}
+
+#[test]
 fn a_presented_close_survives_underlay_and_color_feedback_commits() {
     fn send_sync<T: Send + Sync>() {}
     send_sync::<crate::InputSnapshot>();

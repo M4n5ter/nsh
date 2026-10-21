@@ -1627,8 +1627,8 @@ impl Surface {
         let row = (y / self.metrics.height().0).floor();
         let run_position = |run: &crate::text::TerminalRun| {
             (
-                ((origin.0 + run.x.0) / self.metrics.width().0).floor(),
-                ((origin.1 + run.y.0) / self.metrics.height().0).floor(),
+                self.metrics.column_at(px(origin.0 + run.x.0)),
+                self.metrics.row_at(px(origin.1 + run.y.0)),
             )
         };
         let run = layout.runs.iter().min_by(|a, b| {
@@ -2795,52 +2795,58 @@ mod tests {
         use nsh_core::{
             AttributedText, MountBatch, MountItem, ResolvedTextStyle, Size, TextEngine, TextLink,
         };
-        let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
-        let mut text = AttributedText {
-            selectable: Some(true),
-            ..Default::default()
-        };
-        text.push("Hello中", ResolvedTextStyle::default());
-        text.links.push(TextLink {
-            start: 2,
-            end: 5,
-            node: 10,
-            events: mask(&[EventKind::Press]),
-        });
-        let engine = crate::TerminalTextEngine::default();
-        let prepared = engine.prepare(&text);
-        let layout = engine.layout(&prepared, Size::new(px(160.0), px(32.0)));
-        let mut items = create(2, ViewKind::Text, ROOT_ID, 0.0);
-        items.push(MountItem::Text {
-            id: 2,
-            text: Arc::new(text),
-            layout,
-            content: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(160.0), px(32.0))),
-        });
-        surface.apply(MountBatch { items });
-        let mouse = |kind, column| {
-            Event::Mouse(MouseEvent {
-                kind,
-                column,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            })
-        };
-        surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 1));
-        surface.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 4));
-        surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 4));
-        assert_eq!(surface.node(2).unwrap().editor.selected(), "llo");
-        key(&mut surface, KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(surface.clipboard, "llo");
-        surface.events.clear();
-        surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 3));
-        surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 3));
-        assert!(
-            surface
-                .events
-                .iter()
-                .any(|event| matches!(event, SurfaceEvent::Event(10, EventKind::Press, _)))
-        );
+        for (x, y, column_origin, row) in [(0.0, 0.0, 0, 0), (14.0, 12.0, 2, 1)] {
+            let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+            let mut text = AttributedText {
+                selectable: Some(true),
+                ..Default::default()
+            };
+            text.push("Hello中", ResolvedTextStyle::default());
+            text.links.push(TextLink {
+                start: 2,
+                end: 5,
+                node: 10,
+                events: mask(&[EventKind::Press]),
+            });
+            let engine = crate::TerminalTextEngine::default();
+            let prepared = engine.prepare(&text);
+            let layout = engine.layout(&prepared, Size::new(px(160.0), px(32.0)));
+            let mut items = create(2, ViewKind::Text, ROOT_ID, 0.0);
+            items.push(MountItem::Frame {
+                id: 2,
+                frame: Bounds::new(Point::new(px(x), px(y)), Size::new(px(160.0), px(32.0))),
+            });
+            items.push(MountItem::Text {
+                id: 2,
+                text: Arc::new(text),
+                layout,
+                content: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(160.0), px(32.0))),
+            });
+            surface.apply(MountBatch { items });
+            let mouse = |kind, column| {
+                Event::Mouse(MouseEvent {
+                    kind,
+                    column: column_origin + column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                })
+            };
+            surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 1));
+            surface.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 4));
+            surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 4));
+            assert_eq!(surface.node(2).unwrap().editor.selected(), "llo");
+            key(&mut surface, KeyCode::Char('c'), KeyModifiers::CONTROL);
+            assert_eq!(surface.clipboard, "llo");
+            surface.events.clear();
+            surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 3));
+            surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 3));
+            assert!(
+                surface
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, SurfaceEvent::Event(10, EventKind::Press, _)))
+            );
+        }
     }
 
     #[test]

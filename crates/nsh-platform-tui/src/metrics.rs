@@ -36,6 +36,16 @@ impl CellMetrics {
         self.height
     }
 
+    /// First column whose center lies at or after a point edge.
+    pub(crate) fn column_at(self, x: Points) -> f32 {
+        (x / self.width - 0.5).ceil()
+    }
+
+    /// First row whose center lies at or after a point edge.
+    pub(crate) fn row_at(self, y: Points) -> f32 {
+        (y / self.height - 0.5).ceil()
+    }
+
     /// Converts a terminal region to a viewport in shared layout coordinates.
     pub fn viewport(self, columns: u16, rows: u16) -> Size<Points> {
         Size::new(columns as f32 * self.width, rows as f32 * self.height)
