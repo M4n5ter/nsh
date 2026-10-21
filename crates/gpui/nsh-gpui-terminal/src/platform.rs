@@ -25,6 +25,8 @@ use crate::{
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
 type PixelSink = Box<dyn FnMut(CandidateFrame)>;
+type MenuAction = Box<dyn FnMut(&dyn Action)>;
+type ValidateMenuAction = Box<dyn FnMut(&dyn Action) -> bool>;
 
 #[derive(Default)]
 struct Callbacks {
@@ -34,9 +36,9 @@ struct Callbacks {
     wake: Option<Box<dyn FnMut()>>,
     displays: Option<Box<dyn FnMut()>>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
-    menu: Option<Box<dyn FnMut(&dyn Action)>>,
+    menu: Option<MenuAction>,
     open_menu: Option<Box<dyn FnMut()>>,
-    validate_menu: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
+    validate_menu: Option<ValidateMenuAction>,
     keyboard: Option<Box<dyn FnMut()>>,
     thermal: Option<Box<dyn FnMut()>>,
 }

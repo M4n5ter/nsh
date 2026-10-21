@@ -168,9 +168,10 @@ fn sealed_press_rebinding_cancels_the_original_capture_without_releasing_into_it
     let button = view(&surface, 2, ROOT_ID, ViewKind::View);
     {
         let mut state = button.state_mut();
-        let mut props = ViewProps::default();
-        props.input_action = Some(7);
-        state.props = Box::new(props);
+        *state.props = ViewProps {
+            input_action: Some(7),
+            ..Default::default()
+        };
         state.events.set(EventKind::Press, true);
         state.tracked = PRESSED;
     }
@@ -388,8 +389,10 @@ fn editor_text_lease_survives_its_own_edits_but_never_targets_a_different_focus_
         Some("maka🦀")
     );
 
-    let mut read_only = nsh_core::InputConfig::default();
-    read_only.editable = false;
+    let read_only = nsh_core::InputConfig {
+        editable: false,
+        ..Default::default()
+    };
     surface.mounter.borrow_mut().apply(
         &surface,
         &MountItem::Input {

@@ -18,6 +18,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::{CandidateFrame, FrameToken, MAX_PIXEL_BYTES};
 type PixelSink = Box<dyn FnMut(CandidateFrame)>;
 type Wake = Arc<dyn Fn() + Send + Sync>;
+type Resize = Box<dyn FnMut(Size<Pixels>, f32)>;
 
 #[derive(Default)]
 struct Callbacks {
@@ -26,7 +27,7 @@ struct Callbacks {
     active: Option<Box<dyn FnMut(bool)>>,
     visibility: Option<Box<dyn FnMut(WindowVisibility)>>,
     hover: Option<Box<dyn FnMut(bool)>>,
-    resize: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
+    resize: Option<Resize>,
     moved: Option<Box<dyn FnMut()>>,
     display: Option<Box<dyn FnMut()>>,
     should_close: Option<Box<dyn FnMut() -> bool>>,
