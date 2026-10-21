@@ -207,7 +207,7 @@ impl super::EventToJs for SharedEvent {
 
 impl AnyEvent for SharedEvent {
     fn as_any(&self) -> &dyn Any {
-        self.event.as_any()
+        self.event.as_ref().as_any()
     }
 }
 

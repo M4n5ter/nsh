@@ -7970,6 +7970,13 @@ mod views {
         );
     }
 
+    #[component]
+    fn ForwardedCounter(_props: (), cx: Scope<CounterEvent>) -> impl IntoElement {
+        view()
+            .on_press(cx.forward(CounterEvent::Tap(7)))
+            .child(text("forwarded"))
+    }
+
     /// Two listeners of one event on one element, and of a nested
     /// component's events, each noting itself.
     #[component]
@@ -7983,6 +7990,13 @@ mod views {
                 Counter::element(CounterProps::default())
                     .on_event(move |_: &CounterEvent| note('c'))
                     .on_event(move |_: &CounterEvent| note('d')),
+            )
+            .child(
+                ForwardedCounter::element(()).on_event(move |event: &CounterEvent| {
+                    let CounterEvent::Tap(value) = event;
+                    assert_eq!(*value, 7);
+                    note('e');
+                }),
             )
             .child(text(move || format!("log {}", log.get())))
     }
@@ -7998,6 +8012,9 @@ mod views {
         assert_eq!(texts(&c.commit().unwrap()), ["log ab"]);
         assert!(c.component_event(counter, EventKind::Press, &EventPayload::None));
         assert!(texts(&c.commit().unwrap()).contains(&"log abcd".to_owned()));
+        let forwarded = native_parent(&c, text_node(&batch, "forwarded")).unwrap();
+        assert!(c.component_event(forwarded, EventKind::Press, &EventPayload::None));
+        assert!(texts(&c.commit().unwrap()).contains(&"log abcde".to_owned()));
     }
 
     /// A region made again with what it read: its pressable text is kept
