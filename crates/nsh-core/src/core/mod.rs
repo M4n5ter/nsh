@@ -1634,7 +1634,11 @@ impl<M: TextEngine> Core<M> {
         }
         let flipped = node.rtl != rtl;
         node.rtl = rtl;
-        let view_changed = node.view_style != view;
+        let display_changed = node.layout.is_some_and(|id| {
+            (self.layout.style(id).expect("taffy style").display == taffy::Display::None)
+                != (layout.display == taffy::Display::None)
+        });
+        let view_changed = node.view_style != view || display_changed;
         // A span's background is part of its block's text.
         let span_background_changed = node.inline
             && node.kind == Kind::Text
@@ -2985,7 +2989,15 @@ impl<M: TextEngine> Core<M> {
         let kind = node.kind;
         // A new native view already has the default style and no listeners.
         let mut flags = 0;
-        if node.view_style != ViewStyle::default() || node.elevation != Points::ZERO {
+        if node.view_style != ViewStyle::default()
+            || node.elevation != Points::ZERO
+            || self
+                .layout
+                .style(node.layout.expect("native layout"))
+                .expect("taffy style")
+                .display
+                == taffy::Display::None
+        {
             flags |= dirty::VIEW;
         }
         if !node.events.is_empty() {

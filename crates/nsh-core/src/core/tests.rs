@@ -2819,6 +2819,63 @@ fn classes_style_views_and_inline_styles_win() {
     assert!(c.commit().is_none());
 }
 
+/// Display toggles must update native visibility even when the empty
+/// view's layout frame stays unchanged. Visibility remains independently set.
+#[test]
+fn display_none_reaches_native_views_without_a_frame_change() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            style_op(
+                2,
+                &[
+                    ("width", StyleValue::Number(0.0)),
+                    ("height", StyleValue::Number(0.0)),
+                    ("display", StyleValue::Str("none")),
+                ],
+            ),
+        ],
+    );
+    // Flush while detached: mounting later must restore the effective
+    // native style even after the original dirty flags were consumed.
+    let _ = c.commit();
+    c.apply(Op::Insert {
+        parent: ROOT_ID,
+        child: 2,
+        before: None,
+    })
+    .unwrap();
+    let first = c.commit().unwrap();
+    assert_eq!(frame_of(&first, 2).unwrap().size, size_pt(0.0, 0.0));
+    assert!(view_style_of(&first, 2).unwrap().hidden);
+    for (display, visibility, hidden) in [
+        ("flex", "visible", false),
+        ("none", "visible", true),
+        ("none", "hidden", true),
+        ("flex", "hidden", true),
+        ("flex", "visible", false),
+    ] {
+        c.apply(style_op(
+            2,
+            &[
+                ("width", StyleValue::Number(0.0)),
+                ("height", StyleValue::Number(0.0)),
+                ("display", StyleValue::Str(display)),
+                ("visibility", StyleValue::Str(visibility)),
+            ],
+        ))
+        .unwrap();
+        let batch = c.commit().expect("native visibility update");
+        assert_eq!(view_style_of(&batch, 2).unwrap().hidden, hidden);
+        assert!(frame_of(&batch, 2).is_none(), "{display}/{visibility}");
+    }
+}
+
 #[test]
 fn important_classes_win_over_inline_styles() {
     let mut c = core();

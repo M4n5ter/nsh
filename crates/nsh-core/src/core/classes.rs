@@ -244,9 +244,15 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// The view style of `key` as platforms take it: fractional
-    /// translations resolved.
+    /// translations resolved and layout-hidden views excluded from input.
     pub(super) fn mounted_view_style(&self, key: Key) -> Box<ViewStyle> {
-        self.nodes[key as usize].mounted_view_style()
+        let node = &self.nodes[key as usize];
+        let mut style = node.mounted_view_style();
+        if let Some(layout) = node.layout {
+            style.hidden |=
+                self.layout.style(layout).expect("taffy style").display == taffy::Display::None;
+        }
+        style
     }
 
     /// Sets the inline style of `key`'s `part` (`None`: removes it).
