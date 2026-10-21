@@ -658,11 +658,9 @@ impl Surface {
     }
 
     fn remember_focus(&mut self, id: NodeId) {
-        self.focus_history.retain(|old| *old != id);
+        self.focus_history
+            .retain(|old| *old != id && self.nodes.get(*old as usize).is_some_and(Option::is_some));
         self.focus_history.push(id);
-        if self.focus_history.len() > 32 {
-            self.focus_history.remove(0);
-        }
     }
 
     pub(crate) fn input_value(&mut self, id: NodeId, text: String, count: u32) {
