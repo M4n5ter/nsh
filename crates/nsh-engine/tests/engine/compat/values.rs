@@ -261,6 +261,7 @@ impl Mounted {
                 out.put("resizeMode", resize.js_name().into());
                 if let Some(s) = options.placeholder {
                     out.put("defaultSource", s.uri.to_string());
+                    out.put("placeholder", s.uri.to_string());
                 }
                 out.put("blurRadius", num(options.blur_radius));
                 if let Some(v) = options.fade_ms {
@@ -390,6 +391,15 @@ impl Mounted {
                 if let Some(v) = web_source(&w.source) {
                     out.put("source", v);
                 }
+                if let Some(v) = &w.src {
+                    out.put("src", v.to_string());
+                }
+                if let WebSource::Html { html, .. } = &w.source {
+                    out.put("html", html.to_string());
+                }
+                if let Some(v) = &w.base_url {
+                    out.put("baseUrl", v.to_string());
+                }
                 if let Some(v) = &w.injected_js {
                     out.put("injectedJavaScript", v.to_string());
                 }
@@ -413,6 +423,7 @@ impl Mounted {
                 };
                 if let Some(s) = &v.source {
                     out.put("source", s.to_string());
+                    out.put("src", s.to_string());
                 }
                 out.put("paused", v.paused.to_string());
                 out.put("muted", v.muted.to_string());
@@ -1063,6 +1074,74 @@ fn values_are_written_as_apps_write_them() {
     assert_eq!(styles["shadowOffset"], "width=0 height=-3");
     assert_eq!(styles["transformOrigin"], "50% 50% 0");
     assert_eq!(view.props()["accessibilityState"], "{}");
+}
+
+/// New media keys coexist with the frozen fixture vocabulary.
+#[test]
+fn media_props_keep_frozen_keys() {
+    let image = Mounted {
+        kind: Some(ViewKind::Image),
+        image: Some((
+            None,
+            ResizeMode::default(),
+            ImageOptions {
+                placeholder: Some(ImageSource {
+                    uri: "asset:/placeholder.png".into(),
+                    size: None,
+                    scales: Default::default(),
+                }),
+                ..Default::default()
+            },
+        )),
+        ..Default::default()
+    };
+    let props = image.props();
+    assert_eq!(props["placeholder"], "asset:/placeholder.png");
+    assert_eq!(props["defaultSource"], props["placeholder"]);
+
+    let video = Mounted {
+        kind: Some(ViewKind::Video),
+        native: Some(NativeProps::Video(Box::new(VideoProps {
+            source: Some("asset:/video.mp4".into()),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let props = video.props();
+    assert_eq!(props["src"], "asset:/video.mp4");
+    assert_eq!(props["source"], props["src"]);
+
+    let mut web = Mounted {
+        kind: Some(ViewKind::WebView),
+        native: Some(NativeProps::WebView(Box::new(WebProps {
+            source: WebSource::Html {
+                html: "<p>page</p>".into(),
+                base_url: Some("https://example.com/".into()),
+            },
+            src: Some("https://example.com/fallback".into()),
+            base_url: Some("https://example.com/".into()),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let props = web.props();
+    assert_eq!(props["html"], "<p>page</p>");
+    assert_eq!(props["baseUrl"], "https://example.com/");
+    assert_eq!(props["src"], "https://example.com/fallback");
+    assert_eq!(
+        props["source"],
+        "html=<p>page</p> baseUrl=https://example.com/"
+    );
+    web.native = Some(NativeProps::WebView(Box::new(WebProps {
+        source: WebSource::Uri("https://example.com/fallback".into()),
+        src: Some("https://example.com/fallback".into()),
+        base_url: Some("https://example.com/".into()),
+        ..Default::default()
+    })));
+    let props = web.props();
+    assert_eq!(props["source"], props["src"]);
+    assert!(!props.contains_key("html"));
+    assert_eq!(props["baseUrl"], "https://example.com/");
 }
 
 /// Keys added after the ones above, read from what the platform is told

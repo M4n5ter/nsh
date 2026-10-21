@@ -59,10 +59,10 @@ export declare function spawn(command: string, args?: (string)[] | null, options
 /** Asks the host to exit (capabilities.process.exit); never exits the host process directly. */
 export declare function exit(code?: number | null): void;
 
-/** The native operating system name. */
+/** The native operating system's name, as Rust's `std::env::consts::OS` and gpui-shell's say it: `"macos"`, `"windows"`, `"linux"`, `"ios"`, `"android"` (not Node's `"darwin"` / `"win32"`). */
 export declare const platform: string;
 
-/** The native CPU architecture name. */
+/** The native CPU architecture's name, as Rust's `std::env::consts::ARCH` and gpui-shell's say it: `"aarch64"`, `"x86_64"` (not Node's `"arm64"` / `"x64"`). */
 export declare const arch: string;
 
 declare const defaultExport: {
@@ -76,9 +76,9 @@ declare const defaultExport: {
   readonly env: Record<string, string>;
   /** The app's own data directory, `null` when the host has none. */
   readonly dataDir: string | null;
-  /** The native operating system name. */
+  /** The native operating system's name, as Rust's `std::env::consts::OS` and gpui-shell's say it: `"macos"`, `"windows"`, `"linux"`, `"ios"`, `"android"` (not Node's `"darwin"` / `"win32"`). */
   readonly platform: string;
-  /** The native CPU architecture name. */
+  /** The native CPU architecture's name, as Rust's `std::env::consts::ARCH` and gpui-shell's say it: `"aarch64"`, `"x86_64"` (not Node's `"arm64"` / `"x64"`). */
   readonly arch: string;
 } & { nextTick: typeof nextTick };
 export default defaultExport;

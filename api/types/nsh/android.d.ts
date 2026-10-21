@@ -2,16 +2,18 @@
 
 /** The back button's listeners. */
 export interface BackListeners {
-  /** `listener` returns true when it handled the press; the most recently
-   * added listener runs first, after modals and before stacks. Without a
-   * listener that handles it, the top stack pops, else the app exits. */
-  addEventListener(event: "hardwareBackPress", listener: () => boolean | void): { remove(): void };
+  /** Listens to the back button: `listener` returns true when it handled
+   * the press; the most recently added listener runs first, after modals
+   * and before stacks. Without a listener that handles it, the top stack
+   * pops, else the app exits. The returned function stops listening; a
+   * listener added while a component renders stops with the component. */
+  onBackPress(listener: () => boolean | void): () => void;
 }
 
 /** How long a toast shows. */
 export type ToastDuration = "short" | "long";
 
-/** The back button, after modals and stacks had their turn. */
+/** The Android back button: its listeners run after modals and before stacks. */
 export interface BackHandlerModule {
   /** Leaves the app. */
   exitApp(): void;
@@ -29,6 +31,9 @@ export declare const Toast: ToastModule;
 /** True on Android. */
 export declare const isAvailable: boolean;
 
-/** The back button, after modals and stacks had their turn. */
+/**
+ * The Android back button: its listeners run after modals and before
+ * stacks.
+ */
 export declare const BackHandler: BackHandlerModule & BackListeners;
 

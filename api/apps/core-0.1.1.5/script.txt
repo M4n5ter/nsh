@@ -320,3 +320,10 @@ covers [props] margin
 covers [events] onPosition
 covers [events] onPressOutside
 covers [events] onCancel
+
+# The terminal fork retains captured input action identity.
+tap id:case-core-input-action
+expect Action: pending
+tap id:captured-action
+expect Action: original:7:true
+covers [nsh] inputAction

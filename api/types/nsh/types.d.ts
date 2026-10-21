@@ -73,9 +73,9 @@ export interface TextProps extends CommonProps, TextHostProps {
 
 /** An image asset (`import logo from "./logo.png"`), sized in points. */
 export interface ImageAsset {
-  uri: string;
-  width: number;
-  height: number;
+  url: string;
+  /** Its size in points. */
+  size: Size;
   /** The pixel densities it ships in, 1 being the imported file:
    * `[1, 2, 3]` when `logo@2x.png` and `logo@3x.png` sit next to
    * `logo.png`. The image loads the one for the screen's pixel ratio.
@@ -123,7 +123,7 @@ export interface OverlayProps extends CommonProps, OverlayHostProps {
  * keyboard focus eligibility, tooltip, layout events and the ref (`ref.command(name, args)`). */
 export type ComponentHostProps = Pick<ViewProps, "class" | "classList" | "style" | "activeStyle" | "hoverStyle" | "focusStyle" | "disabledStyle" | "testID" | "focusable" | "tooltip" | "onLayout" | "ref">;
 
-/** An operating system (`Platform.OS`). */
+/** An operating system (`platform.os`). */
 export type OS = "ios" | "android" | "macos" | "windows" | "linux" | "web";
 
 export declare namespace JSX {
@@ -257,8 +257,6 @@ export interface ViewStyle extends LayoutStyle {
   boxShadow?: string;
   /** CSS gradients drawn over the background color: `linear-gradient(...)`, `radial-gradient(...)`, `conic-gradient(...)`, several separated by commas. */
   backgroundImage?: string;
-  /** React Native's name of `backgroundImage`. */
-  experimental_backgroundImage?: string;
   /** CSS filters of the view and its content: `brightness()`, `contrast()`, `grayscale()`, `hue-rotate()`, `invert()`, `saturate()`, `sepia()`, `opacity()`, `blur()`, `drop-shadow()`. */
   filter?: string;
   /** CSS filters of what is behind the view (`blur(10px)`). */
@@ -667,11 +665,11 @@ export interface TextHostProps {
 /** The props of `<Image>`. */
 export interface ImageHostProps {
   /** A URL, `asset:/path`, or an imported asset. */
-  src?: string | ImageAsset | { uri: string };
+  src?: string | ImageAsset;
   /** How an image (or a video) fits its box. */
   resizeMode?: ResizeMode;
   /** Shown until `src` has loaded (best a local asset). */
-  defaultSource?: string | ImageAsset | { uri: string };
+  placeholder?: string | ImageAsset;
   /** Blurs the image by this radius in points (decoded once, off the main thread). */
   blurRadius?: number;
   /** How long a loaded image fades in, in milliseconds (default: the platform's, 0 on iOS and 300 on Android, like React Native). */
@@ -891,8 +889,12 @@ export interface AndroidDialogHostProps {
 
 /** The props of web views. */
 export interface WebViewHostProps {
-  /** A URL, `{ uri }`, or (web views) `{ html, baseUrl }`. */
-  source?: string | { uri: string } | { html: string; baseUrl?: string };
+  /** The URL it loads. */
+  src?: string;
+  /** The page to show instead of loading `src`. */
+  html?: string;
+  /** The URL the relative links of `html` resolve against. */
+  baseUrl?: string;
   /** Runs after each page loads. */
   injectedJavaScript?: string;
   /** Runs before each page's own scripts. */
@@ -906,7 +908,7 @@ export interface WebViewHostProps {
   onLoadStart?: (e: WebViewNavigation) => void;
   onLoad?: (e: WebViewNavigation) => void;
   onError?: (e: { message: string }) => void;
-  /** The page called `window.ReactNativeWebView.postMessage(data)`. */
+  /** The page called `window.nsh.postMessage(data)`. */
   onMessage?: (e: { data: string }) => void;
   onNavigationStateChange?: (e: WebViewNavigation) => void;
 }
@@ -927,8 +929,8 @@ export interface DesktopWebViewHostProps {
 export interface VideoHostProps {
   /** How an image (or a video) fits its box. */
   resizeMode?: ResizeMode;
-  /** A URL, `{ uri }`, or (web views) `{ html, baseUrl }`. */
-  source?: string | { uri: string } | { html: string; baseUrl?: string };
+  /** The URL it loads. */
+  src?: string;
   /** Playback is paused. */
   paused?: boolean;
   /** No sound. */
@@ -945,7 +947,7 @@ export interface VideoHostProps {
   progressUpdateInterval?: number;
   onLoadStart?: () => void;
   onProgress?: (e: { currentTime: number; duration: number }) => void;
-  onLoad?: (e: { duration: number; width: number; height: number }) => void;
+  onLoad?: (e: { duration: number; size: Size }) => void;
   onError?: (e: { message: string }) => void;
   onEnd?: () => void;
   onBuffer?: (e: { isBuffering: boolean }) => void;

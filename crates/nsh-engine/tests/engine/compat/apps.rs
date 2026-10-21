@@ -614,6 +614,8 @@ pub(crate) fn run(code: String, script: &str, dir: &Path) -> Result<(), Failure>
         }
         lines.next();
     }
+    // Later keyboard and scale updates must keep the window size set at startup.
+    environment.window = viewport;
     values::animated(None);
     let (bundle, declares) = bundle(code, dir)?;
     // Declared before the run, so dropped after its engine, which may

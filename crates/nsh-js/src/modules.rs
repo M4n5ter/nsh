@@ -1474,7 +1474,7 @@ mod tests {
         .unwrap();
         host.eval_source(r#"
             import { Clipboard, extra } from 'nsh/clipboard';
-            if (typeof Clipboard.getString !== 'function' || extra !== 42) throw Error('runtime export hidden');
+            if (typeof Clipboard.readText !== 'function' || extra !== 42) throw Error('runtime export hidden');
         "#).unwrap();
 
         let mut registry = Registry::ui_set("process");

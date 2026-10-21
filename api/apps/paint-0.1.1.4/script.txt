@@ -106,7 +106,6 @@ style id:layers backgroundImage linear-gradient(180deg, #ff0000ff, #0000ffff), r
 style id:over-color backgroundColor #ffffffff
 style id:over-color backgroundImage linear-gradient(180deg, #00000000, #000000ff)
 style id:experimental backgroundImage linear-gradient(90deg, #ff0000ff, #0000ffff)
-style id:experimental experimental_backgroundImage linear-gradient(90deg, #ff0000ff, #0000ffff)
 style id:brightness filter brightness(1.5)
 style id:contrast filter contrast(2)
 style id:grayscale filter grayscale(1)
@@ -142,7 +141,6 @@ style id:blend-luminosity mixBlendMode luminosity
 style id:blend-plus-darker mixBlendMode plus-darker
 style id:blend-plus-lighter mixBlendMode plus-lighter
 covers [styles] backgroundImage
-covers [styles] experimental_backgroundImage
 covers [styles] filter
 covers [styles] backdropFilter
 covers [styles] mixBlendMode
@@ -527,3 +525,15 @@ tap id:disable
 style id:box opacity 1
 style id:box borderWidth 2
 covers [props] indeterminateStyle
+# paint-inline-align
+tap id:case-paint-inline-align
+# The headless engine's 16.8 pt line has its baseline at the bottom and a
+# 7 pt x height: on the baseline the view stands on the line's bottom, at
+# the text's top at the line's top, in the middle 9.5 pt above the bottom.
+frame id:icon-default 7.7 4.8 4 12
+frame id:icon-baseline 7.7 4.8 4 12
+frame id:icon-top 7.7 0 4 12
+frame id:icon-bottom 7.7 4.8 4 12
+frame id:icon-middle 7.7 7.3 4 12
+frame id:icon-class 7.7 0 4 12
+covers [styles] verticalAlign

@@ -5,7 +5,6 @@ import type { DesktopWebViewHostProps, IOSWebViewHostProps, ViewProps, WebViewHo
 export type { WebViewNavigation };
 
 export interface WebViewProps extends Omit<ViewProps, "children" | "ios" | "desktop">, WebViewHostProps {
-  source: string | { uri: string } | { html: string; baseUrl?: string };
   ios?: IOSWebViewHostProps;
   desktop?: DesktopWebViewHostProps;
 }

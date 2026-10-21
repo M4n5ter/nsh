@@ -3,32 +3,15 @@
 import type { Accessor } from "./index";
 import type { YNode } from "./types";
 
-export type AccessibilityChangeEvent = "screenReaderChanged" | "reduceMotionChanged";
+/** The screen reader reads `message` (a VoiceOver announcement, TalkBack). */
+export declare function announce(message: string): void;
 
-/** The settings, at once, and their changes. */
-export interface AccessibilitySettings {
-  isScreenReaderEnabled(): Promise<boolean>;
-  isReduceMotionEnabled(): Promise<boolean>;
-  addEventListener(event: AccessibilityChangeEvent, listener: (enabled: boolean) => void): { remove(): void };
-}
-
-/** Screen reader and motion settings. */
-export interface AccessibilityInfoModule {
-  /** The screen reader reads `message` (a VoiceOver announcement, TalkBack). */
-  announceForAccessibility(message: string): void;
-  /** Moves the screen reader's focus to `node` (a `ref`). */
-  setAccessibilityFocus(node: YNode): void;
-}
+/** Moves the screen reader's focus to `node` (a `ref`). */
+export declare function setAccessibilityFocus(node: YNode): void;
 
 /** Whether the user asked for less motion (reactive; also `motion-reduce:`). */
 export declare const reduceMotion: Accessor<boolean>;
 
 /** Whether a screen reader (VoiceOver, TalkBack) runs (reactive). */
 export declare const screenReaderEnabled: Accessor<boolean>;
-
-/**
- * Screen reader and motion settings. `screenReaderEnabled()` and
- * `reduceMotion()` are the reactive forms.
- */
-export declare const AccessibilityInfo: AccessibilityInfoModule & AccessibilitySettings;
 

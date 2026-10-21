@@ -146,19 +146,15 @@ split function
 untracked function
 
 [nsh/accessibility]
-AccessibilityInfo object
-AccessibilityInfo.addEventListener function
-AccessibilityInfo.announceForAccessibility function
-AccessibilityInfo.isReduceMotionEnabled function
-AccessibilityInfo.isScreenReaderEnabled function
-AccessibilityInfo.setAccessibilityFocus function
+announce function
 reduceMotion function
 screenReaderEnabled function
+setAccessibilityFocus function
 
 [nsh/android]
 BackHandler object
-BackHandler.addEventListener function
 BackHandler.exitApp function
+BackHandler.onBackPress function
 Toast object
 Toast.show function
 isAvailable boolean
@@ -363,13 +359,13 @@ Path2D#.roundRect function
 
 [nsh/clipboard]
 Clipboard object
-Clipboard.getFiles function
-Clipboard.getImage function
-Clipboard.getString function
 Clipboard.hasImage function
-Clipboard.hasString function
-Clipboard.setImage function
-Clipboard.setString function
+Clipboard.hasText function
+Clipboard.readFiles function
+Clipboard.readImage function
+Clipboard.readText function
+Clipboard.writeImage function
+Clipboard.writeText function
 
 [nsh/desktop]
 Menu object
@@ -389,33 +385,18 @@ isAvailable boolean
 titleBar function
 
 [nsh/device]
-I18nManager object
-I18nManager.allowRTL function
-I18nManager.doLeftAndRightSwapInRTL boolean
-I18nManager.forceRTL function
-I18nManager.getConstants function
-I18nManager.isRTL accessor
-PixelRatio object
-PixelRatio.get function
-PixelRatio.getFontScale function
-PixelRatio.getPixelSizeForLayoutSize function
-PixelRatio.roundToNearestPixel function
-Platform object
-Platform.OS string
-Platform.Version string
-Platform.constants object
-Platform.constants.interfaceIdiom string
-Platform.constants.osVersion string
-Platform.isDesktop boolean
-Platform.isMacCatalyst boolean
-Platform.isPad boolean
-Platform.isTV boolean
-Platform.isTerminal boolean
-Platform.renderer string
-Platform.select function
 colorScheme function
 fontScale function
 locale function
+pixelRatio function
+platform object
+platform.catalyst boolean
+platform.idiom string
+platform.isTerminal boolean
+platform.os string
+platform.renderer string
+platform.select function
+platform.version string
 setColorScheme function
 windowSize function
 
@@ -448,8 +429,8 @@ nativeModule function
 [nsh/storage]
 Storage object
 Storage.clear function
-Storage.getAllKeys function
 Storage.getItem function
+Storage.keys function
 Storage.removeItem function
 Storage.setItem function
 
