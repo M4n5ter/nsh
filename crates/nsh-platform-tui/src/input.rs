@@ -2786,6 +2786,82 @@ mod tests {
     }
 
     #[test]
+    fn a_new_popup_prioritizes_its_autofocus_and_restores_the_new_background_editor() {
+        use nsh_core::{Command, InputConfig, MountBatch, MountItem, ViewProps};
+
+        for existing_opener in [false, true] {
+            let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+            let mut items = create(4, ViewKind::View, ROOT_ID, 32.0);
+            items.push(MountItem::Events {
+                id: 4,
+                events: mask(&[EventKind::Press]),
+            });
+            if existing_opener {
+                surface.apply(MountBatch {
+                    items: std::mem::take(&mut items),
+                });
+                assert_eq!(surface.focused(), Some(4));
+            }
+            items.extend(create(2, ViewKind::Input, ROOT_ID, 0.0));
+            items.push(MountItem::Input {
+                id: 2,
+                config: Box::new(InputConfig {
+                    auto_focus: true,
+                    ..Default::default()
+                }),
+            });
+            items.push(MountItem::InputValue {
+                id: 2,
+                text: "abcdef".into(),
+                count: 0,
+            });
+            items.push(MountItem::Command {
+                id: 2,
+                command: Command::SetSelection { start: 3, end: 3 },
+            });
+            items.extend(create(6, ViewKind::View, ROOT_ID, 96.0));
+            items.push(MountItem::ViewProps {
+                id: 6,
+                props: Box::new(ViewProps {
+                    focus_return_parent: Some(ROOT_ID),
+                    ..Default::default()
+                }),
+            });
+            items.extend(create(10, ViewKind::View, 6, 0.0));
+            items.push(MountItem::Events {
+                id: 10,
+                events: mask(&[EventKind::Press]),
+            });
+            items.extend(create(8, ViewKind::Input, 6, 32.0));
+            items.push(MountItem::Input {
+                id: 8,
+                config: Box::new(InputConfig {
+                    auto_focus: true,
+                    ..Default::default()
+                }),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(8));
+            surface.handle_event(Event::Paste("search".into()));
+            assert_eq!(surface.node(8).unwrap().editor.text(), "search");
+            surface.apply(MountBatch::default());
+            assert_eq!(surface.focused(), Some(8));
+            surface.apply(MountBatch {
+                items: [8, 10, 6]
+                    .into_iter()
+                    .map(|id| MountItem::Delete { id })
+                    .collect(),
+            });
+            assert_eq!(surface.focused(), Some(if existing_opener { 4 } else { 2 }));
+            assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
+            if !existing_opener {
+                surface.handle_event(Event::Paste("Z".into()));
+                assert_eq!(surface.node(2).unwrap().editor.text(), "abcZdef");
+            }
+        }
+    }
+
+    #[test]
     fn popup_buttons_take_keyboard_focus_but_outside_pointer_keeps_its_new_owner() {
         use nsh_core::{MountBatch, MountItem, ViewProps};
         let mut surface = form();
