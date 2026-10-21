@@ -33,9 +33,10 @@
 //! never overwritten. Programmatic changes (JS values) report nothing but
 //! the selection. Lengths and offsets JS sees are UTF-16 units.
 //!
-//! Focus is one field per surface. The window's (and the embedding app's)
+//! Focus is one view per surface. The window's (and the embedding app's)
 //! focus is followed apart from it: a surface that is not focused keeps
-//! its focused field (with no caret) and gets it back when focused again.
+//! its focused view (an input's caret is hidden) and gets it back when
+//! focused again.
 //!
 //! Return follows the config's `submit()`: a single line submits; a
 //! multiline input whose return submits does so on a plain return (or
@@ -577,7 +578,7 @@ fn xalign(config: &InputConfig) -> f32 {
 
 // --- Focus -------------------------------------------------------------------
 
-/// A surface's focused field, and whether the surface has the window's
+/// A surface's focused view, and whether the surface has the window's
 /// focus.
 #[derive(Default)]
 struct Focus {
@@ -633,11 +634,11 @@ pub(crate) fn set_accessible_value(surface: &Rc<Surface>, view: &NshView, text: 
     true
 }
 
-/// The field that has the keyboard focus.
-pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
+/// The view that has the surface's keyboard focus.
+pub(crate) fn focused_view(surface: &Surface) -> Option<NshView> {
     let view = FOCUS.with(|f| f.borrow().get(&surface.key()).and_then(|f| f.view.clone()))?;
-    // A field the app removed loses the focus quietly (its node is gone).
-    if view.attached() && view.state().input.is_some() {
+    // A view the app removed loses the focus quietly (its node is gone).
+    if view.attached() {
         return Some(view);
     }
     if let Some(input) = input_of(&view) {
@@ -652,14 +653,24 @@ pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
     None
 }
 
+/// The focused input, if the surface's keyboard focus belongs to one.
+/// Other focus owners must not register an input handler or accept IME text.
+pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
+    focused_view(surface).filter(|view| input_of(view).is_some())
+}
+
 fn window_active(surface: &Surface) -> bool {
     FOCUS.with(|f| f.borrow().get(&surface.key()).is_none_or(|f| !f.inactive))
 }
 
 /// Moves the surface's focus to `view` (or nowhere), reporting the blur of
-/// the field that had it, then the focus of the new one.
+/// the view that had it, then the focus of the new one. Callers validate
+/// eligibility and navigation scope before entering this transition.
 fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
-    let old = focused(surface);
+    if view.is_some_and(|view| !view.attached()) {
+        return;
+    }
+    let old = focused_view(surface);
     if old.as_ref() == view {
         return;
     }
@@ -678,17 +689,17 @@ fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
         send(surface, old, EventKind::Blur, || EventPayload::None);
         old.changed();
     }
-    if let Some(view) = view
-        && let Some(input) = input_of(view)
-    {
+    if let Some(view) = view {
         FOCUS.with(|f| f.borrow_mut().entry(surface.key()).or_default().view = Some(view.clone()));
-        input.focused.set(true);
-        input.active.set(window_active(surface));
-        input.wake_caret();
-        input.reveal();
+        if let Some(input) = input_of(view) {
+            input.focused.set(true);
+            input.active.set(window_active(surface));
+            input.wake_caret();
+            input.reveal();
+        }
         crate::input::set_state(surface, view, state::FOCUSED, true);
         send(surface, view, EventKind::Focus, || EventPayload::None);
-        // The scroll views around bring the field into view.
+        // The scroll views around bring the focused view into sight.
         crate::scroll::reveal(surface, view);
         crate::access::focus_changed(surface, view);
         view.changed();
@@ -1370,20 +1381,30 @@ fn surface_of(view: &NshView) -> Option<Rc<Surface>> {
 /// `focus()`.
 pub(crate) fn focus(view: &NshView) {
     if let Some(surface) = surface_of(view) {
-        set_focus(&surface, Some(view));
+        focus_view(&surface, view);
     }
+}
+
+/// Focuses a caller-eligible view in its supplied surface.
+pub(crate) fn focus_view(surface: &Rc<Surface>, view: &NshView) {
+    set_focus(surface, Some(view));
 }
 
 /// `blur()`.
 pub(crate) fn blur(view: &NshView) {
-    if let Some(surface) = surface_of(view)
-        && focused(&surface).as_ref() == Some(view)
-    {
-        set_focus(&surface, None);
+    if let Some(surface) = surface_of(view) {
+        blur_view(&surface, view);
     }
 }
 
-/// Blurs whatever field has the focus.
+/// Blurs `view` only while it owns its supplied surface's focus.
+pub(crate) fn blur_view(surface: &Rc<Surface>, view: &NshView) {
+    if focused_view(surface).as_ref() == Some(view) {
+        set_focus(surface, None);
+    }
+}
+
+/// Blurs whatever view has the focus.
 pub(crate) fn blur_all(surface: &Rc<Surface>) {
     set_focus(surface, None);
 }
@@ -1394,12 +1415,17 @@ pub(crate) fn tab_to(view: &NshView) {
     let Some(surface) = surface_of(view) else {
         return;
     };
-    set_focus(&surface, Some(view));
+    tab_to_view(&surface, view);
+}
+
+/// Focuses a caller-eligible Tab stop, selecting text only for an input.
+pub(crate) fn tab_to_view(surface: &Rc<Surface>, view: &NshView) {
+    set_focus(surface, Some(view));
     if let Some(input) = input_of(view)
         && input.focused.get()
     {
         input.model.borrow_mut().select_all();
-        after_edit(&surface, view, &input, false);
+        after_edit(surface, view, &input, false);
     }
 }
 
@@ -1932,6 +1958,7 @@ mod blink {
                 .iter()
                 .filter(|(key, f)| !f.inactive && Surface::by_key(**key).is_some())
                 .filter_map(|(_, f)| f.view.clone())
+                .filter(|view| view.attached() && input_of(view).is_some())
                 .collect()
         })
     }
