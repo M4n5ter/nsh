@@ -168,10 +168,9 @@ fn is_shown(view: &NshView) -> bool {
 fn drop_focus(surface: &Surface, view: &NshView) {
     if let Some(field) = crate::text_input::focused_view(surface)
         && is_ancestor(view, &field)
+        && let Some(surface) = Surface::by_key(surface.key())
     {
-        if let Some(surface) = Surface::by_key(surface.key()) {
-            crate::text_input::blur_view(&surface, &field);
-        }
+        crate::text_input::blur_view(&surface, &field);
     }
     if let Some(native) = crate::native::focused_component(surface).and_then(|id| surface.view(id))
         && is_ancestor(view, &native)
