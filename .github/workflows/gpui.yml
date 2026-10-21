@@ -12,11 +12,13 @@ on:
     branches: [main]
     paths:
       - "crates/gpui/**"
+      - "third-party/gpui-wgpu/**"
       - "examples/embed-gpui/**"
       - ".github/workflows/gpui.yml"
   pull_request:
     paths:
       - "crates/gpui/**"
+      - "third-party/gpui-wgpu/**"
       - "examples/embed-gpui/**"
       - ".github/workflows/gpui.yml"
   schedule:
