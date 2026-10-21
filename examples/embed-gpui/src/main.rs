@@ -641,8 +641,8 @@ fn main() {
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
         cx.set_global(layers::Layers(true));
-        // nsh's theme format is gpui-kit's: a theme file with a name per
-        // entry loads into GPUI Kit's registry as it is.
+        // The host's GPUI Kit theme loads into its registry directly;
+        // theme::nsh_theme maps its active values to NSH's shadcn tokens.
         if let Err(err) = gpui_kit::component::ThemeRegistry::global_mut(cx)
             .load_themes_from_str(include_str!("../themes/violet.json"))
         {

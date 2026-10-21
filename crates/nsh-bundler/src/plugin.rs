@@ -57,7 +57,7 @@ pub(crate) struct ThemeSetup {
     pub(crate) json: Option<String>,
     /// Parsed, to check classes at build time.
     pub(crate) theme: nsh_core::tailwind::Theme,
-    /// The theme of the Rust components (a gpui-kit theme file), checked.
+    /// The app's design tokens (a shadcn `cssVars` theme file), checked.
     pub(crate) ui: Option<String>,
     /// `"appearance"`: `"light"` or `"dark"` (`None`: the system's).
     pub(crate) appearance: Option<&'static str>,

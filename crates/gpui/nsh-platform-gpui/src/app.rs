@@ -178,7 +178,7 @@ impl Default for AppOptions {
 ///   focus into it (and through its text fields), and on out of it after
 ///   the last one. A press on it focuses it.
 /// - [`AppView::set_theme`] / [`AppView::set_theme_json`] give the app the
-///   embedding app's theme (gpui-kit's theme format) and
+///   embedding app's theme (shadcn's `cssVars` theme format) and
 ///   [`AppView::set_appearance`] its light or dark mode.
 /// - What the app tells the embedding app goes through the native
 ///   components the latter registers ([`AppView::register_component`]):
