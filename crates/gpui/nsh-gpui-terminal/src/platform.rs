@@ -46,6 +46,7 @@ struct Callbacks {
 /// This owns no terminal input or output. Keep the `ApplicationHandle` returned
 /// by `Application::run_embedded`, call [`Self::pump`] when woken, and send
 /// candidates to the host's sole writer. A candidate is not a presentation.
+#[non_exhaustive]
 pub struct TerminalPlatform {
     dispatcher: Arc<Dispatcher>,
     background: BackgroundExecutor,

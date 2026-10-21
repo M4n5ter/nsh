@@ -5,7 +5,7 @@
 # `target/` (`.cargo/config.toml`).
 [workspace]
 resolver = "3"
-members = ["nsh-platform-gpui", "nsh-gpui-host"]
+members = ["nsh-platform-gpui", "nsh-gpui-host", "nsh-gpui-terminal"]
 
 [workspace.package]
 version = "0.1.1"
@@ -53,6 +53,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # crates under GPUI's library names, as GPUI Kit apps use them.
 gpui = { package = "gpui-fast", version = "0.1.9", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gpui_platform = { package = "gpui-fast-platform", version = "0.1.9", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui_wgpu = { package = "gpui-fast-wgpu", version = "0.1.10", default-features = false, features = ["font-kit", "offscreen"] }
 # Script shots on Linux: the window read from the X server.
 raw-window-handle = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSView", "NSWindow", "NSResponder"] }

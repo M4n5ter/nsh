@@ -640,7 +640,7 @@ impl PlatformWindow for TerminalWindow {
         false
     }
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        None
+        self.0.borrow().renderer.gpu_specs()
     }
     fn update_ime_position(&self, _: Bounds<Pixels>) {}
 }
