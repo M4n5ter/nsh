@@ -366,8 +366,20 @@ mod tests {
         sixel_encode_into(&rgba, 2, 2, &opts, &mut output).unwrap();
         assert_eq!(output, original.as_bytes());
         let decoded = crate::SixelImage::decode(&output).unwrap();
-        assert_eq!((decoded.width, decoded.height), (2, 2));
-        assert_eq!(decoded.pixels, rgba);
+        // SIXEL bands have six rows; the original two rows retain their exact
+        // colours and the remaining rows stay transparent.
+        assert_eq!((decoded.width, decoded.height), (2, 6));
+        assert_eq!(
+            decoded.pixels,
+            [
+                255, 0, 0, 255, 0, 255, 0, 255,
+                0, 0, 255, 255, 255, 255, 255, 255,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ]
+        );
     }
 
     #[test]
