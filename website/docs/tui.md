@@ -210,8 +210,15 @@ Down, resolve `snapshot.press_at(column, row)` and keep that same `PressLease` f
 `Surface::handle_presented_mouse`. Before entering its callback, validate the lease's `binding()` with
 `LocalEngine::dispatch_bound_event_now`; `target()` identifies its native activation owner. Revoke the remaining
 admitted input from that presentation as soon as the first application callback enters. A stale lease rejects
-the press. Events with no ordinary press lease, including keyboard, wheel, selection and gesture input, continue
-through the host's exact-presentation input path.
+the press. Presses without a lease, keyboard, selection, gesture input and opaque callbacks keep the host's
+exact-presentation input path.
+
+Ordinary wheel input can use `snapshot.wheel_at(column, row)` and pass its `WheelLease` to
+`Surface::handle_presented_wheel(mouse, steps, &lease)`. This retains the original native scroll owner while its
+content or offset changes; a changed owner, ancestry, viewport, modal scope, geometry or scroll policy rejects
+it rather than retargeting the input. `Some(n)` reports consumed detents; `None` rejects the route. Scroll events
+report the owner's current offset. Ctrl+wheel zoom, immediate application callbacks and events without a wheel
+lease keep the exact-presentation path.
 
 `AppOptions::asset_base` resolves `asset:/` URIs from an asset directory or HTTP base.
 `AppOptions::limits` configures the VM limits; embedding defaults to `Limits::default()`, while the standalone

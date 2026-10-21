@@ -138,6 +138,20 @@ after `nsh test --trace` timings and item counts (`nsh trace` before it, in the 
   median ~5µs vs ~14µs in JS, commit ~15µs vs ~22µs. Scrolling a 1000-row `List` (avatar, two texts, a bound color)
   6000 pt: ~77µs vs ~150µs of JS per rebinding frame, commit ~205µs vs ~276µs.
 
+## Terminal backend
+
+Historical measurements from the terminal backend's Canvas measurement and
+geometry-cache changes (not replacements for the release baselines above):
+
+- Linux x86-64, debug, shared engine: the then-current `nsh trace
+  examples/counter --taps 1` emitted 49 initial and 8 update mount items
+  before and after the Canvas measurement hook. Commit samples were
+  394/247 µs before and 525/245 µs after. The current tracing command is
+  `nsh test --trace`; see [terminal verification](tui.md#verification).
+- In a 160×50 Kitty-protocol PTY, the workbench's Effects-to-deployment
+  interaction dropped from over 5 seconds to 195 ms after per-pass
+  geometry caching and identity-transform shortcuts.
+
 ## The performance monitor (`nsh_engine::perf`)
 
 `PerfMonitor` collects one surface's timings for an on-screen monitor (`--fps`; the macOS backend's `fps.rs` draws it)

@@ -373,7 +373,7 @@ runners remain console applications.
 | API | Purpose |
 |---|---|
 | `CellMetrics::new(Points, Points) -> Result<Self, String>`; `width()`, `height()`, `viewport(u16, u16)` | Validated point dimensions for terminal cells |
-| `TerminalTextEngine::new(CellMetrics)`; `Clone`, `Default`, `TextEngine` | Point measurement and terminal text runs; the engine owns its shared font catalog and is no longer `Copy` |
+| `TerminalTextEngine::new(CellMetrics)`; `Clone`, `Default`, `TextEngine` | Point measurement and terminal text runs; clones share the font catalog |
 | `AppOptions` | Trace, assets, ID/title, size, script, appearance, limits, metrics, component factories, `reduce_motion`, `data_dir` and `storage` |
 | `AppSource::{Rust(Root), Bundle(Box<Bundle>), DevServer(String)}` | Standalone source (`DevServer` requires `dev`) |
 | `AppView::new(AppOptions) -> Self` | Independent embeddable engine and surface |
@@ -402,8 +402,10 @@ runners remain console applications.
 | `Surface::input_context() -> Option<InputContext>` | Snapshot editing hints and generation; secure text is omitted |
 | `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
 | `Surface::handle_event(Event)`; `drain_events()` | Accept input and forward ordered `SurfaceEvent`s |
-| `Surface::input_snapshot() -> InputSnapshot` | Sample immutable native hit geometry and sealed ordinary press bindings |
+| `Surface::input_snapshot() -> InputSnapshot` | Sample immutable native hit geometry, sealed press bindings and scroll owners |
 | `InputSnapshot::press_at(u16, u16) -> Option<PressLease>` | Resolve a cell in the published presentation to an ordinary left press |
+| `InputSnapshot::wheel_at(u16, u16) -> Option<WheelLease>` | Resolve a cell to its original native scroll owner |
+| `Surface::handle_presented_wheel(MouseEvent, u16, &WheelLease) -> Option<u16>` | Validate that scroll owner and return the number of consumed detents, or `None` for a rejected route |
 | `Surface::handle_presented_mouse(MouseEvent, &PressLease) -> Option<bool>` | Validate and deliver Down, Drag or Up using the same original lease |
 | `PressLease::target() -> NodeId`; `binding() -> u64` | Identify the native activation owner and VM-local binding for engine validation |
 | `Surface::handle_wheel(MouseEvent, u16) -> u16` | Apply identical frame-local wheel detents to one hit-tested owner and report consumed detents |
@@ -469,9 +471,20 @@ resulting callback enters JS, the host must also use
 with the lease's binding. Revoke the presentation's remaining admitted
 inputs on the first application callback. A stale native or engine lease
 is rejected rather than retargeted. An absent lease uses the existing
-exact-presentation path, as do keyboard, wheel, selection, gestures and
-opaque callbacks. The snapshot owns geometry and binding data, not an
+exact-presentation path, as do keyboard, selection, gestures and opaque
+callbacks. The snapshot owns geometry and binding data, not an
 engine or mutable scene.
+
+For ordinary wheel input, resolve `InputSnapshot::wheel_at(column, row)`
+and pass its `WheelLease` to `Surface::handle_presented_wheel`. The lease
+keeps the original native scroll owner even if its content or offset changes.
+A changed view incarnation, ancestry, viewport, modal scope, geometry or
+scroll policy rejects the route; it never retargets to a newly hit nested
+scroll view. `None` rejects a stale or unsupported route, while `Some(n)`
+reports consumed detents. Queued scroll events report the owner's current
+offset, not a captured application callback. Ctrl+wheel zoom, immediate
+application callbacks and events without a wheel lease keep the host's
+exact-presentation path.
 
 `Surface::handle_wheel` accepts consecutive wheel detents
 with identical coordinates, direction and modifiers from one presented
@@ -483,21 +496,22 @@ target sequence before dispatch. Raw `Surface` hosts opt into service
 requests explicitly with `set_host_services_enabled`; clipboard reads and
 pastes are completed through the checked methods above.
 
-The shared core trait gains
-`TextEngine::measure_canvas(&self, &CanvasFont, &str) -> Option<f32>`, with
-a default `None` implementation and forwarding through `Rc`. The terminal
-engine returns the shaped advance from its per-surface catalog.
+`TextEngine::measure_canvas(&self, &CanvasFont, &str) -> Option<Points>`
+returns an optional Canvas line advance. Its default is `None`, which uses
+the regular text measurement path; `Rc` forwards the call. The terminal
+engine returns the shaped advance from its per-surface font catalog.
 
 ## Verification
 
-The additive Canvas measurement hook preserves the existing core mount
-stream. On Linux x86-64 in a debug build, `nsh trace examples/counter
---taps 1` emitted 49 initial and 8 update items before and after this work;
-commit samples were 394/247 µs before and 525/245 µs after. These are local
-samples rather than replacements for the release baselines in
-`performance.md`. In an actual 160×50 Kitty-protocol PTY, the workbench's
-Effects-to-deployment interaction dropped from over 5 seconds to 195 ms
-after per-pass geometry caching and identity-transform shortcuts.
+For shared engine changes, trace a counter update headlessly and compare
+mount items and timings with [performance](performance.md):
+
+```sh
+printf 'await app.press("+1");\n' | ./target/debug/nsh test examples/counter/App.tsx --trace
+```
+
+This checks the shared engine, not terminal drawing. Historical terminal
+measurements are recorded in [performance](performance.md#terminal-backend).
 
 The [operations workbench](../../examples/terminal-workbench/README.md)
 adds a three-pane, searchable service fleet with an inspector, canvas

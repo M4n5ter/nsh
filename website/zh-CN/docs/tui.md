@@ -185,8 +185,14 @@ view.render(area, frame.buffer_mut());
 `InputSnapshot`。左键按下时，通过 `snapshot.press_at(column, row)` 取得 `PressLease`，并在按下、拖动和松开
 整个过程中将同一份租约传给 `Surface::handle_presented_mouse`。进入回调前，还必须将租约的 `binding()` 交给
 `LocalEngine::dispatch_bound_event_now` 验证；`target()` 标识原生激活目标。首次进入应用回调时，撤销该呈现中
-剩余的已接纳输入。过期租约会拒绝这次点击。没有普通点击租约的事件，包括键盘、滚轮、选择和手势输入，继续
-使用宿主原有的精确呈现输入路径。
+剩余的已接纳输入。过期租约会拒绝这次点击。没有租约的点击、键盘、选择、手势输入以及不透明回调
+继续使用宿主原有的精确呈现输入路径。
+
+普通滚轮输入可以通过 `snapshot.wheel_at(column, row)` 取得 `WheelLease`，再传给
+`Surface::handle_presented_wheel(mouse, steps, &lease)`。内容或偏移变化时，租约仍指向原来的原生滚动视图；
+目标实例、祖先、视口、模态范围、几何或滚动策略变化时会拒绝该输入，而不会重新选取目标。
+`Some(n)` 表示已消费的滚轮刻度数，`None` 表示拒绝该路径。滚动事件报告目标当前的偏移。
+Ctrl+滚轮缩放、即时应用回调以及没有滚轮租约的事件仍使用精确呈现路径。
 
 `AppOptions::asset_base` 从资源目录或 HTTP 基地址解析 `asset:/` URI。`AppOptions::limits` 配置虚拟机限制；
 嵌入默认使用 `Limits::default()`，独立宿主使用 `Limits::standalone()`。`nsh run --target tui --limits` 让 TSX 入口
