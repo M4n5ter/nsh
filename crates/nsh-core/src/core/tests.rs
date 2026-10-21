@@ -10910,22 +10910,39 @@ mod views {
                 .collect()
         };
         let mut c = core();
-        c.mount_root(&Root::new::<Shortcuts>(|| ()));
-        let batch = c.commit().unwrap();
-        let host = root_host(&batch);
-        let table = tables(&batch);
-        let [ours] = table.last().expect("a table").as_slice() else {
-            panic!("{table:?}");
-        };
-        let ours = *ours;
-        assert!(ours >= crate::ui::keys::FIRST_ID);
-        // JS's table joins it: JS's first, then the views'.
+        // Apps bind their shortcuts before rendering their first component.
         let js = KeyBinding::new(
             1,
             Keystroke::parse_with("mod+j", true).unwrap(),
             When::Auto,
             false,
         );
+        apply(
+            &mut c,
+            vec![
+                Op::SetProp {
+                    id: ROOT_ID,
+                    prop: Prop::Keymap(std::sync::Arc::new(Keymap::new(vec![js]))),
+                },
+                Op::Listen {
+                    id: ROOT_ID,
+                    event: EventKind::KeyCommand,
+                    enabled: true,
+                },
+            ],
+        );
+        assert_eq!(tables(&c.commit().unwrap()), [vec![1]]);
+        c.mount_root(&Root::new::<Shortcuts>(|| ()));
+        let batch = c.commit().unwrap();
+        let host = root_host(&batch);
+        let table = tables(&batch);
+        let [js_id, ours] = table.last().expect("a table").as_slice() else {
+            panic!("{table:?}");
+        };
+        assert_eq!(*js_id, 1);
+        let ours = *ours;
+        assert!(ours >= crate::ui::keys::FIRST_ID);
+        // JS's table joins it: JS's first, then the views'.
         apply(
             &mut c,
             vec![Op::SetProp {
@@ -10942,6 +10959,11 @@ mod views {
         // The binding goes with its owner.
         assert!(c.component_event(host, EventKind::Press, &EventPayload::None));
         assert_eq!(tables(&c.commit().unwrap()), [vec![1]]);
+        assert!(
+            c.nodes[c.root as usize]
+                .events
+                .contains(EventKind::KeyCommand)
+        );
     }
 
     /// A pressable box with the pointing hand.
