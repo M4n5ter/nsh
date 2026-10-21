@@ -337,7 +337,8 @@ failures and log records come back as `RunnerMessage`s; batches of `--trace` go 
 
 ### On a real platform (`--target`)
 
-`nsh test --target <platform>` runs the apps tests open on the platform's development host. `App` drives either kind
+`nsh test --target <platform>` runs the apps tests open on the platform's development host (`macos`, `gpui`,
+`web`). `App` drives either kind
 of app through one trait (`driver.rs` `Driver`): `Headless`, or `Remote`, which turns each step and query into a
 `nsh_dev::protocol::TestStep` for the host (`TestRun::host`, a `StartHost` the CLI makes: `nsh-cli/src/test_host.rs`).
 For each `open`, the CLI builds the entry, starts a dev server of its own in a test session
@@ -352,7 +353,8 @@ so selectors resolve the same everywhere; the `Agent` takes each step on a threa
 selector on the model, scrolls the view into view when it is not (the innermost scroll view around it that hides it,
 a gesture at a time), asks the platform where it is (`Native::bounds`) and acts there with synthesized input
 (`Native`: press, long press, scroll, typed keys, `back`, dialogs, screenshots, the window's size and appearance),
-then waits until no batch came for 100 ms and no native animation runs (2 s at most). `Native`'s calls do their work
+then waits until neither a batch came nor a native animation ran for 100 ms (2 s at most; the web's page counts its own
+finite animations too: a screen sliding in). `Native`'s calls do their work
 on the platform's main thread and return when the input is posted. Screenshots come back as PNG bytes (base64): the
 test's side saves them, as the host may run on another machine. A manual clock does not exist on a real platform:
 `runFor` waits, `fastForward` and `setSystemTime` fail, and `open` refuses what a host cannot be given yet (stubbed
@@ -366,6 +368,18 @@ thread. GPUI (`nsh-platform-gpui`, feature `dev`): `agent.rs` on GPUI's main thr
 input goes through (`synth.rs`), back the mouse's back button, dialogs pressed at their buttons' laid-out middles
 (`docs/dev/gpui.md`). Both use `nsh_testing::agent::Tester`, which turns the dev client's test events into an agent's
 steps on a `Worker` thread.
+
+The web (`--target web`, `nsh-cli/src/test_web.rs`): the agent runs in the CLI, the app in a page of a headless
+Chromium browser (Chrome, Edge or Chromium; `--browser <PATH>`, else the one installed where `cdp.rs` looks; nsh never
+fetches one and fails saying so when there is none). One browser serves the run; each `open` gets a page in a browser
+context of its own (storage apart) on a dev server of its own that also serves the web host's page
+(`DevServer::serve_web`). The development runtime (`nsh-dev.wasm`, feature `dev` of `nsh-platform-web`) keeps the
+`Model` once the server's hello says `test`, and answers the steps' questions about it (`TestStep::Scene` with a
+`SceneQuery`: `nsh_testing::agent::answer`; where views are, the viewport, inputs' text and dialogs' buttons from the
+DOM, in `nsh.js`'s `testPage`). The CLI's agent sees the app through `RemoteScene`, which asks those questions
+through `DevServer::step`, and acts with the browser's trusted input over the DevTools protocol (`Input.dispatch*`:
+mouse presses, wheel events of 20 px a frame apart, key events with macOS's editing commands, as Playwright sends
+them), `history.back()` for back, `Emulation.*` for the viewport and the color scheme and `Page.captureScreenshot`.
 
 ## New apps (`nsh init --template`)
 
