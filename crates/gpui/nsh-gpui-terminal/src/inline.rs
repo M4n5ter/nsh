@@ -31,7 +31,7 @@ pub enum InlineProtocol {
 }
 
 /// A complete bounded transaction awaiting the sole terminal writer's receipt.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct InlineFrame {
     token: FrameToken,
