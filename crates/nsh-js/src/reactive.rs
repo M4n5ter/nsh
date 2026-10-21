@@ -1105,6 +1105,11 @@ pub(crate) fn current_owner(cx: *mut JsContext) -> u32 {
     unsafe { graph(cx) }.owner()
 }
 
+/// Runs `f` under `owner` with no listener; what it makes belongs to that owner.
+pub(crate) fn with_owner<R>(cx: *mut JsContext, owner: u32, f: impl FnOnce() -> R) -> R {
+    r::with_owner(Js(cx), owner, f)
+}
+
 /// [`with_root`] as if run under `owner` (from [`current_owner`]): rows a
 /// list makes later see the list's context.
 pub(crate) fn with_root_under<R>(

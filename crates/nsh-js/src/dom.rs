@@ -2108,9 +2108,9 @@ fn memoize_run(cx: *mut JsContext, value: JsValue) -> Option<JsValue> {
     Some(new_array(cx, items))
 }
 
-/// A memo of `func` (owned), one function of an array of children, made
-/// under the running owner (owned; an exception value when it throws).
-fn item_memo(cx: *mut JsContext, func: JsValue) -> JsValue {
+/// A memo of a child function `func` (owned), including the functions it
+/// returns, made under the running owner (owned; an exception when it throws).
+pub(crate) fn item_memo(cx: *mut JsContext, func: JsValue) -> JsValue {
     let mut data = [func];
     // SAFETY: the function keeps a dup of `func`, which is then freed.
     let run = unsafe { qjs::JS_NewCFunctionData(cx, Some(item_run), 0, 0, 1, data.as_mut_ptr()) };

@@ -574,7 +574,7 @@ fn rest_names(cx: *mut JsContext, props: JsValue) -> Result<JsValue, JsValue> {
     }
 }
 
-/// A list slot's value: a component is called, an element used as is.
+/// A list slot's value, resolved by the normal child insertion path.
 unsafe extern "C" fn slot_run(
     cx: *mut JsContext,
     _this: JsValue,
@@ -589,26 +589,18 @@ unsafe extern "C" fn slot_run(
         let Some(key) = dom::string_arg(cx, key) else {
             return qjs::JS_EXCEPTION;
         };
-        let value = get(cx, props, &key);
-        slot(cx, value)
+        get(cx, props, &key)
     }
 }
 
-/// `value` (owned) as a list slot renders it.
-fn slot(cx: *mut JsContext, value: JsValue) -> JsValue {
-    // SAFETY: an inline check; a component is called untracked.
-    unsafe {
-        if qjs::JS_IsFunction(cx, value) && dom::node_id(cx, value).is_none() {
-            let mut args = [qjs::JS_NewObject(cx)];
-            let r = reactive::untracked_with(cx, || {
-                qjs::JS_Call(cx, value, UNDEFINED, 1, args.as_mut_ptr())
-            });
-            qjs::JS_FreeValue(cx, args[0]);
-            qjs::JS_FreeValue(cx, value);
-            return r;
-        }
-    }
-    value
+/// Keeps a slot's getter and returned functions in their own memos: a
+/// reactive child changing must not make the slot's component again.
+fn slot_reader(cx: *mut JsContext, props: JsValue, key: &str) -> JsValue {
+    let key = new_string(cx, key);
+    let reader = native(cx, slot_run, 0, &mut [props, key]);
+    // SAFETY: the reader keeps its own key.
+    unsafe { qjs::JS_FreeValue(cx, key) };
+    dom::item_memo(cx, reader)
 }
 
 /// A cell of role `role` (`header`, `footer`) showing `props[key]`, made as
@@ -624,10 +616,7 @@ fn extra_cell(cx: *mut JsContext, id: NodeId, role: &str, key: &str) -> Result<u
         let guard = Guard(cx, cell);
         set(cx, cell, "slot", new_string(cx, role))?;
         dom::insert_node(cx, list, cell, None)?;
-        let key = new_string(cx, key);
-        let reader = native(cx, slot_run, 0, &mut [props, key]);
-        // SAFETY: ours.
-        unsafe { qjs::JS_FreeValue(cx, key) };
+        let reader = slot_reader(cx, props, key);
         let r = dom::insert_value_at(cx, cell, reader, None);
         unsafe { qjs::JS_FreeValue(cx, reader) };
         drop(guard);
@@ -683,14 +672,15 @@ unsafe extern "C" fn empty_run(
                     cell_node = cell;
                     set(cx, cell, "slot", new_string(cx, "empty"))?;
                     dom::insert_node(cx, list, cell, None)?;
-                    let key = new_string(cx, "empty");
-                    let reader = native(cx, slot_run, 0, &mut [props, key]);
-                    qjs::JS_FreeValue(cx, key);
+                    let reader = slot_reader(cx, props, "empty");
                     let r = dom::insert_value_at(cx, cell, reader, None);
                     qjs::JS_FreeValue(cx, reader);
                     r
                 })
             });
+            if let Some(d) = lists(cx).map.borrow_mut().get_mut(&id) {
+                d.extras.push(root);
+            }
             qjs::JS_SetPropertyUint32(cx, state, 0, qjs::JS_NewFloat64(root as f64));
             qjs::JS_SetPropertyUint32(cx, state, 1, cell_node);
             if let Err(e) = r {
@@ -701,6 +691,11 @@ unsafe extern "C" fn empty_run(
             let cell = qjs::JS_GetPropertyUint32(cx, state, 1);
             let mut root = 0f64;
             qjs::JS_ToFloat64(cx, &mut root, owner);
+            if let Some(id) = dom::node_id(cx, list)
+                && let Some(d) = lists(cx).map.borrow_mut().get_mut(&id)
+            {
+                d.extras.retain(|&owner| owner != root as u32);
+            }
             reactive::dispose_owner(cx, root as u32);
             let r = dom::remove_node(cx, list, cell);
             qjs::JS_FreeValue(cx, cell);
@@ -801,9 +796,17 @@ fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<
             }
         }
         let r = if has(cx, props, "separator") {
+            // The separator is lazy, but belongs to the cell rather than
+            // the insertion effect, which runs again when the cell is reused.
+            let owner = qjs::JS_NewFloat64(reactive::current_owner(cx) as f64);
             // SAFETY: a placeholder for the separator once made.
             let holder = unsafe { qjs::JS_NewArray(cx) };
-            let between = native(cx, separated_run, 0, &mut [content, props, index, holder]);
+            let between = native(
+                cx,
+                separated_run,
+                0,
+                &mut [content, props, index, holder, owner],
+            );
             unsafe { qjs::JS_FreeValue(cx, holder) };
             let r = dom::insert_value_at(cx, cell, between, None);
             unsafe { qjs::JS_FreeValue(cx, between) };
@@ -880,9 +883,15 @@ unsafe extern "C" fn separated_run(
     _magic: c_int,
     data: *mut JsValue,
 ) -> JsValue {
-    // SAFETY: four data values; values got are freed or returned.
+    // SAFETY: five data values; values got are freed or returned.
     unsafe {
-        let (content, props, index, holder) = (*data, *data.add(1), *data.add(2), *data.add(3));
+        let (content, props, index, holder, owner) = (
+            *data,
+            *data.add(1),
+            *data.add(2),
+            *data.add(3),
+            *data.add(4),
+        );
         let i = qjs::JS_Call(cx, index, UNDEFINED, 0, ptr::null_mut());
         let mut n = 0f64;
         qjs::JS_ToFloat64(cx, &mut n, i);
@@ -890,22 +899,19 @@ unsafe extern "C" fn separated_run(
         let each = get(cx, props, "each");
         let len = length(cx, each);
         qjs::JS_FreeValue(cx, each);
-        let component = get(cx, props, "separator");
-        let shown =
-            (n as i64) < len - 1 && !qjs::JS_IsNull(component) && !qjs::JS_IsUndefined(component);
-        if !shown {
-            qjs::JS_FreeValue(cx, component);
+        if (n as i64) >= len - 1 {
             return qjs::JS_DupValue(cx, content);
         }
         let mut separator = qjs::JS_GetPropertyUint32(cx, holder, 0);
         if qjs::JS_IsUndefined(separator) {
-            separator = reactive::untracked_with(cx, || slot(cx, component));
+            let mut root = 0f64;
+            qjs::JS_ToFloat64(cx, &mut root, owner);
+            separator =
+                reactive::with_owner(cx, root as u32, || slot_reader(cx, props, "separator"));
             if qjs::JS_IsException(separator) {
                 return separator;
             }
             qjs::JS_SetPropertyUint32(cx, holder, 0, qjs::JS_DupValue(cx, separator));
-        } else {
-            qjs::JS_FreeValue(cx, component);
         }
         let inverted = get(cx, props, "inverted");
         let inverted_now = reactive::untracked_with(cx, || qjs::JS_ToBool(cx, inverted) == 1);
@@ -1146,7 +1152,8 @@ pub(crate) const EXPORTS: &[crate::modules::Item] = &[(
 )];
 
 /// `nsh/list`'s types.
-pub(crate) const TYPES: &str = r#"/** A component (`Header`) or an element (`<Header />`). */
+pub(crate) const TYPES: &str = r#"/** A component (`Header`) or an element (`<Header />`). Functions and
+ * their returned children stay reactive, as in ordinary JSX children. */
 export type ListSlot = (() => JSX.Element) | JSX.Element;
 
 /** An item that became viewable or stopped being viewable. */
@@ -1206,7 +1213,203 @@ export type ListItemsProps<T> = Pick<ListProps<T>, "each" | "children" | "keyExt
 
 #[cfg(test)]
 mod tests {
+    use nsh_core::{NodeId, Op, Tag};
+
     use crate::{Host, HostOptions};
+
+    fn take_ops(host: &Host) -> Vec<Op> {
+        let mut ops = Vec::new();
+        host.take_ops(&mut ops);
+        ops
+    }
+
+    fn created_text(ops: &[Op], wanted: &str) -> NodeId {
+        ops.iter()
+            .find_map(|op| match op {
+                Op::CreateText { id, text } if text == wanted => Some(*id),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing text {wanted:?}: {ops:?}"))
+    }
+
+    const REACTIVE_SLOTS: &str = r#"
+        import { mount, signal, cleanup } from "nsh";
+        import { component, cond, text } from "nsh:rt";
+        import { List } from "nsh/list";
+        const active = signal(true);
+        const shown = signal(true);
+        let made = 0, cleaned = 0, rows = 0;
+        function Status() {
+            made++;
+            cleanup(() => cleaned++);
+            return cond(() => active(), () => text("Updating"), () => text("Ready"));
+        }
+        globalThis.update = (value) => active.set(value);
+        globalThis.show = (value) => shown.set(value);
+        globalThis.checkLife = (expectedMade, expectedCleaned, expectedRows) => {
+            if (made !== expectedMade || cleaned !== expectedCleaned || rows !== expectedRows)
+                throw Error(`lifecycle ${made}/${cleaned}/${rows}, expected ${expectedMade}/${expectedCleaned}/${expectedRows}`);
+        };
+        mount(() => cond(() => shown(), () => List({
+            each: SLOT_ITEMS,
+            children: (item) => { rows++; return () => `Row ${item()}`; },
+            get SLOT_PROPERTY() { return SLOT_EXPRESSION; },
+        }), () => text("Gone")));
+    "#;
+
+    const SLOT_FORMS: [(&str, usize); 3] = [
+        ("() => active() ? text(\"Updating\") : text(\"Ready\")", 0),
+        ("component(Status, {})", 1),
+        ("() => component(Status, {})", 1),
+    ];
+
+    /// Plain callable children, components rooted in an `If`, and slot
+    /// factories all update without remounting a component or losing cleanup.
+    #[test]
+    fn list_slots_keep_reactive_children_and_their_owners() {
+        for slot in ["header", "footer", "empty"] {
+            for (expression, components) in SLOT_FORMS {
+                let host = Host::new().unwrap();
+                host.eval_source(
+                    &REACTIVE_SLOTS
+                        .replace("SLOT_ITEMS", "[]")
+                        .replace("SLOT_PROPERTY", slot)
+                        .replace("SLOT_EXPRESSION", expression),
+                )
+                .unwrap();
+                let first = take_ops(&host);
+                let updating = created_text(&first, "Updating");
+                assert!(
+                    first
+                        .iter()
+                        .any(|op| matches!(op, Op::Insert { child, .. } if *child == updating))
+                );
+
+                host.eval_script("update.js", "update(false)").unwrap();
+                let changed = take_ops(&host);
+                let ready = created_text(&changed, "Ready");
+                assert!(
+                    changed
+                        .iter()
+                        .any(|op| matches!(op, Op::Remove { child, .. } if *child == updating))
+                );
+                assert!(
+                    changed
+                        .iter()
+                        .any(|op| matches!(op, Op::Insert { child, .. } if *child == ready))
+                );
+                host.eval_script("lifecycle.js", &format!("checkLife({components}, 0, 0)"))
+                    .unwrap();
+
+                host.eval_script("hide.js", "show(false)").unwrap();
+                created_text(&take_ops(&host), "Gone");
+                host.eval_script(
+                    "disposed.js",
+                    &format!("checkLife({components}, {components}, 0); update(true)"),
+                )
+                .unwrap();
+                assert!(take_ops(&host).is_empty(), "a disposed slot still rendered");
+
+                host.eval_script("show.js", "show(true)").unwrap();
+                created_text(&take_ops(&host), "Updating");
+                host.eval_script(
+                    "remounted.js",
+                    &format!("checkLife({}, {components}, 0)", components * 2),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    /// Separators stay lazy and keep their component through cell reuse;
+    /// changing their child while hidden is reflected when they return.
+    #[test]
+    fn separators_keep_reactive_children_across_cell_reuse() {
+        for (expression, components) in SLOT_FORMS {
+            let host = Host::new().unwrap();
+            host.eval_source(
+                &REACTIVE_SLOTS
+                    .replace("SLOT_ITEMS", "[1, 2, 3]")
+                    .replace("SLOT_PROPERTY", "separator")
+                    .replace("SLOT_EXPRESSION", expression),
+            )
+            .unwrap();
+            let list = take_ops(&host)
+                .iter()
+                .find_map(|op| match op {
+                    Op::Create { id, tag: Tag::List } => Some(*id),
+                    _ => None,
+                })
+                .expect("a list");
+            host.bind_list(list, &[(0, 2)]);
+            let last = take_ops(&host);
+            created_text(&last, "Row 3");
+            assert!(
+                !last
+                    .iter()
+                    .any(|op| matches!(op, Op::CreateText { text, .. } if text == "Updating"))
+            );
+            host.eval_script("lazy.js", "checkLife(0, 0, 1)").unwrap();
+
+            host.bind_list(list, &[(0, 0)]);
+            let first = take_ops(&host);
+            let updating = created_text(&first, "Updating");
+            assert!(
+                first
+                    .iter()
+                    .any(|op| matches!(op, Op::Insert { child, .. } if *child == updating))
+            );
+            host.eval_script("update.js", "update(false)").unwrap();
+            let changed = take_ops(&host);
+            let ready = created_text(&changed, "Ready");
+            assert!(
+                changed
+                    .iter()
+                    .any(|op| matches!(op, Op::Remove { child, .. } if *child == updating))
+            );
+            assert!(
+                changed
+                    .iter()
+                    .any(|op| matches!(op, Op::Insert { child, .. } if *child == ready))
+            );
+
+            host.bind_list(list, &[(0, 2)]);
+            assert!(
+                take_ops(&host)
+                    .iter()
+                    .any(|op| matches!(op, Op::Remove { child, .. } if *child == ready))
+            );
+            host.eval_script("hidden.js", "update(true)").unwrap();
+            let hidden = take_ops(&host);
+            let hidden_updating = created_text(&hidden, "Updating");
+            assert!(
+                !hidden
+                    .iter()
+                    .any(|op| matches!(op, Op::Insert { child, .. } if *child == hidden_updating))
+            );
+            host.bind_list(list, &[(0, 1)]);
+            let reused = take_ops(&host);
+            assert!(
+                reused
+                    .iter()
+                    .any(|op| matches!(op, Op::Insert { child, .. } if *child == hidden_updating))
+            );
+            host.eval_script("kept.js", &format!("checkLife({components}, 0, 1)"))
+                .unwrap();
+
+            host.eval_script("hide.js", "show(false)").unwrap();
+            created_text(&take_ops(&host), "Gone");
+            host.eval_script(
+                "disposed.js",
+                &format!("checkLife({components}, {components}, 1); update(false)"),
+            )
+            .unwrap();
+            assert!(
+                take_ops(&host).is_empty(),
+                "a disposed separator still rendered"
+            );
+        }
+    }
 
     /// A list's slots are its own: it makes each once and never passes
     /// them to its scroll view (as compiled JSX passes them: getters that

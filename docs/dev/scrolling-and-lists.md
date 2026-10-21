@@ -31,7 +31,8 @@
   distance from the end as content changes), `maintainVisibleContentPosition` (`autoscrollToBottomThreshold`: a list
   that is not inverted follows its end while within that distance of it, `ListState::anchor_end`; scrolled up, growth
   below the viewport moves nothing; Rust components: `ListLayout::follow_end`, on their own lists and the lists they place), `stickyHeaderIndices` (one column, not inverted) + `stickyHeaderOffset` (where they stick: the core subtracts it from the sticky ranges, so platforms pin as they do without one), `header` /
-  `footer` / `empty` / `separator` (a component or an element), `contentStyle`
+  `footer` / `empty` / `separator` (a component or an element; functions and their returned children stay reactive
+  as in ordinary JSX children), `contentStyle`
   (padding and gaps, numbers) / `contentClass` (`p-*`, `gap-*`), `initialScrollIndex`, `onLoadMore` + `loadMoreThreshold`, `onViewableItemsChange` +
   `viewabilityConfig` (`itemVisiblePercentThreshold` / `viewAreaCoveragePercentThreshold` / `minimumViewTime`), `keyExtractor`,
   `refreshing` / `onRefresh`, `scrollValue`. Every other prop (`testID`, accessibility, `class`, `onLayout`, touch
