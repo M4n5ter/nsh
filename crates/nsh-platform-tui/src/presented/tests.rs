@@ -1204,3 +1204,184 @@ fn native_touch_focus_and_scroll_routes_do_not_claim_sealed_press_leases() {
         "native scrollbar drag"
     );
 }
+
+fn editor_surface() -> Surface {
+    let mut surface = surface();
+    let mut items = mount(10, ViewKind::Input, frame(8.0, 64.0, 160.0, 32.0));
+    items.push(MountItem::InputValue {
+        id: 10,
+        text: "hello".into(),
+        count: 0,
+    });
+    surface.apply(MountBatch { items });
+    assert_eq!(surface.focused(), Some(CLOSE));
+    surface.drain_events().for_each(drop);
+    surface
+}
+
+#[test]
+fn a_presented_editor_keeps_its_caret_intent_when_unrelated_layout_moves_it() {
+    let mut surface = editor_surface();
+    let lease = surface.input_snapshot().press_at(3, 4).unwrap();
+    assert!(lease.is_native_input());
+    assert_eq!(lease.binding(), None);
+    surface.apply(MountBatch {
+        items: vec![MountItem::Frame {
+            id: 10,
+            frame: frame(48.0, 96.0, 160.0, 48.0),
+        }],
+    });
+    assert_eq!(
+        surface.handle_presented_mouse(down(3, 4), &lease),
+        Some(true)
+    );
+    assert_eq!(surface.focused(), Some(10));
+    assert_eq!(surface.input_context().unwrap().selection, 2..2);
+    assert_eq!(surface.handle_presented_mouse(up(3, 4), &lease), Some(true));
+    assert!(
+        surface
+            .drain_events()
+            .all(|event| !matches!(event, SurfaceEvent::Event(..)))
+    );
+    surface.handle_event(Event::Paste("X".into()));
+    assert_eq!(
+        surface.input_context().unwrap().text.as_deref(),
+        Some("heXllo")
+    );
+}
+
+#[test]
+fn captured_editor_drags_continue_with_its_native_horizontal_scroll() {
+    let mut surface = editor_surface();
+    surface.apply(MountBatch {
+        items: vec![
+            MountItem::Frame {
+                id: 10,
+                frame: frame(0.0, 64.0, 32.0, 16.0),
+            },
+            MountItem::InputValue {
+                id: 10,
+                text: "abcdefghijklmno".into(),
+                count: 0,
+            },
+        ],
+    });
+    let lease = surface.input_snapshot().press_at(1, 4).unwrap();
+    assert_eq!(
+        surface.handle_presented_mouse(down(1, 4), &lease),
+        Some(true)
+    );
+    assert_eq!(surface.input_context().unwrap().selection, 1..1);
+    let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 6, 4);
+    assert_eq!(surface.handle_presented_mouse(drag, &lease), Some(true));
+    assert_eq!(surface.input_context().unwrap().selection, 1..6);
+    assert_eq!(surface.handle_presented_mouse(drag, &lease), Some(true));
+    assert_eq!(surface.input_context().unwrap().selection, 1..9);
+    assert_eq!(surface.handle_presented_mouse(up(6, 4), &lease), Some(true));
+    surface.handle_event(Event::Paste("X".into()));
+    assert_eq!(
+        surface.input_context().unwrap().text.as_deref(),
+        Some("aXjklmno")
+    );
+}
+
+#[test]
+fn presented_editor_contacts_reject_replaced_content_owners_and_new_blockers() {
+    for change in [
+        "content",
+        "owner",
+        "parent",
+        "cover",
+        "child",
+        "modal",
+        "touch",
+        "selection",
+        "focus",
+    ] {
+        let mut surface = editor_surface();
+        let lease = surface.input_snapshot().press_at(3, 4).unwrap();
+        let items = match change {
+            // Controlled values may change without advancing native event_count.
+            "content" => vec![MountItem::InputValue {
+                id: 10,
+                text: "world".into(),
+                count: 0,
+            }],
+            "owner" => {
+                let mut items = vec![MountItem::Delete { id: 10 }];
+                items.extend(mount(10, ViewKind::Input, frame(8.0, 64.0, 160.0, 32.0)));
+                items
+            }
+            "parent" => {
+                let mut items = mount(12, ViewKind::View, frame(0.0, 0.0, 320.0, 192.0));
+                items.push(MountItem::Insert {
+                    parent: 12,
+                    child: 10,
+                    before: None,
+                });
+                items
+            }
+            "cover" => mount(12, ViewKind::View, frame(8.0, 64.0, 160.0, 32.0)),
+            "child" => {
+                let mut items = mount(12, ViewKind::View, frame(0.0, 0.0, 160.0, 32.0));
+                items.push(MountItem::Insert {
+                    parent: 10,
+                    child: 12,
+                    before: None,
+                });
+                items.push(events(12, &[EventKind::Press]));
+                items
+            }
+            "modal" => mount(12, ViewKind::Modal, frame(0.0, 0.0, 320.0, 192.0)),
+            "touch" => vec![events(ROOT_ID, &[EventKind::Touch])],
+            "selection" => vec![events(10, &[EventKind::SelectionChange])],
+            "focus" => vec![events(10, &[EventKind::Focus])],
+            _ => unreachable!(),
+        };
+        surface.apply(MountBatch { items });
+        surface.drain_events().for_each(drop);
+        assert_eq!(
+            surface.handle_presented_mouse(down(3, 4), &lease),
+            None,
+            "{change}"
+        );
+        assert!(
+            surface
+                .drain_events()
+                .all(|event| !matches!(event, SurfaceEvent::Event(..))),
+            "{change}"
+        );
+        assert!(surface.presented_press.is_none(), "{change}");
+        if change == "child" {
+            assert!(surface.input_snapshot().press_at(3, 4).is_none());
+            surface.handle_event(Event::Mouse(down(3, 4)));
+            surface.handle_event(Event::Mouse(up(3, 4)));
+            assert_eq!(presses(&mut surface), [12]);
+        }
+    }
+
+    for callback in [
+        EventKind::Blur,
+        EventKind::SelectionChange,
+        EventKind::Press,
+    ] {
+        let mut surface = editor_surface();
+        let id = if callback == EventKind::Blur {
+            CLOSE
+        } else {
+            10
+        };
+        let kinds = if callback == EventKind::Blur {
+            vec![EventKind::Press, callback]
+        } else {
+            vec![callback]
+        };
+        surface.apply(MountBatch {
+            items: vec![events(id, &kinds)],
+        });
+        assert!(
+            surface.input_snapshot().press_at(3, 4).is_none(),
+            "{callback:?}"
+        );
+    }
+}

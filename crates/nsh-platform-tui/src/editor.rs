@@ -25,6 +25,8 @@ pub(crate) struct Editor {
     anchor: usize,
     cursor: usize,
     count: u32,
+    // Includes controlled replacements, which do not advance native event_count.
+    revision: u64,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     goal_column: Option<usize>,
@@ -37,6 +39,10 @@ impl Editor {
 
     pub(crate) fn count(&self) -> u32 {
         self.count
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub(crate) fn selected_range(&self) -> Range<usize> {
@@ -76,6 +82,7 @@ impl Editor {
         let at_end = self.cursor == self.text.len();
         let old_cursor = utf16_len(&self.text[..self.cursor]);
         self.text = text;
+        self.revision = self.revision.wrapping_add(1);
         self.cursor = if at_end {
             self.text.len()
         } else {
@@ -291,6 +298,7 @@ impl Editor {
         }
         self.record();
         self.text.replace_range(range.clone(), &fit);
+        self.revision = self.revision.wrapping_add(1);
         let cursor = range.start + fit.len();
         // Combining text inserted beside a cluster may merge with it.
         self.cursor = ceil_grapheme(&self.text, cursor);
@@ -334,6 +342,7 @@ impl Editor {
 
     fn restore(&mut self, snapshot: Snapshot) {
         self.text = snapshot.text;
+        self.revision = self.revision.wrapping_add(1);
         self.anchor = snapshot.anchor;
         self.cursor = snapshot.cursor;
         self.goal_column = None;

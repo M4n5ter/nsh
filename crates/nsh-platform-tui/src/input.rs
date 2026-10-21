@@ -722,7 +722,7 @@ impl Surface {
         );
     }
 
-    fn edit_input(
+    pub(crate) fn edit_input(
         &mut self,
         id: NodeId,
         edit: impl FnOnce(&mut crate::editor::Editor, &nsh_core::InputConfig) -> bool,
@@ -747,7 +747,7 @@ impl Surface {
         }
     }
 
-    fn focusable(&self, id: NodeId) -> bool {
+    pub(crate) fn focusable(&self, id: NodeId) -> bool {
         let Some(node) = self.node(id) else {
             return false;
         };
@@ -1948,7 +1948,7 @@ impl Surface {
         });
     }
 
-    fn input_hit_geometry(&self, id: NodeId) -> Option<crate::render::InputGeometry> {
+    pub(crate) fn input_hit_geometry(&self, id: NodeId) -> Option<crate::render::InputGeometry> {
         let node = self.node(id)?;
         if self.composite_ancestor(id) {
             let mut frame = self.presentation_frame(id)?;

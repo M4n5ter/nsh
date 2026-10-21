@@ -1884,6 +1884,7 @@ fn paint_input(
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InputGeometry {
     pub(crate) column: i64,
     pub(crate) row: i64,
@@ -4017,6 +4018,26 @@ mod tests {
         assert_eq!(surface.node(2).unwrap().editor.selection(), (1, 1));
         surface.render(buffer.area, &mut buffer);
         assert!(buffer[(9, 0)].modifier.contains(Modifier::REVERSED));
+        let lease = surface.input_snapshot().press_at(9, 1).unwrap();
+        assert!(lease.is_native_input());
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert_eq!(
+                surface.handle_presented_mouse(
+                    MouseEvent {
+                        kind,
+                        column: 9,
+                        row: 1,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    &lease
+                ),
+                Some(true)
+            );
+        }
+        assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
     }
 
     #[test]

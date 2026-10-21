@@ -9,10 +9,15 @@ use std::{collections::HashMap, sync::Arc};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use nsh_core::{
     Bounds, EventKind, Matrix, NodeId, PanActivation, Points, ScrollBehavior, Size, ViewKind,
-    animation::GestureBinding,
+    animation::GestureBinding, overlay::HintObservation,
 };
 
-use crate::{CellMetrics, Surface, geometry::HitSnapshot};
+use crate::{
+    CellMetrics, Surface,
+    geometry::{HitSnapshot, project, unproject},
+    input::FocusSource,
+    render::InputGeometry,
+};
 
 /// Native hit shapes, sealed actions, value-only gestures and scroll owners.
 ///
@@ -39,10 +44,22 @@ pub struct InputSnapshot {
 #[derive(Clone, Debug, PartialEq)]
 enum PointerTarget {
     Action(u64),
+    Input(InputContact),
     Pan {
         binding: GestureBinding,
         activation: Option<PanActivation>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct InputContact {
+    revision: u64,
+    geometry: InputGeometry,
+    local: bool,
+    scroll: (usize, usize),
+    line_offsets: Vec<usize>,
+    wrap: usize,
+    secure: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,7 +109,7 @@ pub struct WheelLease {
     origin: (u16, u16),
 }
 
-/// A sealed action or value-only native Pan in a completed presentation.
+/// A sealed action, native input or value-only Pan in a completed presentation.
 ///
 /// Keep this same lease for its left-button Down, Drag and Up. The native
 /// surface checks its identity. An action's [`Self::binding`] must additionally
@@ -110,17 +127,23 @@ pub struct PressLease {
 }
 
 impl PressLease {
-    /// The sealed app action binding, or `None` for a value-only native Pan.
+    /// The sealed app action binding, or `None` for native input or Pan.
     pub fn binding(&self) -> Option<u64> {
         match &self.route.owner {
             PointerTarget::Action(binding) => Some(*binding),
-            PointerTarget::Pan { .. } => None,
+            PointerTarget::Input(_) | PointerTarget::Pan { .. } => None,
         }
     }
 
     /// Whether this capture moves native animation values without app input.
     pub fn is_native_pan(&self) -> bool {
         matches!(self.route.owner, PointerTarget::Pan { .. })
+    }
+
+    /// Whether this capture focuses and selects one original native input.
+    /// Its route excludes application input callbacks.
+    pub fn is_native_input(&self) -> bool {
+        matches!(self.route.owner, PointerTarget::Input(_))
     }
 
     /// The native activation owner, rather than a text child that was hit.
@@ -173,7 +196,8 @@ impl InputSnapshot {
 
     /// Resolves an ordinary left press at the terminal cell's native center.
     ///
-    /// Native components, selections, callback-capable gestures, system
+    /// Plain built-in inputs retain their original focus and caret owner.
+    /// Native components, label selection, callback-capable gestures, system
     /// overlays and focus callbacks intentionally have no press lease.
     pub fn press_at(&self, column: u16, row: u16) -> Option<PressLease> {
         if self.blocked || column >= self.viewport.0 || row >= self.viewport.1 {
@@ -283,6 +307,14 @@ impl Surface {
                     continue;
                 }
                 if path.iter().any(|&id| self.opaque_press_node(id)) {
+                    if self
+                        .node(hit)
+                        .is_some_and(|node| node.kind == ViewKind::Input)
+                        && let Some(route) = self.input_route(hit, &geometry)
+                    {
+                        owners.insert(hit, hit);
+                        routes.entry(hit).or_insert(route);
+                    }
                     continue;
                 }
                 let Some(target) = path.iter().copied().find(|&id| self.pressable(id)) else {
@@ -439,6 +471,61 @@ impl Surface {
             size,
             clip: geometry.clip_rect(target)?,
         })
+    }
+
+    fn input_route(&self, target: NodeId, geometry: &HitSnapshot) -> Option<PressRoute> {
+        let node = self.node(target)?;
+        if node.kind != ViewKind::Input
+            || !self.focusable(target)
+            || (self.focus != Some(target)
+                && self.focus.is_some_and(|id| {
+                    self.node(id)
+                        .is_some_and(|node| node.events.contains(EventKind::Blur))
+                }))
+            || geometry.ancestors(target).into_iter().any(|id| {
+                self.node(id).is_none_or(|node| {
+                    (id != target && self.opaque_native_gesture_node(id))
+                        || node.native.is_some()
+                        || node.media.is_some()
+                        || node.gestures.pan_x.is_some()
+                        || node.gestures.pan_y.is_some()
+                        || node.props.pan_activation.is_some()
+                        || [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut]
+                            .into_iter()
+                            .any(|kind| node.events.contains_listener(kind))
+                        || [
+                            EventKind::PressDown,
+                            EventKind::PressUp,
+                            EventKind::Press,
+                            EventKind::LongPress,
+                            EventKind::Focus,
+                            EventKind::Blur,
+                            EventKind::SelectionChange,
+                        ]
+                        .into_iter()
+                        .any(|kind| node.events.contains(kind))
+                })
+            })
+        {
+            return None;
+        }
+        let input = self.input_hit_geometry(target)?;
+        let columns = input.columns.max(1);
+        let focused = self.focus == Some(target);
+        let contact = InputContact {
+            revision: node.editor.revision(),
+            local: self.composite_ancestor(target),
+            scroll: crate::render::input_scroll(node, focused, columns, input.rows.max(1)),
+            line_offsets: crate::render::input_line_offsets(node, focused, columns),
+            wrap: if node.input.multiline {
+                columns
+            } else {
+                usize::MAX
+            },
+            secure: node.input.secure,
+            geometry: input,
+        };
+        self.press_route(target, PointerTarget::Input(contact), geometry)
     }
 
     fn wheel_route(&self, target: NodeId, geometry: &HitSnapshot) -> Option<WheelRoute> {
@@ -603,13 +690,15 @@ impl Surface {
                 && self.navigation_can_back(id))
     }
 
-    /// Handles a sealed action or native Pan while its presented route fits.
+    /// Handles a sealed action, native input or Pan from its presented route.
     ///
     /// `None` rejects a stale or unsupported route without entering its mouse
     /// callbacks. `Some(changed)` is the original native handler's result. A
     /// successful Down captures the same route for Drag and Up. Color feedback
-    /// may change; geometry changes cancel the capture. A native Pan can leave
-    /// its viewport while that original owner and contact route remain valid.
+    /// may change; action/Pan geometry changes cancel the capture. A plain
+    /// input may move while its original local contact remains unoccluded;
+    /// selection uses its presented text layout and unchanged content identity.
+    /// Native captures may leave the original viewport while dragging.
     pub fn handle_presented_mouse(
         &mut self,
         mouse: MouseEvent,
@@ -633,6 +722,10 @@ impl Surface {
                 node.generation == lease.route.incarnation
                     && match &lease.route.owner {
                         PointerTarget::Action(binding) => node.props.input_action == Some(*binding),
+                        PointerTarget::Input(contact) => {
+                            node.kind == ViewKind::Input
+                                && node.editor.revision() == contact.revision
+                        }
                         PointerTarget::Pan {
                             binding,
                             activation,
@@ -646,6 +739,9 @@ impl Surface {
         if !identity_matches {
             self.reject_presented_press(lease);
             return None;
+        }
+        if lease.is_native_input() {
+            return self.handle_presented_input(mouse, lease, &current);
         }
         if matches!(mouse.kind, MouseEventKind::Down(_)) {
             let offered = current.press_at(mouse.column, mouse.row);
@@ -720,6 +816,110 @@ impl Surface {
             self.presented_press = None;
         }
         Some(changed)
+    }
+
+    fn handle_presented_input(
+        &mut self,
+        mouse: MouseEvent,
+        lease: &PressLease,
+        current: &InputSnapshot,
+    ) -> Option<bool> {
+        let PointerTarget::Input(contact) = &lease.route.owner else {
+            return None;
+        };
+        let valid = current.routes.get(&lease.target()).is_some_and(|route| {
+            matches!(&route.owner, PointerTarget::Input(now) if now.revision == contact.revision)
+                && route.ancestry == lease.route.ancestry
+                && {
+                    // The same editor may move while an unrelated frame is in
+                    // flight. Test its original local contact against its live
+                    // clipping/occlusion; never hit a new owner at old screen
+                    // coordinates or reinterpret that owner's caret.
+                    let x = (f32::from(lease.origin.0) + 0.5) * self.metrics.width().0;
+                    let y = (f32::from(lease.origin.1) + 0.5) * self.metrics.height().0;
+                    unproject(&lease.route.matrix, x, y)
+                        .and_then(|(x, y)| project(&route.matrix, x, y))
+                        .and_then(|(x, y)| current.geometry.hit_test(x, y))
+                        .is_some_and(|hit| hit == lease.target())
+                }
+        });
+        let down = matches!(mouse.kind, MouseEventKind::Down(_));
+        if !valid
+            || (down && (mouse.column, mouse.row) != lease.origin)
+            || (!down
+                && (self.drag_input != Some(lease.target())
+                    || !self
+                        .presented_press
+                        .as_ref()
+                        .is_some_and(|captured| captured.same_capture(lease))))
+        {
+            self.reject_presented_press(lease);
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Up(_)) {
+            self.clear_sealed_pointer();
+            return Some(true);
+        }
+        let (contact, matrix) = if down {
+            (contact, &lease.route.matrix)
+        } else {
+            let route = current.routes.get(&lease.target())?;
+            let PointerTarget::Input(contact) = &route.owner else {
+                return None;
+            };
+            // Down names the witnessed caret. A captured drag then follows
+            // the same native editor's scrolling selection, just as ordinary
+            // input does, without ever authorizing a different hit owner.
+            (contact, &route.matrix)
+        };
+        let x = (f32::from(mouse.column) + 0.5) * self.metrics.width().0;
+        let y = (f32::from(mouse.row) + 0.5) * self.metrics.height().0;
+        let (x, y) = if contact.local {
+            unproject(matrix, x, y)?
+        } else {
+            (x, y)
+        };
+        let row = ((y / self.metrics.height().0).floor() as i64 - contact.geometry.row).max(0)
+            as usize
+            + contact.scroll.0;
+        let column = ((x / self.metrics.width().0).floor() as i64 - contact.geometry.column).max(0)
+            as usize
+            + contact.scroll.1;
+        let column = column.saturating_sub(contact.line_offsets.get(row).copied().unwrap_or(0));
+        let offset =
+            self.node(lease.target())?
+                .editor
+                .offset_at(row, column, contact.wrap, contact.secure);
+        if down {
+            self.clear_sealed_pointer();
+            self.set_hover(Some(lease.target()));
+            let watches = current
+                .geometry
+                .ancestors(lease.target())
+                .into_iter()
+                .filter_map(|id| {
+                    self.node(id).and_then(|node| {
+                        node.events
+                            .contains(EventKind::Touch)
+                            .then(|| node.events.hint_watch())
+                            .flatten()
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !watches.is_empty() {
+                self.events.push(crate::SurfaceEvent::HintObservation(
+                    HintObservation::Press(watches),
+                ));
+            }
+            self.set_focus_from(Some(lease.target()), FocusSource::Pointer);
+            self.drag_input = Some(lease.target());
+            self.presented_press = Some(lease.clone());
+        }
+        self.edit_input(lease.target(), |editor, _| {
+            editor.move_to(offset, !down);
+            false
+        });
+        Some(true)
     }
 
     pub(crate) fn presented_animation_changed(&mut self, op: &nsh_core::animation::AnimationOp) {
