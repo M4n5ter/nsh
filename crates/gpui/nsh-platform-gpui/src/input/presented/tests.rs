@@ -162,7 +162,10 @@ fn presented_wheels_keep_the_scroll_when_its_input_moves_under_the_pointer() {
             Points(STEP * tick as f32)
         );
     }
-    assert_eq!(crate::text_input::focused_view(&surface), Some(editor.clone()));
+    assert_eq!(
+        crate::text_input::focused_view(&surface),
+        Some(editor.clone())
+    );
     assert_eq!(
         crate::text_input::accessible_value(&editor)
             .map(|value| value.text)
