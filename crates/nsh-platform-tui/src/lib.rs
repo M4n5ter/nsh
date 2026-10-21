@@ -43,7 +43,7 @@ pub use crate::{
         ComponentContext, ComponentEvent, ComponentFactory, ComponentResponse, Components,
         NativeComponent,
     },
-    presented::{InputSnapshot, PressLease},
+    presented::{InputSnapshot, PressLease, WheelLease},
     protocol::{ImageProtocol, ProtocolType},
     services::{
         AccessibleNode, ClipboardContent, HostServices, ServiceCancellation, ServiceOutput,

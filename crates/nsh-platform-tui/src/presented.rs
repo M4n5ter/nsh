@@ -1,4 +1,4 @@
-//! Leases for ordinary press actions in a completed terminal presentation.
+//! Leases for native input owners in a completed terminal presentation.
 //!
 //! A host publishes a snapshot only after its bytes have flushed. It may keep
 //! that snapshot while unrelated work advances the scene: a lease is checked
@@ -7,16 +7,17 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use nsh_core::{Bounds, EventKind, Matrix, NodeId, Points, Size, ViewKind};
+use nsh_core::{Bounds, EventKind, Matrix, NodeId, Points, ScrollBehavior, Size, ViewKind};
 
 use crate::{CellMetrics, Surface, geometry::HitSnapshot};
 
-/// An immutable sample of the native hit shapes and sealed press routes.
+/// An immutable sample of native hit shapes, sealed presses and scroll owners.
 ///
 /// This contains no engine, component or scene owner. Publish it alongside the
 /// terminal bytes it describes, after their successful flush, and use
-/// [`Self::press_at`] on the input thread. An absent lease keeps the host's
-/// existing exact-presentation input path; it does not make that input invalid.
+/// [`Self::press_at`] or [`Self::wheel_at`] on the input thread. An absent lease
+/// keeps the host's existing exact-presentation path; it does not invalidate
+/// that input.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct InputSnapshot {
@@ -28,6 +29,8 @@ pub struct InputSnapshot {
     blocked: bool,
     owners: HashMap<NodeId, NodeId>,
     routes: HashMap<NodeId, PressRoute>,
+    wheel_owners: HashMap<NodeId, NodeId>,
+    wheel_routes: HashMap<NodeId, WheelRoute>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +41,34 @@ struct PressRoute {
     matrix: Matrix,
     size: Size<Points>,
     clip: Bounds<Points>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct WheelRoute {
+    target: NodeId,
+    ancestry: Vec<(NodeId, u64)>,
+    matrix: Matrix,
+    size: Size<Points>,
+    clip: Bounds<Points>,
+    horizontal: bool,
+    mirrored: bool,
+    behavior: Box<ScrollBehavior>,
+}
+
+/// The original native Scroll owner at one cell of a completed presentation.
+///
+/// This retains a native view incarnation, not an application callback. Its
+/// queued onScroll notification still reports that view's current offset.
+/// A default lease is inert and authorizes no surface.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct WheelLease {
+    instance: Arc<()>,
+    route: Option<WheelRoute>,
+    viewport: (u16, u16),
+    metrics: CellMetrics,
+    scope: Option<(NodeId, u64)>,
+    origin: (u16, u16),
 }
 
 /// The original sealed press route at one cell of a completed presentation.
@@ -80,6 +111,31 @@ impl PressLease {
 }
 
 impl InputSnapshot {
+    /// Resolves the native Scroll ancestor of the presented cell's actual hit.
+    ///
+    /// Native components, media, captures and immediate application callbacks
+    /// keep the embedding's exact-presentation path. Selectable text is ordinary
+    /// scroll content. This does not use the focused or first available scroll.
+    pub fn wheel_at(&self, column: u16, row: u16) -> Option<WheelLease> {
+        if column >= self.viewport.0 || row >= self.viewport.1 {
+            return None;
+        }
+        let (x, y) = (
+            (f32::from(column) + 0.5) * self.metrics.width().0,
+            (f32::from(row) + 0.5) * self.metrics.height().0,
+        );
+        let hit = self.geometry.hit_test(x, y)?;
+        let route = self.wheel_routes.get(self.wheel_owners.get(&hit)?)?.clone();
+        Some(WheelLease {
+            instance: self.instance.clone(),
+            route: Some(route),
+            viewport: self.viewport,
+            metrics: self.metrics,
+            scope: self.scope,
+            origin: (column, row),
+        })
+    }
+
     /// Resolves an ordinary left press at the terminal cell's native center.
     ///
     /// Opaque routes, such as native components, selections, gestures, system
@@ -114,31 +170,39 @@ impl InputSnapshot {
 }
 
 impl Surface {
-    /// Samples immutable hit geometry and ordinary sealed press bindings.
+    /// Samples immutable hit geometry, sealed presses and native scroll owners.
     ///
     /// Taking a snapshot does not publish it or grant input authority. The
     /// embedding host publishes it only after flushing its corresponding frame.
     pub fn input_snapshot(&self) -> InputSnapshot {
         let geometry = self.hit_snapshot();
-        let scope = geometry.visible_ids().iter().copied().find_map(|id| {
-            self.node(id)
-                .filter(|node| node.kind == ViewKind::Modal)
-                .map(|node| (id, node.generation))
-        });
-        let blocked = self.dialog.is_some()
-            || self.service_overlay_open()
-            || (self.pointer.is_some() && self.presented_press.is_none())
-            || self.hovered_path.iter().any(|&id| {
-                self.node(id).is_some_and(|node| {
-                    node.events.contains(EventKind::HoverIn)
-                        || node.events.contains(EventKind::HoverOut)
-                })
-            });
+        let scope = self.input_scope(&geometry);
+        let blocked = self.input_blocked();
         let mut owners = HashMap::new();
         let mut routes = HashMap::new();
+        let mut wheel_owners = HashMap::new();
+        let mut wheel_routes = HashMap::new();
         if !blocked {
             for &hit in geometry.visible_ids() {
                 let path = geometry.ancestors(hit);
+                if self.pointer.is_none()
+                    && !path.iter().any(|&id| self.opaque_wheel_node(id))
+                    && let Some(target) = path.iter().copied().find(|&id| {
+                        self.node(id).is_some_and(|node| {
+                            node.kind == ViewKind::Scroll && node.scroll.enabled
+                        })
+                    })
+                {
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        wheel_routes.entry(target)
+                        && let Some(route) = self.wheel_route(target, &geometry)
+                    {
+                        entry.insert(route);
+                    }
+                    if wheel_routes.contains_key(&target) {
+                        wheel_owners.insert(hit, target);
+                    }
+                }
                 if path.iter().any(|&id| self.opaque_press_node(id)) {
                     continue;
                 }
@@ -188,7 +252,133 @@ impl Surface {
             blocked,
             owners,
             routes,
+            wheel_owners,
+            wheel_routes,
         }
+    }
+
+    fn input_scope(&self, geometry: &HitSnapshot) -> Option<(NodeId, u64)> {
+        geometry.visible_ids().iter().copied().find_map(|id| {
+            self.node(id)
+                .filter(|node| node.kind == ViewKind::Modal)
+                .map(|node| (id, node.generation))
+        })
+    }
+
+    fn input_blocked(&self) -> bool {
+        self.dialog.is_some()
+            || self.service_overlay_open()
+            || (self.pointer.is_some() && self.presented_press.is_none())
+            || self.hovered_path.iter().any(|&id| {
+                self.node(id).is_some_and(|node| {
+                    node.events.contains(EventKind::HoverIn)
+                        || node.events.contains(EventKind::HoverOut)
+                })
+            })
+    }
+
+    fn opaque_wheel_node(&self, id: NodeId) -> bool {
+        self.node(id).is_none_or(|node| {
+            node.native.is_some()
+                || node.media.is_some()
+                || matches!(
+                    node.kind,
+                    ViewKind::Native | ViewKind::WebView | ViewKind::Video
+                )
+                || [
+                    EventKind::HoverIn,
+                    EventKind::HoverOut,
+                    EventKind::ScrollEnd,
+                    EventKind::MomentumScrollEnd,
+                ]
+                .into_iter()
+                .any(|kind| node.events.contains(kind))
+        })
+    }
+
+    fn wheel_route(&self, target: NodeId, geometry: &HitSnapshot) -> Option<WheelRoute> {
+        let node = self.node(target)?;
+        if node.kind != ViewKind::Scroll
+            || !node.scroll.enabled
+            || !geometry.visible_ids().contains(&target)
+        {
+            return None;
+        }
+        let ancestry = geometry
+            .ancestors(target)
+            .into_iter()
+            .map(|id| {
+                let node = self.node(id)?;
+                (self.animated_style(id).opacity > 0.0 && !self.opaque_wheel_node(id))
+                    .then_some((id, node.generation))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (matrix, size) = geometry.geometry(target)?;
+        Some(WheelRoute {
+            target,
+            ancestry,
+            matrix,
+            size,
+            clip: geometry.clip_rect(target)?,
+            horizontal: node.scroll.horizontal,
+            mirrored: node.scroll.mirrored,
+            behavior: node.scroll.behavior.clone(),
+        })
+    }
+
+    /// Delivers ordinary wheel detents only to their original native Scroll.
+    ///
+    /// Content growth and that owner's own offset may advance while output is
+    /// pending. A changed incarnation, ancestry, viewport, scope, geometry or
+    /// scroll policy rejects the lease. A newly hit nested Scroll cannot take
+    /// the old input. Ctrl+wheel zoom and application callback routes keep the
+    /// embedding's exact-presentation handler.
+    pub fn handle_presented_wheel(
+        &mut self,
+        mouse: MouseEvent,
+        steps: u16,
+        lease: &WheelLease,
+    ) -> Option<u16> {
+        let route = lease.route.as_ref()?;
+        if steps == 0
+            || !matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            )
+            || mouse
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+            || !Arc::ptr_eq(&self.input_instance, &lease.instance)
+            || (self.columns, self.rows) != lease.viewport
+            || self.metrics != lease.metrics
+            || (mouse.column, mouse.row) != lease.origin
+            || self.input_blocked()
+            || self.pointer.is_some()
+        {
+            return None;
+        }
+        let current = self.hit_snapshot();
+        if self.input_scope(&current) != lease.scope
+            || self.wheel_route(route.target, &current).as_ref() != Some(route)
+        {
+            return None;
+        }
+        let (x, y) = (
+            (f32::from(mouse.column) + 0.5) * self.metrics.width().0,
+            (f32::from(mouse.row) + 0.5) * self.metrics.height().0,
+        );
+        let hit = current.hit_test(x, y)?;
+        let path = current.ancestors(hit);
+        if !path.contains(&route.target) || path.iter().any(|&id| self.opaque_wheel_node(id)) {
+            return None;
+        }
+        // Both hover paths exclude callbacks; retain native feedback and the
+        // next keyboard scroll target without changing this wheel's owner.
+        self.set_hover(Some(hit));
+        Some(self.scroll_wheel_owner(route.target, mouse, steps))
     }
 
     fn opaque_press_node(&self, id: NodeId) -> bool {

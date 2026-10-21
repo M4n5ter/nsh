@@ -1152,6 +1152,10 @@ impl Surface {
         let Some(id) = self.scroll_ancestor(hit.or(self.focus)) else {
             return 0;
         };
+        self.scroll_wheel_owner(id, mouse, steps)
+    }
+
+    pub(crate) fn scroll_wheel_owner(&mut self, id: NodeId, mouse: MouseEvent, steps: u16) -> u16 {
         if mouse.modifiers.contains(KeyModifiers::CONTROL) {
             let factor: f32 = if matches!(
                 mouse.kind,
@@ -1161,6 +1165,8 @@ impl Surface {
             } else {
                 1.0 / 1.1
             };
+            let x = (mouse.column as f32 + 0.5) * self.metrics.width().0;
+            let y = (mouse.row as f32 + 0.5) * self.metrics.height().0;
             return if self.zoom_scroll_at(id, factor.powi(i32::from(steps)), x, y) {
                 steps
             } else {
@@ -1656,7 +1662,7 @@ impl Surface {
         self.report_states(self.focus, previous, &hover);
     }
 
-    fn set_hover(&mut self, target: Option<NodeId>) {
+    pub(crate) fn set_hover(&mut self, target: Option<NodeId>) {
         let next: Vec<_> = target
             .map(|id| self.ancestors(id))
             .unwrap_or_default()
