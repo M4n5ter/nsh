@@ -498,9 +498,10 @@ pub(crate) fn reveal(surface: &Rc<Surface>, target: &NshView) {
 /// Keyboard scrolling (arrows by a line, Page Up / Page Down and Space /
 /// Shift+Space by a page, Home / End to the edges) of the innermost
 /// scroll view under `(x, y)` (root coordinates; the middle of the window
-/// when the pointer is outside it) that can move that way. Fields keep
-/// their keys, also those they do not use: Down in a one-line field is no
-/// scroll. True when handled.
+/// when the pointer is outside it) that can move that way. Home / End
+/// stay with the focused reader even at its edge or when its content fits.
+/// Fields keep their keys, also those they do not use: Down in a one-line
+/// field is no scroll. True when handled.
 pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, x: f32, y: f32) -> bool {
     let Some((horizontal, m)) = key_move(event) else {
         return false;
@@ -516,10 +517,22 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, x: f32, y: f32) -> bo
         (w / 2.0, h / 2.0)
     };
     let focused = crate::text_input::focused_view(surface);
-    let Some(view) = focused
-        .or_else(|| pick(root, x, y))
-        .and_then(|v| key_scroll_view(&v, horizontal, m.sign()))
-    else {
+    let edge_owner = focused.as_ref().and_then(|view| {
+        if !matches!(m, KeyMove::Start | KeyMove::End) {
+            return None;
+        }
+        std::iter::successors(Some(view.clone()), NshView::parent_view).find(|view| {
+            view.state()
+                .scroll
+                .as_ref()
+                .is_some_and(|scroll| scroll.behavior.enabled)
+        })
+    });
+    let Some(view) = edge_owner.or_else(|| {
+        focused
+            .or_else(|| pick(root, x, y))
+            .and_then(|v| key_scroll_view(&v, horizontal, m.sign()))
+    }) else {
         return false;
     };
     // Left and Right follow what they show in a right-to-left list.
@@ -689,6 +702,156 @@ mod tests {
             ..key(VK_DOWN, none)
         };
         assert_eq!(key_move(&up), None);
+    }
+
+    #[test]
+    fn focused_reader_home_end_keep_the_native_scroll_owner_at_edges() {
+        use nsh_core::{MountItem, ROOT_ID};
+
+        let surface = Surface::new(nsh_engine::Environment::default());
+        surface.root.state_mut().frame = crate::geom::rect(0.0, 0.0, 300.0, 300.0);
+        let mount = |id, parent, kind, frame| {
+            for item in [
+                MountItem::Create { id, kind },
+                MountItem::Frame { id, frame },
+                MountItem::Insert {
+                    parent,
+                    child: id,
+                    before: None,
+                },
+            ] {
+                surface.mounter.borrow_mut().apply(&surface, &item);
+            }
+            surface.view(id).unwrap()
+        };
+        let outer = mount(
+            2,
+            ROOT_ID,
+            ViewKind::Scroll,
+            crate::geom::rect(0.0, 0.0, 300.0, 300.0),
+        );
+        let inner = mount(
+            4,
+            outer.id(),
+            ViewKind::Scroll,
+            crate::geom::rect(0.0, 500.0, 300.0, 100.0),
+        );
+        outer.state_mut().scroll.as_mut().unwrap().content =
+            nsh_core::geometry::size(Points(300.0), Points(1200.0));
+        outer.state_mut().scroll.as_mut().unwrap().y = Points(450.0);
+        crate::text_input::focus_view(&surface, &inner);
+        assert_eq!(
+            crate::text_input::focused_view(&surface),
+            Some(inner.clone())
+        );
+        let source = crate::InputSource::new(&surface);
+        let settle = || {
+            // Settle the real native animation with one virtual frame, without
+            // waiting on a display or a wall-clock sleep.
+            let now = surface.clock() * 1000.0 + 1000.0;
+            shared::frame(&Host::new(&surface, &inner), now);
+            shared::frame(&Host::new(&surface, &outer), now);
+        };
+        let press = |name: &str| {
+            let snapshot = source.sample().unwrap();
+            let keystroke = gpui::Keystroke {
+                key: name.into(),
+                key_char: None,
+                modifiers: gpui::Modifiers::default(),
+            };
+            assert_eq!(
+                source.dispatch(
+                    &snapshot,
+                    &gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    })
+                ),
+                crate::InputDisposition::Handled,
+            );
+            assert_eq!(
+                source.dispatch(
+                    &snapshot,
+                    &gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
+                ),
+                crate::InputDisposition::Handled,
+            );
+            settle();
+        };
+        for (horizontal, content, start, name, end) in [
+            (false, 500.0, 0.0, "home", 0.0),
+            (false, 500.0, 400.0, "end", 400.0),
+            (false, 100.0, 0.0, "home", 0.0),
+            (false, 100.0, 0.0, "end", 0.0),
+            (false, 500.0, 120.0, "home", 0.0),
+            (false, 500.0, 0.0, "end", 400.0),
+            (true, 500.0, 0.0, "home", 0.0),
+            (true, 500.0, 200.0, "end", 200.0),
+            (true, 500.0, 0.0, "end", 200.0),
+        ] {
+            {
+                let mut state = inner.state_mut();
+                let scroll = state.scroll.as_mut().unwrap();
+                scroll.horizontal = horizontal;
+                scroll.content = if horizontal {
+                    nsh_core::geometry::size(Points(content), Points(100.0))
+                } else {
+                    nsh_core::geometry::size(Points(300.0), Points(content))
+                };
+                scroll.x = Points(if horizontal { start } else { 0.0 });
+                scroll.y = Points(if horizontal { 0.0 } else { start });
+            }
+            press(name);
+            assert_eq!(
+                {
+                    let state = inner.state();
+                    let scroll = state.scroll.as_ref().unwrap();
+                    if horizontal { scroll.x } else { scroll.y }
+                },
+                Points(end),
+                "{name}"
+            );
+            assert_eq!(
+                outer.state().scroll.as_ref().unwrap().y,
+                Points(450.0),
+                "{name} moved the parent"
+            );
+            assert_eq!(
+                crate::text_input::focused_view(&surface),
+                Some(inner.clone())
+            );
+        }
+
+        {
+            let mut state = inner.state_mut();
+            let scroll = state.scroll.as_mut().unwrap();
+            scroll.horizontal = false;
+            scroll.content = nsh_core::geometry::size(Points(300.0), Points(500.0));
+            scroll.x = Points(0.0);
+            scroll.y = Points(400.0);
+        }
+        let editor = mount(
+            6,
+            inner.id(),
+            ViewKind::Input,
+            crate::geom::rect(0.0, 400.0, 300.0, 32.0),
+        );
+        crate::text_input::focus_view(&surface, &editor);
+        crate::text_input::char_input(&surface, "ab");
+        settle();
+        let outer_offset = outer.state().scroll.as_ref().unwrap().y;
+        let inner_offset = inner.state().scroll.as_ref().unwrap().y;
+        press("home");
+        crate::text_input::char_input(&surface, "L");
+        press("end");
+        crate::text_input::char_input(&surface, "R");
+        assert_eq!(
+            crate::text_input::accessible_value(&editor).unwrap().text,
+            "LabR"
+        );
+        assert_eq!(inner.state().scroll.as_ref().unwrap().y, inner_offset);
+        assert_eq!(outer.state().scroll.as_ref().unwrap().y, outer_offset);
     }
 
     #[test]

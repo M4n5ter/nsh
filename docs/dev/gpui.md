@@ -208,6 +208,10 @@ draw's pixels. The output writer publishes the pair after its successful present
 bounded frame-token table until queued input releases each snapshot; unknown and retired tokens are rejected.
 Snapshots stay on the GPUI thread and retain native view identities and immutable hit geometry.
 
+Home and End stay on the nearest enabled Scroll containing the native focus, including when it is already at that
+edge or its content fits. Editors retain their own Home and End behavior. Arrow keys, page keys and wheels keep
+their existing scroll chaining.
+
 `InputSource::dispatch` routes an ordinary sealed press, discrete wheel or native key to its original owner. A wheel
 remains on that Scroll as its offset or content changes, including a zero-distance edge clamp. Keys retain their
 original native focus, ancestry, modal scope and keymap registration while unrelated pixels change. They use the
