@@ -210,6 +210,11 @@ pub(crate) fn config(
     shared::config(&Host::new(surface, view), horizontal, indicator, mirrored);
 }
 
+/// The viewport size changed.
+pub(crate) fn resized(surface: &Rc<Surface>, view: &NshView) {
+    shared::resized(&Host::new(surface, view));
+}
+
 /// `ScrollContent`.
 pub(crate) fn content(surface: &Rc<Surface>, view: &NshView, size: Size<Points>) {
     shared::content(&Host::new(surface, view), size);

@@ -197,6 +197,7 @@ impl Mounter {
                 );
                 match view.kind() {
                     ViewKind::Stack => crate::navigation::stack_resized(surface, view),
+                    ViewKind::Scroll => crate::scroll::resized(surface, view),
                     ViewKind::Canvas => view.changed(),
                     ViewKind::WebView | ViewKind::Video | ViewKind::Native => {
                         crate::native::resized(view)

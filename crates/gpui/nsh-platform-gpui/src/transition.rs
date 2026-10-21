@@ -245,6 +245,9 @@ fn tick(surface: &Rc<Surface>, view: &NshView, now: f64) -> bool {
         }
         return false;
     }
+    if step.resized && view.kind() == ViewKind::Scroll {
+        crate::scroll::resized(surface, view);
+    }
     view.moved();
     !step.finished
 }

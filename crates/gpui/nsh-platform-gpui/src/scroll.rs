@@ -209,6 +209,11 @@ pub(crate) fn config(
     shared::config(&Host::new(surface, view), horizontal, indicator, mirrored);
 }
 
+/// The viewport size changed.
+pub(crate) fn resized(surface: &Rc<Surface>, view: &NshView) {
+    shared::resized(&Host::new(surface, view));
+}
+
 /// `ScrollContent`.
 pub(crate) fn content(surface: &Rc<Surface>, view: &NshView, size: Size<Points>) {
     shared::content(&Host::new(surface, view), size);
@@ -629,6 +634,51 @@ mod tests {
             s.horizontal = horizontal;
         }
         view
+    }
+
+    #[test]
+    fn viewport_frame_reconciles_offsets_without_a_content_update() {
+        use nsh_core::{MountItem, ROOT_ID};
+
+        let surface = Surface::new(nsh_engine::Environment::default());
+        for item in [
+            MountItem::Create {
+                id: 2,
+                kind: ViewKind::Scroll,
+            },
+            MountItem::Frame {
+                id: 2,
+                frame: crate::geom::rect(0.0, 0.0, 300.0, 400.0),
+            },
+            MountItem::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ] {
+            surface.mounter.borrow_mut().apply(&surface, &item);
+        }
+        let view = surface.view(2).unwrap();
+        {
+            let mut state = view.state_mut();
+            let scroll = state.scroll.as_mut().unwrap();
+            scroll.content = nsh_core::geometry::size(Points(900.0), Points(900.0));
+            scroll.x = Points(500.0);
+            scroll.y = Points(70.0);
+        }
+        surface.mounter.borrow_mut().apply(
+            &surface,
+            &MountItem::Frame {
+                id: 2,
+                frame: crate::geom::rect(0.0, 0.0, 800.0, 400.0),
+            },
+        );
+        surface.tick();
+        assert_eq!(
+            view.state()
+                .child_origin(crate::geom::rect(0.0, 0.0, 900.0, 900.0), (0.0, 0.0)),
+            (-100.0, -70.0)
+        );
     }
 
     #[test]

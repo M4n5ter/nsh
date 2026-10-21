@@ -788,11 +788,30 @@ pub fn detached(host: &impl ScrollHost) {
 }
 
 fn tick(host: &impl ScrollHost, now: f64) -> bool {
-    let Some((phase, pos, rate, (min, max))) =
-        host.scroll(|s, size| (s.live.phase, s.offset(), rate(&s.behavior), s.limits(size)))
-    else {
+    let Some((phase, pos, rate, (min, max), corrected)) = host.scroll_mut(|s, size| {
+        let (mx, my) = s.max_f(size);
+        let (cross, max) = if s.horizontal {
+            (&mut s.y, my)
+        } else {
+            (&mut s.x, mx)
+        };
+        let bounded = Points(cross.0.clamp(0.0, max));
+        let changed = *cross != bounded;
+        *cross = bounded;
+        s.live.report |= changed;
+        (
+            s.live.phase,
+            s.offset(),
+            rate(&s.behavior),
+            s.limits(size),
+            changed.then(|| s.reported(size)),
+        )
+    }) else {
         return false;
     };
+    if let Some(offset) = corrected {
+        host.moved(offset);
+    }
     match phase {
         Phase::Glide { velocity, last } => {
             let dt = (now - last).max(0.0) as f32;
@@ -823,6 +842,7 @@ fn tick(host: &impl ScrollHost, now: f64) -> bool {
             end,
         } => {
             let t = (now - start) / duration;
+            let to = to.clamp(min, max.max(min));
             moved_to(host, from + (to - from) * ease_out(t));
             if t >= 1.0 {
                 set_phase(host, Phase::Idle);
@@ -853,10 +873,15 @@ fn tick(host: &impl ScrollHost, now: f64) -> bool {
                 };
                 release(host, 0.0, v);
             } else {
+                moved_to(host, pos.clamp(min, max.max(min)));
                 emit(host, EventKind::ScrollEnd);
             }
         }
-        Phase::Idle if pos > max.max(min) + 0.5 => moved_to(host, max.max(min)),
+        Phase::Idle | Phase::Thumb { .. } | Phase::Wheel { .. }
+            if pos < min || pos > max.max(min) + 0.5 =>
+        {
+            moved_to(host, pos.clamp(min, max.max(min)));
+        }
         _ => {}
     }
     report(host);
@@ -900,7 +925,11 @@ fn tick(host: &impl ScrollHost, now: f64) -> bool {
 /// `ScrollConfig`.
 pub fn config(host: &impl ScrollHost, horizontal: bool, indicator: bool, mirrored: bool) {
     let changed = host.scroll_mut(|s, _| {
-        s.horizontal = horizontal;
+        let axis_changed = std::mem::replace(&mut s.horizontal, horizontal) != horizontal;
+        if axis_changed {
+            // Motion coordinates belong to the axis on which they began.
+            s.live.phase = Phase::Idle;
+        }
         // A horizontal view keeps its indicator: it is the mouse's scroll
         // bar, and a mouse without a horizontal wheel has no other way
         // to move it (mouse drags do not scroll).
@@ -909,10 +938,36 @@ pub fn config(host: &impl ScrollHost, horizontal: bool, indicator: bool, mirrore
             s.live.alpha = 0.0;
         }
         let mirrored = mirrored && horizontal;
-        std::mem::replace(&mut s.mirrored, mirrored) != mirrored
+        (
+            std::mem::replace(&mut s.mirrored, mirrored) != mirrored,
+            axis_changed,
+        )
     });
-    if changed == Some(true) {
-        host.relayout();
+    if let Some((mirrored, axis)) = changed {
+        if mirrored || axis {
+            host.relayout();
+        }
+        if axis {
+            resized(host);
+        }
+    }
+}
+
+/// The viewport size changed. Offsets outside the new extent settle on
+/// the next frame, after the rest of the mount batch is applied.
+pub fn resized(host: &impl ScrollHost) {
+    let past = host.scroll(|s, size| {
+        let (mx, my) = s.max_f(size);
+        let cross = if s.horizontal {
+            s.y.0 < 0.0 || s.y.0 > my
+        } else {
+            s.x.0 < 0.0 || s.x.0 > mx
+        };
+        let (min, max) = s.limits(size);
+        cross || s.offset() < min || s.offset() > max + 0.5
+    });
+    if past == Some(true) {
+        ensure_ticking(host);
     }
 }
 
@@ -920,15 +975,10 @@ pub fn config(host: &impl ScrollHost, horizontal: bool, indicator: bool, mirrore
 /// the next frame, once the rest of the batch (the `ScrollBy` that keeps
 /// the visible content in place) is applied.
 pub fn content(host: &impl ScrollHost, content: Size<Points>) {
-    let Some(past) = host.scroll_mut(|s, size| {
-        s.content = content;
-        s.offset() > s.limits(size).1 + 0.5
-    }) else {
+    if host.scroll_mut(|s, _| s.content = content).is_none() {
         return;
-    };
-    if past {
-        ensure_ticking(host);
     }
+    resized(host);
     host.redraw();
 }
 
@@ -969,6 +1019,7 @@ pub fn behavior(host: &impl ScrollHost, behavior: &ScrollBehavior) {
     });
     if inset == Some(true) {
         host.relayout();
+        resized(host);
     }
 }
 
@@ -1447,6 +1498,7 @@ mod tests {
 
     struct ExtentHost {
         state: std::cell::RefCell<ScrollState>,
+        size: std::cell::Cell<Size<Points>>,
         moved: std::cell::RefCell<Vec<Point<Points>>>,
         reports: std::cell::RefCell<Vec<(Point<Points>, u32)>>,
         ticks: std::cell::Cell<usize>,
@@ -1460,6 +1512,7 @@ mod tests {
                     y: Points(y),
                     ..scroll_state((900.0, 900.0), true)
                 }),
+                size: std::cell::Cell::new(sz(300.0, 400.0)),
                 moved: Default::default(),
                 reports: Default::default(),
                 ticks: Default::default(),
@@ -1469,13 +1522,10 @@ mod tests {
 
     impl ScrollHost for ExtentHost {
         fn scroll<R>(&self, f: impl FnOnce(&ScrollState, Size<Points>) -> R) -> Option<R> {
-            Some(f(&self.state.borrow(), sz(300.0, 400.0)))
+            Some(f(&self.state.borrow(), self.size.get()))
         }
-        fn scroll_mut<R>(
-            &self,
-            f: impl FnOnce(&mut ScrollState, Size<Points>) -> R,
-        ) -> Option<R> {
-            Some(f(&mut self.state.borrow_mut(), sz(300.0, 400.0)))
+        fn scroll_mut<R>(&self, f: impl FnOnce(&mut ScrollState, Size<Points>) -> R) -> Option<R> {
+            Some(f(&mut self.state.borrow_mut(), self.size.get()))
         }
         fn now(&self) -> f64 {
             0.0
@@ -1574,6 +1624,78 @@ mod tests {
         );
         frame(&host, 300.0);
         assert_eq!(host.state.borrow().origin(), pt(225.0, 170.0));
+    }
+
+    #[test]
+    fn viewport_growth_and_inset_changes_reconcile_the_current_extent() {
+        let host = ExtentHost::new(500.0, 70.0);
+        config(&host, false, false, false);
+        frame(&host, 0.0);
+        host.size.set(sz(800.0, 400.0));
+        resized(&host);
+        assert_eq!(host.state.borrow().origin(), pt(500.0, 70.0));
+        frame(&host, 1.0);
+        assert_eq!(host.state.borrow().origin(), pt(100.0, 70.0));
+        assert_eq!(host.moved.borrow().last(), Some(&pt(100.0, 70.0)));
+
+        let mut with_inset = ScrollBehavior::default();
+        with_inset.content_inset.right = Points(80.0);
+        behavior(&host, &with_inset);
+        config(&host, true, false, false);
+        command(
+            &host,
+            &Command::ScrollTo {
+                x: Points(170.0),
+                y: Points(0.0),
+                animated: false,
+            },
+        );
+        config(&host, false, false, false);
+        frame(&host, 2.0);
+        assert_eq!(host.state.borrow().origin(), pt(170.0, 70.0));
+
+        behavior(&host, &ScrollBehavior::default());
+        assert_eq!(host.state.borrow().origin(), pt(170.0, 70.0));
+        frame(&host, 3.0);
+        assert_eq!(host.state.borrow().origin(), pt(100.0, 70.0));
+        assert_eq!(host.moved.borrow().last(), Some(&pt(100.0, 70.0)));
+        assert_eq!(host.reports.borrow().last(), Some(&(pt(100.0, 70.0), 1)));
+    }
+
+    #[test]
+    fn range_changes_bound_the_last_animation_frame_without_a_scrollbar() {
+        let host = ExtentHost::new(0.0, 70.0);
+        config(&host, false, false, false);
+        command(
+            &host,
+            &Command::ScrollTo {
+                x: Points(0.0),
+                y: Points(500.0),
+                animated: true,
+            },
+        );
+        host.size.set(sz(300.0, 800.0));
+        resized(&host);
+        assert!(!frame(&host, 300.0));
+        assert_eq!(host.state.borrow().origin(), pt(0.0, 100.0));
+        assert_eq!(host.moved.borrow().last(), Some(&pt(0.0, 100.0)));
+        assert_eq!(host.reports.borrow().last(), Some(&(pt(0.0, 100.0), 1)));
+
+        // Retargeting the end keeps the original rubber-band bounce smooth.
+        let host = ExtentHost::new(0.0, -40.0);
+        config(&host, false, false, false);
+        command(
+            &host,
+            &Command::ScrollTo {
+                x: Points(0.0),
+                y: Points(0.0),
+                animated: true,
+            },
+        );
+        frame(&host, 150.0);
+        assert_eq!(host.state.borrow().origin(), pt(0.0, -5.0));
+        frame(&host, 300.0);
+        assert_eq!(host.state.borrow().origin(), pt(0.0, 0.0));
     }
 
     #[test]

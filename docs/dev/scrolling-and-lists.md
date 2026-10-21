@@ -18,6 +18,10 @@
   (`dom.rs` `scroll_content`): the first one set makes a view the scroll view's children move into (also the ones
   already there; later inserts and removals go to it), and styles it. The core lays a scroll view's children out in
   the scroll view itself, so without it nothing changes (no extra view).
+- **Changing extents** (GPUI, Linux and Windows): changing the scrolling axis ends motion on the old axis and
+  preserves offsets that remain within the content. Changes to content, viewport size or content insets reconcile
+  offsets after the mount batch, so an anchoring `ScrollBy` in that batch applies first. Layout animations notify
+  the same range check as their viewport changes. Animated scrolls finish within the current extent.
 - **Zooming** (`<Scroll>`, not lists): `maximumZoomScale` above `minimumZoomScale` makes the content zoomable; `zoomScale`
   zooms when it changes, `bouncesZoom`, `zoomable`, `centerContent` (content smaller than the viewport is centered);
   ref `zoomTo({ scale, x, y, animated })` (content point `x`, `y` in the middle); `onScroll` reports `zoomScale` and the zoomed

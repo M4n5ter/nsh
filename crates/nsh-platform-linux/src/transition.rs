@@ -73,7 +73,7 @@ fn navigated(view: &NshView) -> bool {
 
 /// Runs `f` on the view's [`Live`] (made if needed) and makes sure it
 /// ticks while something animates.
-fn animate(view: &NshView, f: impl FnOnce(&mut Live)) {
+fn animate(surface: &Rc<Surface>, view: &NshView, f: impl FnOnce(&mut Live)) {
     let mut s = view.state_mut();
     let live = s.live.get_or_insert_with(Box::default);
     f(live);
@@ -83,7 +83,11 @@ fn animate(view: &NshView, f: impl FnOnce(&mut Live)) {
         s.live = None;
     } else {
         live.set_ticking(true);
-        view.add_tick_callback(tick);
+        let weak = Rc::downgrade(surface);
+        view.add_tick_callback(move |view, clock| match weak.upgrade() {
+            Some(surface) => tick(&surface, view, clock),
+            None => glib::ControlFlow::Break,
+        });
     }
 }
 
@@ -92,7 +96,7 @@ pub(crate) fn inserted(surface: &Rc<Surface>, view: &NshView, animation: Option<
     if view.state().live.as_ref().is_some_and(|l| l.dying()) {
         // Back (or moved) before its removal finished animating.
         view.set_can_target(true);
-        animate(view, Live::revive);
+        animate(surface, view, Live::revive);
         view.moved();
     }
     let Some(t) = animation.and_then(|a| a.create) else {
@@ -102,7 +106,7 @@ pub(crate) fn inserted(surface: &Rc<Surface>, view: &NshView, animation: Option<
     if view.state().frame != Bounds::default() || reduce_motion(surface) || navigated(view) {
         return;
     }
-    animate(view, |live| live.appear(t));
+    animate(surface, view, |live| live.appear(t));
     view.moved();
 }
 
@@ -128,7 +132,7 @@ pub(crate) fn removing(
         return true;
     }
     view.set_can_target(false);
-    animate(view, |live| live.disappear(t));
+    animate(surface, view, |live| live.disappear(t));
     true
 }
 
@@ -157,7 +161,7 @@ pub(crate) fn frame_changed(
     };
     // The old frame shows until the first tick.
     let to = std::mem::replace(&mut view.state_mut().frame, old);
-    animate(view, |live| live.move_frame(old, to, t));
+    animate(surface, view, |live| live.move_frame(old, to, t));
 }
 
 /// `view`'s style changed from `old` (the new one is in its state).
@@ -170,7 +174,7 @@ pub(crate) fn style_changed(surface: &Rc<Surface>, view: &NshView, old: &ViewSty
         }
         return;
     };
-    animate(view, |live| live.restyle(restyle));
+    animate(surface, view, |live| live.restyle(restyle));
 }
 
 /// True if an ancestor of `view` is animating out (and takes `view` with
@@ -186,7 +190,7 @@ fn ancestor_dying(view: &NshView) -> bool {
     false
 }
 
-fn tick(view: &NshView, clock: &gdk::FrameClock) -> glib::ControlFlow {
+fn tick(surface: &Rc<Surface>, view: &NshView, clock: &gdk::FrameClock) -> glib::ControlFlow {
     let now = clock.frame_time() as f64 / 1000.0;
     // A view deleted inside a deleted subtree leaves with its ancestor
     // instead of fading on its own (deletions arrive in any order, so this
@@ -224,6 +228,9 @@ fn tick(view: &NshView, clock: &gdk::FrameClock) -> glib::ControlFlow {
     }
     if step.resized {
         view.queue_allocate();
+        if view.kind() == ViewKind::Scroll {
+            crate::scroll::resized(surface, view);
+        }
     }
     view.moved();
     if step.finished {
