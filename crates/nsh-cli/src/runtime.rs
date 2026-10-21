@@ -168,6 +168,16 @@ pub(crate) fn android(dev: bool) -> anyhow::Result<PathBuf> {
     }
 }
 
+/// The Android runtime `nsh test --target android` runs apps in: the
+/// development one, a Rust app's too ([`crate::rust_app::RustApp::test_android`]).
+pub(crate) fn test_android() -> anyhow::Result<PathBuf> {
+    let prebuilt = prebuilt_android(true)?;
+    match crate::rust_app::current() {
+        Some(app) => app.test_android(&prebuilt),
+        None => Ok(prebuilt),
+    }
+}
+
 fn prebuilt_android(dev: bool) -> anyhow::Result<PathBuf> {
     let variant = if dev { "dev" } else { "release" };
     if let Some(root) = env::var_os("NSH_RUNTIME") {
@@ -253,6 +263,15 @@ impl WebKind {
     }
 }
 
+/// The web runtime `nsh test --target web` runs apps in: the development
+/// host's, a Rust app's too ([`crate::rust_app::RustApp::test_web`]).
+pub(crate) fn test_web() -> anyhow::Result<WebRuntime> {
+    match crate::rust_app::current() {
+        Some(app) => app.test_web(),
+        None => web(WebKind::Dev, true)?.context("no web runtime"),
+    }
+}
+
 /// The web runtime ([`WebRuntime`]) of `kind`. In a checkout it is built
 /// first when `build` is set; without it, the build that is there, if any
 /// (`None`).
@@ -331,6 +350,15 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
         bail!("the web runtime is not at {}", runtime.wasm.display());
     }
     Ok(None)
+}
+
+/// The development host `nsh test --target` runs apps in on `platform`: a
+/// Rust app's too ([`crate::rust_app::RustApp::test_host`]).
+pub(crate) fn test_host(platform: Platform) -> anyhow::Result<PathBuf> {
+    match crate::rust_app::current() {
+        Some(app) => app.test_host(platform),
+        None => file(platform, false),
+    }
 }
 
 /// Path of the development host (`runner` false) or release runner for

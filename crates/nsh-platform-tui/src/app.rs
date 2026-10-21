@@ -737,6 +737,7 @@ impl AppView {
             // Terminal scripts drive this host directly; it does not have
             // the real-platform test agent that handles these messages.
             DevEvent::Testing
+            | DevEvent::Root
             | DevEvent::Step { .. }
             | DevEvent::TestSetup { .. }
             | DevEvent::Fetch { .. } => {}
@@ -2096,8 +2097,10 @@ mod tests {
 
         for event in [
             DevEvent::Testing,
+            DevEvent::Root,
             DevEvent::TestSetup {
                 storage: vec![("launches".into(), "99".into())],
+                trace: true,
             },
             DevEvent::Fetch {
                 id: 1,

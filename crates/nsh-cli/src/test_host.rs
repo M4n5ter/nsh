@@ -48,7 +48,7 @@ pub(crate) fn starter(
         anyhow::bail!("nsh test --target takes macos, linux, windows, gpui, web, ios or android");
     }
     // Built (in a checkout) or found once, before the first test.
-    let host = crate::runtime::file(target.platform(), false)?;
+    let host = crate::runtime::test_host(target.platform())?;
     Ok(Arc::new(move |entry: &Path, options: &HostOptions| {
         start(target, &host, entry, options).map(|h| Box::new(h) as Box<dyn Host>)
     }))
@@ -96,6 +96,7 @@ fn start(
     options: &HostOptions,
 ) -> Result<TestHost, String> {
     let server = serve(entry, options)?;
+    let entry = resolve(entry)?;
     let dir = entry.parent().unwrap_or(Path::new("."));
     let url = format!("ws://{}{WS_PATH}", server.local_addr());
     // A fresh data directory: what the app keeps (its storage) starts empty
@@ -151,20 +152,35 @@ fn start(
     })
 }
 
+/// The entry `open` names (a file, or an app's directory: its entry, or
+/// for an app of Rust only its `nsh.json`).
+fn resolve(entry: &Path) -> Result<std::path::PathBuf, String> {
+    crate::entry::resolve(entry).map_err(|e| format!("{e:#}"))
+}
+
 /// A dev server in a test session serving `entry`'s build, as `nsh run`
 /// serves it (the app's assets, its log lines shown as `nsh run` shows
-/// them).
+/// them); for an app of Rust only, the host's own root, which its
+/// development host is built with.
 pub(crate) fn serve(entry: &Path, options: &HostOptions) -> Result<DevServer, String> {
-    let built = build::compile(entry, false).map_err(|e| e.plain)?;
+    let entry = &resolve(entry)?;
+    let root = crate::rust_app::is_root(entry);
+    let built = if root {
+        None
+    } else {
+        Some(build::compile(entry, false).map_err(|e| e.plain)?)
+    };
     let dir = entry.parent().unwrap_or(Path::new("."));
+    let trace = options.trace.clone();
     let server = DevServer::start(
         "127.0.0.1:0".parse().expect("an address"),
         nsh_js::BYTECODE_VERSION,
         Some(dir.to_path_buf()),
-        |event| {
-            // The app's log lines, as `nsh run` shows them; the host's own
-            // coming and going is the test's business.
-            if let ClientEvent::Log(log) = event {
+        move |event| match event {
+            // The app's log lines, as `nsh run` shows them (a traced app's
+            // commit timings among them); the host's own coming and going
+            // is the test's business.
+            ClientEvent::Log(log) => {
                 let level = match log.level {
                     LogLevel::Error => log::Level::Error,
                     LogLevel::Warn => log::Level::Warn,
@@ -174,6 +190,12 @@ pub(crate) fn serve(entry: &Path, options: &HostOptions) -> Result<DevServer, St
                 };
                 crate::logger::forward(level, &log.target, &log.message);
             }
+            ClientEvent::Trace { items } => {
+                if let Some(trace) = &trace {
+                    trace(items);
+                }
+            }
+            _ => {}
         },
     )
     .map_err(|e| format!("cannot start a dev server: {e}"))?;
@@ -181,9 +203,14 @@ pub(crate) fn serve(entry: &Path, options: &HostOptions) -> Result<DevServer, St
     server.test_session();
     // What the app starts with and what answers its requests: the test's.
     server.set_test_storage(options.storage.clone());
+    server.set_test_trace(options.trace.is_some());
     if let Some(network) = &options.network {
         server.set_test_network(network.clone());
     }
+    let Some(built) = built else {
+        server.publish_root();
+        return Ok(server);
+    };
     let capabilities = built.capabilities_json();
     server.publish(
         built.bytecode,
