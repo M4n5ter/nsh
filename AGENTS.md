@@ -371,7 +371,7 @@ when changing text measurement, clipping, pointer input or scripts (`docs/dev/tu
   `INTERNAL_EVENTS`) (`docs/dev/elements.md`).
 - **Keep in sync**: the handler types of `host::EVENTS` ↔ the payloads of `nsh-js`'s `dispatch_event`; the order of `EventKind` ↔ `Native.java`; `encode.rs`
   opcodes ↔ `Mounter.java`; new event payload keys ↔ the JNI event map's key list; `BUNDLE_NAME` /
-  `BYTECODE_VERSION` ↔ the linked QuickJS.
+  `BYTECODE_VERSION` ↔ the linked QuickJS; `nsh-macros`' `VARIANT_SCALES` ↔ `IMAGE_SCALES` above 1.
 
 ## Code conventions
 

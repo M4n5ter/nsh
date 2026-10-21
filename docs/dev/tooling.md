@@ -115,8 +115,10 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
   (`DevServer::set_limits`, the bundle message's `limits`, `HostLimits`' syntax; the hosts read it with
   `Limits::development` and start the app with it, and an invalid one is shown over the app). `sandbox.md`.
 - The web host is a page the dev server serves itself (`DevServer::serve_web`, the fallback route: `/`, `/nsh.js`,
-  `/nsh.wasm`) when a web runtime exists; browsers connect to `/ws` on the same port. `nsh run --target web` builds the
-  runtime in a checkout and prints the page's address (`docs/dev/web.md`, "The CLI's web target").
+  `/nsh.wasm`, `/nsh.version`, and for a runtime whose crates call JS through wasm-bindgen its glue, `/nsh-bindgen.js`,
+  with the snippets it imports, `/snippets/…`) when a web runtime exists; browsers connect to `/ws` on the same port.
+  `nsh run --target web` builds the runtime in a checkout and prints the page's address (`docs/dev/web.md`, "The CLI's
+  web target" and "Crates that call JS through wasm-bindgen").
 - Watching ignores `Access` events: inotify (Linux) reports reads, FSEvents does not, so the build's own reads of the
   sources would start the next build, forever.
 - `nsh dev` and `nsh run` default to the host that runs on this machine: `--target macos` on macOS, `--target linux` (the GTK
@@ -205,6 +207,13 @@ Writes a split bundle (`native-pipeline.md`, "Split bundles"): `bundle.js` / `.m
 `<id>`, `<id>.map` and `<stem>.nshc` (`build::compile_split`, `Built::chunks`). Without `--split` (and for `nsh
 package`, `publish`, the dev server) the bundle holds the whole app.
 
+Hosts serve a chunk the bundle does not hold through `MountSink::load_chunk` (`AppOptions::chunks` on macOS):
+`nsh-macos-host --bundle <path>` reads it from the bundle's directory, the packaged macOS runner from
+`NSH_CHUNK_DIR` (a writable directory an app fills with its own delivered modules — the bundle's resources are
+read-only). File reads run on a global dispatch queue and reply through the requesting engine's
+`EngineControl`, keeping AppKit responsive and replies tied to that engine across app reloads. Chunks always load
+as source: files can be replaced, so bytecode only comes from an app's signed resources (`Bundle::read`).
+
 ## Headless runs
 
 `nsh-testing`'s `headless` module runs apps without a platform, on its driver `Headless` (the crate's default
@@ -237,6 +246,23 @@ and more than one fails the step; a press whose match, or a view between it and 
   points per frame within its content (`ScrollBeginDrag`, offsets with the applied count as platforms report them,
   `ScrollEndDrag`, `ScrollEnd`); the model applies `ScrollBy` and `ScrollTo` / `ScrollToEnd` and reports where a
   command moved the view;
+- `drag` (`headless/pointer.rs`): a finger lands on the match's middle (`Screen::bounds_in_root`), rests 100 ms,
+  moves 10 points a frame and lifts, and what takes it is decided as the desktop backends decide it, with
+  `nsh_core::input` over the views from the match out (`Screen::link`: events, tracked states, gesture values, the
+  scroll axis, `panActivation`): the views listening to touches hear `Touch` (start, moves, end; the JS responder's
+  `SetJsResponder` block keeps native drags from starting), past the slop a pan (`PanStart`, its `pan` values moved
+  through nsh-core's `animation::Animator`, which the headless animator wraps, `PanEnd` with the velocity) or a
+  scroll view (dragged within its content; past its top only when it listens to `Refresh`, rubber-banded, refreshing
+  when released past `scroll::refreshes`) takes it, and the press under it is cancelled once it moves away;
+- `hover` (`headless/pointer.rs`): on a desktop environment the mouse comes over the match's middle: the views from it
+  out that hovering matters to (`input::hoverable`: `hover:` styles or hover events) replace those hovered before
+  (`Screen::set_hovered`), `input::hover_changes` says which hear `HoverOut` and `HoverIn` (with their `HOVERED` state
+  reported, `EngineControl::set_states`), and the hovered views hear `HoverMove`;
+- `press_key` (`headless/keyboard.rs`, `app.keyboard.press`): the keystroke as `nsh/keymap` parses it for the
+  environment's OS; on a desktop environment (`open`'s `platform`: `Environment::desktop`) the root's keymap
+  (`MountItem::Keymap`, `Screen::keymap`) finds the binding that fires where the focus is (`Keymap::find`) and the
+  root hears `KeyCommand`; else the focused input takes a character, Backspace or the return key, else Escape goes
+  back when there is something to go back from;
 - `wait`, `wait_for` / `wait_for_gone` / `wait_until` (until a selector matches, matches no more, a condition on the
   screen holds), `next_change` (one batch or animation frame: what `nsh/test`'s `waitUntil` waits for between calls
   of its JS condition), `idle` (until quiet for a while).
@@ -362,7 +388,12 @@ The host's side is `nsh_testing::agent` (feature `agent`: no QuickJS, no network
 so selectors resolve the same everywhere; the `Agent` takes each step on a thread of its own: it resolves the
 selector on the model, scrolls the view into view when it is not (the innermost scroll view around it that hides it,
 a gesture at a time), asks the platform where it is (`Native::bounds`) and acts there with synthesized input
-(`Native`: press, long press, scroll, typed keys, `back`, dialogs, screenshots, the window's size and appearance),
+(`Native`: press, long press, scroll, drag along `agent::drag_path` after resting `agent::LANDING`, typed keys,
+the mouse's hover (`hover`, when `Native::mouse`: macOS hands the move to the surface's input, as AppKit gives posted
+moves to the first responder only), keystrokes (`press_keys`: macOS's posted key events, Windows' and GPUI's key entry points with
+`keymap::Key::virtual_key`, the web's CDP key events, Linux's bindings fired as its shortcut controller would, as GTK
+takes no made-up keys; the phones, without app shortcuts, refuse them),
+`back`, dialogs, screenshots, the window's size and appearance),
 then waits until neither a batch came nor a native animation ran for 100 ms (2 s at most; the web's page counts its own
 finite animations too: a screen sliding in). `Native`'s calls do their work
 on the platform's main thread and return when the input is posted. Screenshots come back as PNG bytes (base64): the
