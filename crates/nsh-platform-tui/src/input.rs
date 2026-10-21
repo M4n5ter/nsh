@@ -174,6 +174,11 @@ impl Surface {
                 self.focus_returns
                     .iter()
                     .any(|scope| self.within_popup(scope.scope.0, id))
+                    // A pane can lose its focused child without changing
+                    // the popup itself. Capture that owner before removal.
+                    || (matches!(item, MountItem::Remove { .. } | MountItem::Delete { .. })
+                        && self.focus.is_some_and(|focus| self.within_popup(focus, id))
+                        && self.current_popup_owner().is_some())
             });
         }
         if candidates.is_empty() && !changed {
@@ -227,8 +232,13 @@ impl Surface {
                     break;
                 };
                 if retained.iter().any(|scope| scope.scope == target) {
-                    if Some(target) != batch.owner
-                        && let Some(first) = self.popup_focus_target(target)
+                    if (Some(target) != batch.owner
+                        || current.is_none_or(|focus| {
+                            !visible.contains(&focus.0) || !self.focusable(focus.0)
+                        }))
+                        && let Some(first) = self
+                            .fresh_autofocus(target.0, &visible)
+                            .or_else(|| self.popup_focus_target(target))
                     {
                         self.set_focus(Some(first));
                     }
