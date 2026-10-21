@@ -476,7 +476,9 @@ fn configured_assets_stay_with_their_original_load(cx: &mut TestAppContext) {
         let mut config = nsh_engine::EngineConfig::new(App::Js(
             Bundle::source(code.clone()).with_policy(nsh_engine::Policy::development()),
         ));
-        config.assets = assets.map(|assets| -> Arc<dyn nsh_engine::Assets> { assets.clone() });
+        config.assets = assets
+            .cloned()
+            .map(|assets| -> Arc<dyn nsh_engine::Assets> { assets });
         config.ui_sets = vec![registry];
         config.viewport = nsh_core::Size::new(nsh_core::Points(1.0), nsh_core::Points(1.0));
         config.environment.window = config.viewport;
