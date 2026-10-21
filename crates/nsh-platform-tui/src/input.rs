@@ -282,14 +282,25 @@ impl Surface {
                 continue;
             };
             let opener = if opened.contains(&parent.0) {
-                self.first_keyboard_stop(parent.0)
+                self.fresh_autofocus(parent.0, &visible)
+                    .or_else(|| self.first_keyboard_stop(parent.0))
                     .and_then(|id| self.focus_target(id))
             } else {
-                opener.filter(|target| {
-                    self.focus_target(target.0) == Some(*target)
-                        && visible.contains(&target.0)
-                        && !self.within_popup(target.0, id)
-                })
+                opener
+                    .filter(|target| {
+                        self.focus_target(target.0) == Some(*target)
+                            && visible.contains(&target.0)
+                            && self.focusable(target.0)
+                            && !self.within_popup(target.0, id)
+                    })
+                    .or_else(|| {
+                        // A screen and its popup can mount in one batch. Its
+                        // background autoFocus is the return target when no
+                        // actual opener survives, rather than a competing
+                        // request that may steal focus from the popup later.
+                        self.fresh_autofocus(parent.0, &visible)
+                            .and_then(|id| self.focus_target(id))
+                    })
             };
             retained.push(FocusReturn {
                 scope,
@@ -317,6 +328,10 @@ impl Surface {
     }
 
     pub(crate) fn focus_opened_popups(&mut self, opened: &[NodeId]) {
+        if opened.is_empty() {
+            return;
+        }
+        let visible = self.visible_ids();
         for &id in opened {
             let mut owner = self.current_popup_owner();
             let mut owns = false;
@@ -333,10 +348,40 @@ impl Surface {
             if owns {
                 continue;
             }
-            if let Some(first) = self.first_keyboard_stop(id) {
+            if let Some(first) = self
+                .fresh_autofocus(id, &visible)
+                .or_else(|| self.first_keyboard_stop(id))
+            {
                 self.set_focus(Some(first));
             }
         }
+    }
+
+    fn in_focus_scope(&self, id: NodeId, root: NodeId) -> bool {
+        let mut current = Some(id);
+        while let Some(id) = current {
+            if id == root {
+                return true;
+            }
+            let Some(node) = self.node(id) else {
+                return false;
+            };
+            if node.props.focus_return_parent.is_some() {
+                return false;
+            }
+            current = node.parent;
+        }
+        false
+    }
+
+    fn fresh_autofocus(&self, root: NodeId, visible: &[NodeId]) -> Option<NodeId> {
+        visible.iter().copied().find(|id| {
+            self.node(*id)
+                .is_some_and(|n| n.kind == ViewKind::Input && n.input.auto_focus)
+                && !self.autofocus_seen.contains(id)
+                && self.focusable(*id)
+                && self.in_focus_scope(*id, root)
+        })
     }
 
     fn keyboard_stop(&self, id: NodeId) -> bool {
@@ -349,7 +394,7 @@ impl Surface {
     fn first_keyboard_stop(&self, root: NodeId) -> Option<NodeId> {
         self.visible_ids()
             .into_iter()
-            .find(|id| self.keyboard_stop(*id) && self.within_popup(*id, root))
+            .find(|id| self.keyboard_stop(*id) && self.in_focus_scope(*id, root))
     }
 
     /// The focused node followed by its mounted ancestors, including itself.
@@ -546,12 +591,17 @@ impl Surface {
         self.autofocus_seen.retain(|id| {
             *id == ROOT_ID || self.nodes.get(*id as usize).is_some_and(Option::is_some)
         });
-        let fresh_auto = visible.iter().copied().find(|id| {
-            self.node(*id)
-                .is_some_and(|n| n.kind == ViewKind::Input && n.input.auto_focus)
-                && !self.autofocus_seen.contains(id)
-                && self.focusable(*id)
-        });
+        let fresh_auto = self
+            .focus_returns
+            .iter()
+            .rev()
+            .find_map(|scope| self.fresh_autofocus(scope.scope.0, &visible))
+            .or_else(|| {
+                self.current_popup_owner()
+                    .is_none()
+                    .then(|| self.fresh_autofocus(ROOT_ID, &visible))
+                    .flatten()
+            });
         for id in &visible {
             if self
                 .node(*id)
@@ -2858,6 +2908,53 @@ mod tests {
                 surface.handle_event(Event::Paste("Z".into()));
                 assert_eq!(surface.node(2).unwrap().editor.text(), "abcZdef");
             }
+        }
+    }
+
+    #[test]
+    fn popup_autofocus_can_mount_after_the_popup_itself() {
+        use nsh_core::{InputConfig, MountBatch, MountItem, ViewProps};
+
+        for parent in [ROOT_ID, 6] {
+            let mut surface = form();
+            surface.apply(MountBatch {
+                items: popup(6, 8, ROOT_ID, false),
+            });
+            assert_eq!(surface.focused(), Some(8));
+            let mut items = create(10, ViewKind::View, ROOT_ID, 96.0);
+            items.push(MountItem::ViewProps {
+                id: 10,
+                props: Box::new(ViewProps {
+                    focus_return_parent: Some(parent),
+                    ..Default::default()
+                }),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(8));
+            let mut items = create(12, ViewKind::View, 10, 0.0);
+            items.push(MountItem::Events {
+                id: 12,
+                events: mask(&[EventKind::Press]),
+            });
+            items.extend(create(14, ViewKind::Input, 10, 32.0));
+            items.push(MountItem::Input {
+                id: 14,
+                config: Box::new(InputConfig {
+                    auto_focus: true,
+                    ..Default::default()
+                }),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(14));
+            surface.handle_event(Event::Paste("late".into()));
+            assert_eq!(surface.node(14).unwrap().editor.text(), "late");
+            surface.apply(MountBatch {
+                items: [14, 12, 10]
+                    .into_iter()
+                    .map(|id| MountItem::Delete { id })
+                    .collect(),
+            });
+            assert_eq!(surface.focused(), Some(8));
         }
     }
 
