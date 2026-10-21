@@ -46,7 +46,7 @@ crates/
                        the standard modules among them (`runtime/fs.rs`: `fs/promises`, `runtime/process.rs`, `runtime/net.rs`,
                        `runtime/websocket.rs`, `runtime/os.rs`) on the `System` their calls get (capabilities, data directory, quotas, per-VM state)
   nsh-base/            `nsh/base`, NSH's `gpui-base`: unstyled base components (behavior, state, focus, accessibility; the look is the
-                       app's): navigation (`NavStack`, `NavPage`), `Dialog`, `AlertDialog`, `Button`, `Checkbox`, `Radio` / `RadioGroup`, `Switch`, safe areas, the keyboard, the status
+                       app's): navigation (`NavStack`, `NavPage`), `Dialog`, `AlertDialog`, `Button`, `Checkbox`, `Radio` / `RadioGroup`, `Switch`, `Tab` / `Tabs`, safe areas, the keyboard, the status
                        bar, `SelectionArea` (texts that select together: `nsh-core`'s `selection.rs`), `TextView` (Markdown / HTML documents: `text_view/`, docs/dev/text-view.md),
                        the popups on the core's overlays (`Popover`, `Menu` / `ContextMenu` / `MenuItem` / `MenuSeparator` / `Submenu`,
                        `Tooltip`, `Sheet`; presented per device: docs/dev/components.md "Popups"), written in Rust (the navigation and `Dialog` in `nsh-js`); JS face and declarations made from their specs;
@@ -312,7 +312,7 @@ when changing text measurement, clipping, pointer input or scripts (`docs/dev/tu
   TSX imports every primitive from `nsh`, as Rust does from `nsh_core::ui::prelude`.
   `nsh-base` ↔ `gpui-base`: `nsh/base` (`crates/nsh-base`), unstyled base components of `gpui-base`'s scope that own
   behavior, state, focus, keyboard and accessibility and leave every visual choice to the app (navigation, dialogs, a
-  button, a checkbox, radios, a switch, popovers, menus, tooltips and sheets, safe areas, system alerts and the keyboard today, with the status bar a
+  button, a checkbox, radios, a switch, tabs, popovers, menus, tooltips and sheets, safe areas, system alerts and the keyboard today, with the status bar a
   prop of pages and dialogs; controls such as toggles, sliders and selects as their behavior is written). Names follow `gpui-base`'s
   (`docs/dev/api-naming.md`). `gpui-component` ↔ nothing: a styled component library is never part of NSH; apps and
   the community build theirs on `nsh-base`, or style the UI in the app itself. Each export has one home (two
@@ -332,7 +332,7 @@ when changing text measurement, clipping, pointer input or scripts (`docs/dev/tu
   only widen; inputs gain optional members only; behavior and defaults stay (new behavior is opt-in); formats
   (`.nshpkg`, certificates) are read forever. Every API change, additive ones included, is recorded in `api/`
   (`cargo xtask api`), one record that only grows; the only removals are security closures listed in
-  `api/closed.txt` (beside three pre-release changes: an alignment with Tailwind CSS, the fixtures merged by domain and the theme moved to `nsh-base`). A new API lands with its test, a fixture whose script checks it (`api/cases/`, `cargo xtask api
+  `api/closed.txt` (beside the pre-release changes: an alignment with Tailwind CSS, the fixtures merged by domain, the theme moved to `nsh-base` and the renames of `docs/dev/api-naming.md`). A new API lands with its test, a fixture whose script checks it (`api/cases/`, `cargo xtask api
   --keep`); fixtures and their steps never change, and while they pass, old apps keep working
   (`docs/dev/compatibility.md`).
 - **No styles in NSH.** Nothing NSH ships has a look of its own: no default colors, paddings, radii, fonts or variants

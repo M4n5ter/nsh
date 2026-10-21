@@ -149,7 +149,7 @@ fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
     replacement
         .state_mut()
         .events
-        .set(EventKind::MomentumScrollEnd, true);
+        .set(EventKind::MomentumEnd, true);
     assert_eq!(
         source.dispatch(&fresh, &wheel(-3.0)),
         InputDisposition::Rejected
@@ -161,7 +161,7 @@ fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
     replacement
         .state_mut()
         .events
-        .set(EventKind::MomentumScrollEnd, false);
+        .set(EventKind::MomentumEnd, false);
 
     surface.resized(500.0, 400.0, 1.0);
     assert_eq!(

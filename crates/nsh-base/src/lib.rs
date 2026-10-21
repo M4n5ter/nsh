@@ -1,7 +1,7 @@
 //! `nsh/base`: the behavior and infrastructure foundation of NSH apps' UI,
 //! written in Rust, with no look of its own (as `gpui-base` is GPUI Kit's):
-//! controls (`Button`, `Checkbox`, `Radio` in a `RadioGroup`, `Switch`),
-//! navigation (stacks and pages), dialogs, popups on the core's overlays
+//! controls (`Button`, `Checkbox`, `Radio` in a `RadioGroup`, `Switch`,
+//! `Tab` in `Tabs`), navigation (stacks and pages), dialogs, popups on the core's overlays
 //! (`Popover`, `Menu`, `ContextMenu`, `Tooltip`, `Sheet`), safe areas,
 //! selection areas,
 //! the system's dialogs and the software keyboard, and the theme's semantic
@@ -26,6 +26,7 @@ mod safe_area;
 mod selection_area;
 mod sheet;
 mod switch;
+mod tabs;
 pub mod text_view;
 mod theme;
 mod tooltip;
@@ -62,11 +63,12 @@ pub use crate::{
     selection_area::{SelectionArea, SelectionAreaElement, SelectionAreaProps, selection_area},
     sheet::{Sheet, SheetElement, SheetEvent, SheetProps, sheet},
     switch::{Switch, SwitchElement, SwitchEvent, SwitchProps, switch},
+    tabs::{Tab, TabElement, TabEvent, TabProps, Tabs, TabsElement, TabsProps, tab, tabs},
     text_view::{
         CodeHighlighter, MarkdownExtension, MarkdownOptions, MarkdownPlugin, MarkdownPlugins,
         TextView, TextViewClasses, TextViewCodeAction, TextViewCodeActionEvent, TextViewElement,
-        TextViewEvent, TextViewMath, TextViewPart, TextViewParts, TextViewProps, TextViewStyles,
-        text_view,
+        TextViewEvent, TextViewLinkPressEvent, TextViewMath, TextViewPart, TextViewParts,
+        TextViewProps, TextViewStyles, text_view,
     },
     theme::{DEFAULT_THEME, Theme, ThemeError, theme, tokens_of},
     tooltip::{Tooltip, TooltipElement, TooltipEvent, TooltipProps, tooltip},
@@ -95,15 +97,14 @@ pub fn registry() -> Registry {
         .register::<Radio>()
         .register::<RadioGroup>()
         .register::<Switch>()
+        .register::<Tab>()
+        .register::<Tabs>()
         .register::<TextView>()
         .module::<AlertDialog>()
         .module::<Keyboard>()
         .module::<TextView>()
         // The environment's accessors and hooks, as they are.
-        .reexport(
-            &["safeArea", "safeAreaInsets", "keyboardFrame"],
-            &["Insets"],
-        )
+        .reexport(&["safeArea", "safeAreaInsets", "keyboardFrame"], &["Edges"])
         // Navigation: made by `nsh-js` (`navigation.rs`), declared by hand.
         .native_values(&["NavStack", "NavPage", "Dialog", "createNavStack"])
         // The theme: the app's over the default, as design tokens.
@@ -143,6 +144,8 @@ mod tests {
                 "Sheet",
                 "Submenu",
                 "Switch",
+                "Tab",
+                "Tabs",
                 "TextView",
                 "Tooltip"
             ]

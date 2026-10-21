@@ -326,7 +326,7 @@ to its assistive technology. The standalone default also shows a visual
 announcement toast; it does not install an OS screen-reader bridge.
 
 The renderer environment is a separate axis from the operating system:
-`Platform.OS` keeps the real OS and `Platform.renderer` identifies the
+`platform.os` keeps the real OS and `platform.renderer` identifies the
 terminal. See [elements](elements.md) and
 [JS modules](js-modules.md) for the generated environment API.
 

@@ -190,16 +190,18 @@ modules keep their names. A name that already follows `gpui-kit` stays, even whe
 | `headerShown` | `headerVisible` (default `true`) | States | `header` is the page's slot; as `headerBackVisible`, which stays |
 | **TextView** (`nsh/base`) | | | |
 | `onLinkPress(url)` | `onLinkPress({ url })` | Payloads | |
+| `caret` (a slot: the streaming reply's caret) | `streamingCaret` | States | Input's boolean `caret` is the part's switch; `cursor` is a style key. Rust `streaming_caret` |
+| `codeBlockScrollIndicator`, `tableScrollIndicator` | `codeBlockScrollbar`, `tableScrollbar` (default `true`) | States | As `scrollbar`. Rust `code_block_scrollbar`, `table_scrollbar` |
 | **`nsh/desktop`** | | | |
 | `MenuItem.enabled` | `MenuItem.disabled` | States | |
 | **`nsh/device`** | | | |
 | `Platform.OS`, `Platform.Version`, `Platform.constants` | `platform.os`, `platform.version: string` | Environment | A constant object; Android's version is its API level as a string (`"35"`) |
-| `Platform.isPad`, `isTV`, `isDesktop`, `isMacCatalyst`, `constants.interfaceIdiom` | `platform.idiom: "phone" \| "pad" \| "mac" \| "tv" \| "desktop"`, `platform.catalyst` | Environment | `isDesktop` is `platform.idiom === "desktop"` |
+| `Platform.isPad`, `isTV`, `isDesktop`, `isMacCatalyst`, `constants.interfaceIdiom` | `platform.idiom: "phone" \| "pad" \| "mac" \| "tv" \| "desktop"`, `platform.catalyst` | Environment | `isDesktop` becomes `platform.idiom === "desktop" && !platform.isTerminal` for graphical desktop behavior; `platform.renderer` and `platform.isTerminal` distinguish terminal presentation |
 | `Platform.select(spec)` | `platform.select(spec)` | Environment | Same spec |
 | `PixelRatio.get()` | `pixelRatio(): number` (accessor, reactive) | Environment | Follows the window to another screen |
 | `PixelRatio.getFontScale()` | `fontScale()` | Environment | Already exists |
 | `PixelRatio.getPixelSizeForLayoutSize`, `roundToNearestPixel` | (dropped) | | `Math.round(x * pixelRatio()) / pixelRatio()` |
-| `I18nManager` (`isRTL`, `allowRTL`, `forceRTL`, `doLeftAndRightSwapInRTL`, `getConstants`) | (dropped) | Where names come from | Decided by the user: the layout direction follows the locale, a view's `direction` style overrides it; translations, when NSH has them, come from rust-i18n |
+| `I18nManager` (`isRTL`, `allowRTL`, `forceRTL`, `doLeftAndRightSwapInRTL`, `getConstants`) | (dropped) | Where names come from | Decided by the user: the layout direction follows the locale, a view's `direction` style overrides it (Rust: `.direction(LayoutDirection::..)`; Rust's `rtl()`, `force_rtl` and `allow_rtl` are dropped too); translations, when NSH has them, come from rust-i18n |
 | `OS` (type) | unchanged | | `platform.os`'s type |
 | **`nsh/accessibility`** | | | |
 | `AccessibilityInfo.isScreenReaderEnabled()`, `isReduceMotionEnabled()`, `addEventListener` | (dropped) | Listening | `screenReaderEnabled()`, `reduceMotion()` |
@@ -321,6 +323,12 @@ and `Input`'s React Native names follow the rules as well.
 | `Radio::id`, `tab_index`, `tab_stop`, `track_focus` | (left out) | | Identity is the element's; the keyboard focus follows the view tree, as `Button`'s does |
 | `RadioGroup::axis(Axis)` | (left out) | `radio_group.rs` (`aria_orientation`); `gpui-shell`'s `axis` ("semantic only") | It sets only the orientation screen readers hear, which NSH's accessibility layer does not carry yet; the layout is the app's `class` (`flex-row`) |
 | `accessibility_label` on a `RadioGroup` (`gpui-shell`, any element) | (left out) | | A labelled container is one element on iOS, which would hide the radios inside it; added with a container that keeps its children elements |
+| **Tabs** (`nsh/base`) | | | |
+| `Tab::on_click(&ClickEvent, ..)` | `onPress()` | `tabs.rs` `Tab::on_click`; `Button`'s `onPress` | Press, not click (above), as `Button`'s; every press reports, the selected tab's included, as `Tab::on_click` does |
+| `Tab::set_position(position, size)` | (left out) | | As `Radio::set_position`: NSH's accessibility state has no position in a set yet |
+| `Tab::id`, `Tabs::new(id)` | (left out) | | Identity is the element's (`testID` for tests), as `Radio::id` |
+| A tab outside the keyboard focus until its list has roving focus (`Tab`'s doc comment) | each enabled tab is a focus stop, Space / Return press it | `Button`, `Radio` | The keyboard focus follows the view tree, so keyboard users reach every tab; arrow keys, Home / End and roving focus come with the tab list's keyboard model (`gpui-base`'s TODO) |
+| `Tab`'s own layout (`flex`, `items_center`, `justify_center`, a line height of 1) | (none) | `Button` (no layout of its own) | The layout is the app's `class` and `style`, as `Button`'s; centering is `items-center justify-center` |
 | **Overlays and popups** (new) | | | |
 | `<Overlay>` (`nsh`) | | none (GPUI's `deferred` / `anchored`, the web's top layer) | A primitive: what shows above the root view, not a component with a look |
 | `anchor`, `placement`, `align`, `offset`, `margin` | | `positioner.rs` `Positioner::placement` / `align` / `offset` / `margin`, `Placement`, `Align` | `placement`'s values are `Placement`'s (`"top"`, `"bottom"`, `"left"`, `"right"`), `align`'s `Align`'s (`"start"`, `"center"`, `"end"`) |

@@ -409,7 +409,7 @@ function importGlue(url) {
 
 /**
  * The script a web view's HTML starts with: the first message from the
- * player carrying `token` hands it the port `ReactNativeWebView.postMessage`
+ * player carrying `token` hands it the port `window.nsh.postMessage`
  * writes to, and which runs `injectJavaScript` and history steps. The
  * page's own `message` listeners never see that message.
  */
@@ -417,7 +417,7 @@ function webBridge(token) {
   return `(() => {
   let port = null;
   const queue = [];
-  window.ReactNativeWebView = { postMessage(data) { data = String(data); port ? port.postMessage(data) : queue.push(data); } };
+  window.nsh = { postMessage(data) { data = String(data); port ? port.postMessage(data) : queue.push(data); } };
   addEventListener("message", (e) => {
     if (port || e.source !== parent || e.data !== ${JSON.stringify(token)} || !e.ports[0]) return;
     e.stopImmediatePropagation();
@@ -556,6 +556,7 @@ class Player {
         },
         font_ascent: (fp, fl) => this.metrics(this.str(fp, fl))[0],
         font_descent: (fp, fl) => this.metrics(this.str(fp, fl))[1],
+        font_x_height: (fp, fl) => this.metrics(this.str(fp, fl))[2],
         register_font: (fp, fl, dp, dl, weight, italic) => {
           const family = this.str(fp, fl);
           const data = this.bytes(dp, dl).slice();
@@ -830,7 +831,8 @@ class Player {
     if (!m) {
       this.measure.font = font;
       const t = this.measure.measureText("Hg");
-      m = [t.fontBoundingBoxAscent ?? 0, t.fontBoundingBoxDescent ?? 0];
+      const x = this.measure.measureText("x");
+      m = [t.fontBoundingBoxAscent ?? 0, t.fontBoundingBoxDescent ?? 0, x.actualBoundingBoxAscent ?? 0];
       this.metricsCache.set(font, m);
     }
     return m;
@@ -1572,14 +1574,9 @@ class Player {
       const [pageX, pageY] = this.point(e);
       const r = el.getBoundingClientRect();
       this.event(el._id, "onHoverMove", {
-        locationX: e.clientX - r.left,
-        locationY: e.clientY - r.top,
-        pageX,
-        pageY,
-        altKey: e.altKey,
-        ctrlKey: e.ctrlKey,
-        metaKey: e.metaKey,
-        shiftKey: e.shiftKey,
+        position: { x: e.clientX - r.left, y: e.clientY - r.top },
+        pagePosition: { x: pageX, y: pageY },
+        modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
       });
     });
   }
@@ -1808,7 +1805,7 @@ class Player {
   // Images
 
   /**
-   * `source`, `resizeMode`, `defaultSource` (shown until the image loads,
+   * `src`, `resizeMode`, `placeholder` (shown until the image loads,
    * then faded out over `fadeDuration`) and `blurRadius` (a CSS blur).
    * Any URL the browser loads works: `asset:/`, http(s), data: and blob:.
    */
@@ -2139,7 +2136,7 @@ class Player {
       // Snapping would move the content under the thumb: back once it ends.
       el.style.scrollSnapType = "none";
       this.drive(el, 1);
-      this.scrollEvent(el, "onScrollBeginDrag");
+      this.scrollEvent(el, "onScrollDragStart");
       this.pointers.set(e.pointerId, {
         mode: "bar", scroll: el, start: h ? e.clientX : e.clientY, offset: h ? el.scrollLeft : el.scrollTop,
         touchPath: [], states: [],
@@ -2161,7 +2158,7 @@ class Player {
 
   releaseBar(el) {
     el._barHeld = false;
-    this.scrollEvent(el, "onScrollEndDrag");
+    this.scrollEvent(el, "onScrollDragEnd");
     this.drive(el, -1);
     el._restoreSnap = true;
     // Snapping views settle on the nearest snap point.
@@ -2179,7 +2176,7 @@ class Player {
     // browser's): a glide.
     if (el._released && !el._momentum && performance.now() - el._released < 150) {
       el._momentum = true;
-      this.scrollEvent(el, "onMomentumScrollBegin");
+      this.scrollEvent(el, "onMomentumStart");
     }
     // Pulled to refresh, the offset is negative, as on the native backends.
     this.call((w) => w.nsh_scroll(el._id, el.scrollLeft, el.scrollTop - (el._pull ?? 0), el._applied));
@@ -2200,7 +2197,7 @@ class Player {
     }
     if (el._momentum) {
       el._momentum = false;
-      this.scrollEvent(el, "onMomentumScrollEnd");
+      this.scrollEvent(el, "onMomentumEnd");
     }
     this.scrollEvent(el, "onScrollEnd");
   }
@@ -3193,10 +3190,10 @@ class Player {
   // Web views and videos
 
   /**
-   * A web view is an <iframe>. HTML (`source={{ html }}`) loads as
+   * A web view is an <iframe>. HTML (`html`) loads as
    * `srcdoc` in a sandbox with an origin of its own (it never reaches the
    * player's page), with a bridge script first: the page's
-   * `window.ReactNativeWebView.postMessage(data)` reaches `onMessage`
+   * `window.nsh.postMessage(data)` reaches `onMessage`
    * through a `MessageChannel`, and `injectJavaScript` runs through it.
    * `injectedJavaScriptBeforeContentLoaded` / `injectedJavaScript` are
    * scripts at the document's start and end. A URL loads as it is
@@ -3424,7 +3421,7 @@ class Player {
 
 
   /**
-   * `Clipboard.setString`. The async Clipboard API needs a secure context
+   * `Clipboard.writeText`. The async Clipboard API needs a secure context
    * (and, in some browsers, a user gesture); a copy command is the fallback.
    */
   writeClipboard(text) {
@@ -3446,9 +3443,9 @@ class Player {
   }
 
   /**
-   * `Clipboard.getString` / `hasString`: browsers only tell by reading,
+   * `Clipboard.readText` / `hasText`: browsers only tell by reading,
    * which may ask the user (Chromium asks once per site; Safari and Firefox
-   * show a paste button), and fails in an insecure context. `hasString`
+   * show a paste button), and fails in an insecure context. `hasText`
    * reads too: there is no way to ask without reading.
    */
   async readClipboard(request, hasOnly) {
@@ -3463,7 +3460,7 @@ class Player {
     this.event(ROOT_ID, "onClipboard", payload);
   }
 
-  /** `Clipboard.setImage`: a `data:` URI's image as a clipboard item (browsers take PNG). */
+  /** `Clipboard.writeImage`: a `data:` URI's image as a clipboard item (browsers take PNG). */
   async writeClipboardImage(uri) {
     try {
       const blob = await (await fetch(uri)).blob();
@@ -3473,7 +3470,7 @@ class Player {
     }
   }
 
-  /** `Clipboard.getImage` / `hasImage`: the first image item, as a `data:` URI with its size. */
+  /** `Clipboard.readImage` / `hasImage`: the first image item, as a `data:` URI with its size. */
   async readClipboardImage(request, hasOnly) {
     const app = this.app;
     const answer = (payload) => app === this.app && this.event(ROOT_ID, "onClipboard", { id: request, ...payload });
@@ -4082,14 +4079,9 @@ class Player {
         const [pageX, pageY] = this.point(e);
         const r = el.getBoundingClientRect();
         this.event(el._id, "onContextMenu", {
-          locationX: e.clientX - r.left,
-          locationY: e.clientY - r.top,
-          pageX,
-          pageY,
-          altKey: e.altKey,
-          ctrlKey: e.ctrlKey,
-          metaKey: e.metaKey,
-          shiftKey: e.shiftKey,
+          position: { x: e.clientX - r.left, y: e.clientY - r.top },
+          pagePosition: { x: pageX, y: pageY },
+          modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
         });
         return true;
       }
@@ -4435,7 +4427,7 @@ class Player {
     const h = !!el._horizontal;
     if (target == null || Math.abs(target - (h ? el.scrollLeft : el.scrollTop)) < 1) return false;
     el._momentum = true;
-    this.scrollEvent(el, "onMomentumScrollBegin");
+    this.scrollEvent(el, "onMomentumStart");
     el.scrollTo({ [h ? "left" : "top"]: target, behavior: "smooth" });
     return true;
   }
@@ -4633,7 +4625,7 @@ class Player {
         p.scrollStart = [p.scroll.scrollLeft, p.scroll.scrollTop];
         cancelAnimationFrame(p.scroll._zoomAnimation);
         this.drive(p.scroll, 1);
-        this.scrollEvent(p.scroll, "onScrollBeginDrag");
+        this.scrollEvent(p.scroll, "onScrollDragStart");
       }
       if (p.mode || Math.hypot(tx, ty) > 10) {
         this.pressOut(p, false);
@@ -4691,7 +4683,7 @@ class Player {
       const [vx, vy] = this.velocity(p);
       this.call((w) => w.nsh_pan(p.pan._id, 2, p.x - p.startX, p.y - p.startY, vx, vy));
     } else if (p.mode === "scroll") {
-      this.scrollEvent(p.scroll, "onScrollEndDrag");
+      this.scrollEvent(p.scroll, "onScrollDragEnd");
       this.glide(p.scroll, -p.vx, -p.vy);
     } else if (p.press) {
       const rect = p.press.getBoundingClientRect();
@@ -4709,14 +4701,14 @@ class Player {
     el._touchDrag = true;
     el._momentum = false;
     (this.touchDrags ??= new Set()).add(el);
-    this.scrollEvent(el, "onScrollBeginDrag");
+    this.scrollEvent(el, "onScrollDragStart");
     if (!this.touchEndListener) {
       this.touchEndListener = (e) => {
         if (e.touches.length) return;
         for (const v of this.touchDrags) {
           v._touchDrag = false;
           v._released = performance.now();
-          this.scrollEvent(v, "onScrollEndDrag");
+          this.scrollEvent(v, "onScrollDragEnd");
           // Without a glide no scroll follows (nor, sometimes, `scrollend`).
           setTimeout(() => v._released && !v._momentum && this.scrollEnded(v), 200);
         }
@@ -4737,14 +4729,14 @@ class Player {
     const end = () => {
       this.drive(s, -1);
       this.snapMarkers(s);
-      if (momentum) this.scrollEvent(s, "onMomentumScrollEnd");
+      if (momentum) this.scrollEvent(s, "onMomentumEnd");
       this.ownEnd(s);
     };
     if (!v && !w) {
       end();
       return;
     }
-    this.scrollEvent(s, "onMomentumScrollBegin");
+    this.scrollEvent(s, "onMomentumStart");
     const step = (now) => {
       const dt = now - last;
       last = now;

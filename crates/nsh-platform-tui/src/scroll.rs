@@ -279,7 +279,7 @@ impl Surface {
             .node_mut(id)
             .and_then(|node| node.scroll.physics.motion.take());
         if previous.is_some_and(Motion::momentum) {
-            self.scroll_emit(id, EventKind::MomentumScrollEnd);
+            self.scroll_emit(id, EventKind::MomentumEnd);
         }
     }
 
@@ -372,7 +372,7 @@ impl Surface {
             momentum,
         });
         if momentum {
-            self.scroll_emit(id, EventKind::MomentumScrollBegin);
+            self.scroll_emit(id, EventKind::MomentumStart);
         }
     }
 
@@ -668,7 +668,7 @@ impl Surface {
             }
         }
         self.interrupt_scroll(id);
-        self.scroll_emit(id, EventKind::ScrollBeginDrag);
+        self.scroll_emit(id, EventKind::ScrollDragStart);
         self.write_scroll(id, page, true);
         let now = self.now;
         let Some(node) = self.node_mut(id) else {
@@ -831,7 +831,7 @@ impl Surface {
                 node.scroll.content.height
             }) * current.zoom,
         );
-        self.scroll_emit(id, EventKind::ScrollEndDrag);
+        self.scroll_emit(id, EventKind::ScrollDragEnd);
         if refresh {
             self.emit(id, EventKind::Refresh, EventPayload::None);
         }
@@ -870,7 +870,7 @@ impl Surface {
                     started: now,
                 });
             }
-            self.scroll_emit(id, EventKind::MomentumScrollBegin);
+            self.scroll_emit(id, EventKind::MomentumStart);
         } else {
             self.scroll_emit(id, EventKind::ScrollEnd);
         }
@@ -897,7 +897,7 @@ impl Surface {
             if !node.scroll.enabled && motion.momentum() {
                 let value = clamp(node, target(node), node.scroll.physics.refreshing);
                 self.write_scroll(id, value, true);
-                self.scroll_emit(id, EventKind::MomentumScrollEnd);
+                self.scroll_emit(id, EventKind::MomentumEnd);
                 self.scroll_emit(id, EventKind::ScrollEnd);
                 changed = true;
                 continue;
@@ -924,7 +924,7 @@ impl Surface {
                     if t >= 1.0 {
                         self.clamp_scroll_state(id);
                         if momentum {
-                            self.scroll_emit(id, EventKind::MomentumScrollEnd);
+                            self.scroll_emit(id, EventKind::MomentumEnd);
                         }
                         self.scroll_emit(id, EventKind::ScrollEnd);
                     }
@@ -971,7 +971,7 @@ impl Surface {
                         self.write_scroll(id, value, false);
                         if (value.x - bounded.x).abs() < 0.01 && (value.y - bounded.y).abs() < 0.01
                         {
-                            self.scroll_emit(id, EventKind::MomentumScrollEnd);
+                            self.scroll_emit(id, EventKind::MomentumEnd);
                             self.scroll_emit(id, EventKind::ScrollEnd);
                         } else {
                             self.animate_scroll(id, bounded, false, DURATION);
@@ -990,7 +990,7 @@ impl Surface {
                         }
                         self.write_scroll(id, value, true);
                         if done {
-                            self.scroll_emit(id, EventKind::MomentumScrollEnd);
+                            self.scroll_emit(id, EventKind::MomentumEnd);
                             self.scroll_emit(id, EventKind::ScrollEnd);
                         }
                     }
@@ -1103,10 +1103,10 @@ mod tests {
     fn inertia_decelerates_and_ends_with_balanced_lifecycle() {
         let mut surface = scroll();
         for kind in [
-            EventKind::ScrollBeginDrag,
-            EventKind::ScrollEndDrag,
-            EventKind::MomentumScrollBegin,
-            EventKind::MomentumScrollEnd,
+            EventKind::ScrollDragStart,
+            EventKind::ScrollDragEnd,
+            EventKind::MomentumStart,
+            EventKind::MomentumEnd,
             EventKind::ScrollEnd,
         ] {
             surface.node_mut(2).unwrap().events.set(kind, true);
@@ -1123,10 +1123,10 @@ mod tests {
         surface.tick_scroll(10.0);
         assert!(first > 550.0 && second > first);
         for kind in [
-            EventKind::ScrollBeginDrag,
-            EventKind::ScrollEndDrag,
-            EventKind::MomentumScrollBegin,
-            EventKind::MomentumScrollEnd,
+            EventKind::ScrollDragStart,
+            EventKind::ScrollDragEnd,
+            EventKind::MomentumStart,
+            EventKind::MomentumEnd,
             EventKind::ScrollEnd,
         ] {
             assert_eq!(

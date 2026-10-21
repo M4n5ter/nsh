@@ -289,7 +289,7 @@ impl Surface {
                     EventKind::HoverIn,
                     EventKind::HoverOut,
                     EventKind::ScrollEnd,
-                    EventKind::MomentumScrollEnd,
+                    EventKind::MomentumEnd,
                 ]
                 .into_iter()
                 .any(|kind| node.events.contains(kind))

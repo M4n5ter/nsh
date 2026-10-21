@@ -1,7 +1,7 @@
-import { cleanup, effect, Input, type JSX, Scroll, signal, Text, View } from "nsh";
+import { effect, Input, type JSX, Scroll, signal, Text, View } from "nsh";
 import { createAnimatedValue } from "nsh/animated";
 import { BackHandler } from "nsh/android";
-import { Platform } from "nsh/device";
+import { platform } from "nsh/device";
 import { AlertDialog, Dialog, NavPage, SafeAreaView, safeAreaInsets } from "nsh/base";
 import { Icon, type IconName } from "../icons";
 import { nav } from "../nav";
@@ -268,13 +268,13 @@ function Instant() {
 
 function Headerless() {
   return (
-    <NavPage headerShown={false}>
+    <NavPage headerVisible={false}>
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
         <View style={{ flex: 1, padding: 16, gap: 16 }}>
           <Appear>
             <View style={{ gap: 8, paddingHorizontal: 4, paddingTop: 12 }}>
               <View style={{ flexDirection: "row" }}>
-                <Badge label="headerShown={false}" tone="accent" />
+                <Badge label="headerVisible={false}" tone="accent" />
               </View>
               <Text style={{ fontSize: 30, fontWeight: "700", letterSpacing: -0.5, color: colors.text }}>No header</Text>
               <Text style={{ fontSize: 15, lineHeight: 21, color: colors.muted }}>
@@ -375,11 +375,11 @@ export function Navigation() {
   // while intercepting keeps Android's back gesture previewing the pop.
   effect(() => {
     if (!intercept()) return;
-    const back = BackHandler.addEventListener("hardwareBackPress", () => {
+    // Removed with the effect when it runs again.
+    BackHandler.onBackPress(() => {
       backs.set(backs() + 1);
       return true;
     });
-    cleanup(() => back.remove());
   });
   const push = (page: () => JSX.Element) => () => nav.push({ name: "page", page });
   // The dialog springs up from a little smaller each time it opens.
@@ -395,7 +395,7 @@ export function Navigation() {
     <DemoPage
       cards={[
         () => (
-          <Card icon="nav" title="Native stack" subtitle="Headers, transitions, the safe area" right={<Badge label={hint("UIKit / View", Platform.OS === "linux" ? "GTK 4" : "Native views")} />}>
+          <Card icon="nav" title="Native stack" subtitle="Headers, transitions, the safe area" right={<Badge label={hint("UIKit / View", platform.os === "linux" ? "GTK 4" : "Native views")} />}>
             <Insets />
           </Card>
         ),
@@ -405,7 +405,7 @@ export function Navigation() {
               <LinkRow first icon="text" title="Large title" note="headerLargeTitle" onPress={push(LargeTitle)} />
               <LinkRow icon="styles" title="Transparent header" note="headerTransparent" onPress={push(Transparent)} />
               <LinkRow icon="star" title="Custom header items" note="headerLeft / Title / Right" onPress={push(CustomHeader)} />
-              <LinkRow icon="mobile" title="No header" note="headerShown={false}" onPress={push(Headerless)} />
+              <LinkRow icon="mobile" title="No header" note="headerVisible={false}" onPress={push(Headerless)} />
               <LinkRow icon="spark" title="Fade in" note='animation="fade"' onPress={push(Faded)} />
               <LinkRow icon="play" title="No animation" note='animation="none"' onPress={push(Instant)} />
               <LinkRow icon="gestures" title="No swipe back" note="popOnSwipe={false}" onPress={push(Locked)} />

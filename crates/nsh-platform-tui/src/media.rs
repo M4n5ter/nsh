@@ -250,7 +250,7 @@ impl MediaState {
 
     pub(crate) fn scroll(&mut self, lines: i32) -> bool {
         match self {
-            Self::Web(state) if state.props.scroll_enabled => {
+            Self::Web(state) if state.props.scrollable => {
                 state.scroll_by(lines);
                 true
             }
@@ -518,7 +518,7 @@ impl WebState {
             | KeyCode::PageDown
             | KeyCode::Home
             | KeyCode::End
-                if self.props.scroll_enabled =>
+                if self.props.scrollable =>
             {
                 self.selected_link = None;
                 self.scroll = self.scroll.min(self.max_scroll());

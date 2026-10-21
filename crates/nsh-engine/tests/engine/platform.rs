@@ -1,4 +1,4 @@
-//! The OS the platform reports decides `Platform` and which platform-only
+//! The OS the platform reports decides `platform` and which platform-only
 //! props (`ios={{…}}`, `android={{…}}`, `desktop={{…}}`, `web={{…}}`)
 //! apply; on the web, the idiom decides between mobile and desktop.
 
@@ -10,7 +10,7 @@ use nsh_engine::{Bundle, Engine, EngineConfig, Environment, Idiom, Os, Renderer}
 use crate::ChannelSink;
 
 const APP: &str = r#"import { mount, Text, View } from "nsh";
-import { Platform } from "nsh/device";
+import { platform } from "nsh/device";
 
 mount(
   () => (
@@ -20,7 +20,7 @@ mount(
       desktop={{ accessibilityLabel: "desktop" }}
       web={{ accessibilityHint: "web" }}
     >
-      <Text>{`${Platform.OS} ${Platform.isDesktop} ${Platform.select({ ios: "i", mobile: "m", desktop: "d" })} ${Platform.select({ native: "n", default: "-" })}`}</Text>
+      <Text>{`${platform.os} ${platform.idiom === "desktop"} ${platform.select({ ios: "i", mobile: "m", desktop: "d" })} ${platform.select({ native: "n", default: "-" })}`}</Text>
     </View>
   ),
 );
@@ -109,17 +109,17 @@ fn frame_parts(batch: MountBatch) -> (Vec<String>, Vec<String>) {
 #[test]
 fn terminal_environment_keeps_the_os_and_uses_terminal_interaction() {
     let app = r#"import { mount, Text, View } from "nsh";
-import { Platform } from "nsh/device";
+import { platform } from "nsh/device";
 import { keymap } from "nsh/keymap";
 import { Menu, isAvailable } from "nsh/desktop";
 Menu.setApplicationMenu([]);
 Menu.popup([]);
 keymap.bind("mod+k", () => {});
 mount(() => <View desktop={{ accessibilityLabel: "desktop" }}>
-  <Text>{`${Platform.OS} ${Platform.renderer} ${Platform.isTerminal} ${Platform.isDesktop} ${isAvailable} ${keymap.label("mod+k")}`}</Text>
-  <Text>{Platform.select({ terminal: "terminal", macos: "macos", desktop: "desktop", native: "native" })}</Text>
-  <Text>{Platform.select({ macos: "macos", native: "native" })}</Text>
-  <Text>{Platform.select({ mobile: "mobile", desktop: "desktop", default: "default" })}</Text>
+  <Text>{`${platform.os} ${platform.renderer} ${platform.isTerminal} ${isAvailable} ${keymap.label("mod+k")}`}</Text>
+  <Text>{platform.select({ terminal: "terminal", macos: "macos", desktop: "desktop", native: "native" })}</Text>
+  <Text>{platform.select({ macos: "macos", native: "native" })}</Text>
+  <Text>{platform.select({ mobile: "mobile", desktop: "desktop", default: "default" })}</Text>
 </View>);
 "#;
     let batch = first_batch(
@@ -152,7 +152,7 @@ mount(() => <View desktop={{ accessibilityLabel: "desktop" }}>
         frame_parts(batch),
         (
             vec![
-                "macos terminal true false true Ctrl+K".into(),
+                "macos terminal true true Ctrl+K".into(),
                 "terminal".into(),
                 "macos".into(),
                 "default".into()

@@ -40,7 +40,7 @@ impl Appearance {
     }
 }
 
-/// The operating system (`Platform.OS`).
+/// The operating system (`platform.os`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     /// iOS, iPadOS, Mac Catalyst.
@@ -59,7 +59,7 @@ pub enum Os {
 }
 
 impl Os {
-    /// Its `Platform.OS` name.
+    /// Its `platform.os` name.
     pub fn name(self) -> &'static str {
         match self {
             Os::Ios => "ios",
@@ -104,7 +104,7 @@ pub enum Renderer {
 }
 
 impl Renderer {
-    /// Its `Platform.renderer` name.
+    /// Its `platform.renderer` name.
     pub fn name(self) -> &'static str {
         match self {
             Self::Native => "native",
@@ -114,7 +114,7 @@ impl Renderer {
     }
 }
 
-/// The kind of device (React Native's `Platform.isPad`, `isTV`).
+/// The kind of device (`platform.idiom`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Idiom {
     /// A phone.
@@ -134,7 +134,7 @@ pub enum Idiom {
 impl Idiom {
     /// Whether `os` and this idiom describe a desktop: a desktop OS, or a
     /// browser in the desktop idiom. [`Environment::desktop`] also checks
-    /// the surface's renderer (TS: `Platform.isDesktop`).
+    /// the surface's renderer.
     pub fn desktop_on(self, os: Os) -> bool {
         os.is_desktop() || (os == Os::Web && self == Idiom::Desktop)
     }
@@ -172,7 +172,7 @@ pub struct Environment {
     pub screen_reader: bool,
     /// The operating system.
     pub os: Os,
-    /// How this surface presents its UI (`Platform.renderer`).
+    /// How this surface presents its UI (`platform.renderer`).
     pub renderer: Renderer,
     /// The backend supplies native keyboard-focus paths and matches scoped
     /// key bindings against them. This is a host capability, not a JS signal.
@@ -194,7 +194,7 @@ pub struct Environment {
 impl Environment {
     /// Graphical desktop behavior applies: a desktop OS with a graphical
     /// renderer, or a browser in the desktop idiom (`desktop={{…}}` props,
-    /// `Platform.select({ desktop })`, `Platform.isDesktop`).
+    /// `platform.select({ desktop })`).
     pub fn desktop(&self) -> bool {
         self.renderer != Renderer::Terminal && self.idiom.desktop_on(self.os)
     }
