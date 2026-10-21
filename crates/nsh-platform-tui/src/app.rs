@@ -1757,7 +1757,7 @@ mod tests {
             nsh_core::Size::new(px(320.0), px(160.0))
         );
         assert!(view.control().is_none());
-        assert_eq!(view.environment.renderer, Renderer::Terminal);
+        assert_eq!(view.environment.renderer, PlatformRenderer::Terminal);
         assert!(view.image_protocol_cleanup().is_empty());
     }
 

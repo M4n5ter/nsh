@@ -7,7 +7,7 @@
 use std::rc::Weak;
 
 use gpui::{MouseButton, PlatformInput, ScrollDelta};
-use nsh_core::{Bounds, EdgeInsets, ScrollBehavior};
+use nsh_core::{Bounds, EdgeInsets, ScrollBehavior, input::laid_out};
 
 use super::*;
 
@@ -258,7 +258,7 @@ fn opaque(surface: &Surface, view: &NshView, press: bool) -> bool {
         || (press && state.events.contains(EventKind::Focus))
         || !gesture_values(surface, view, state.id).is_empty()
         || state.props.pan_activation.is_some()
-        || (press && crate::text::selectable(&state))
+        || (press && (state.props.selection_area || crate::text::selectable(&state)))
         || state
             .text
             .as_ref()
@@ -520,7 +520,7 @@ impl InputSource {
             frame.root.path(x, y).and_then(|path| {
                 (!path.iter().any(|node| node.opaque_press)).then_some(())?;
                 (!path.iter().any(|node| {
-                    node.thumb.is_some_and(|(matrix, thumb)| {
+                    node.thumb.as_ref().is_some_and(|(matrix, thumb)| {
                         matrix
                             .unproject(x, y)
                             .is_some_and(|(x, y)| thumb.contains(x, y))
