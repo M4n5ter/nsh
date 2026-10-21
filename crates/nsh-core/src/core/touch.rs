@@ -191,8 +191,6 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
-    /// Whether a component's node `id` has a touch handler or takes part in
-    /// the negotiation.
     /// The component whose handlers node `id` has: the one whose view has
     /// it, or the one it is a slot of (a trigger the app passed).
     fn touch_host(&self, id: NodeId) -> Option<NodeId> {
@@ -200,6 +198,8 @@ impl<M: TextEngine> Core<M> {
             .or_else(|| self.components.slot_hosts.get(&id).copied())
     }
 
+    /// Whether a component's node `id` has a touch handler or takes part in
+    /// the negotiation.
     fn hears_touches(&self, id: NodeId) -> bool {
         self.touch_host(id).is_some_and(|host| {
             self.next_handler(host, id, EventKind::Touch, 0).is_some()
