@@ -9,7 +9,7 @@ on:
   # Only the GPUI workspace's own changes run it; a daily run catches what
   # changes to the crates it shares with the main workspace break.
   push:
-    branches: [main]
+    branches: [main, tui/terminal-backend]
     paths:
       - "crates/gpui/**"
       - "third-party/gpui-wgpu/**"

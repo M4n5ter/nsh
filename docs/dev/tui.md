@@ -87,6 +87,15 @@ engine thread on the first import or `nativeModule` lookup, and runs again for e
 paths share the same value in that VM. Stopping the view joins
 its engine thread; the embedding host separately closes external subscriptions and tracks service receipts.
 
+## Renderer type names
+
+`nsh_core::ui::Renderer<T>` is the component render callback used by
+`TextView`. The platform identity enum remains
+`nsh_core::platform::Renderer`; `ui` and `ui::prelude` re-export it as
+`PlatformRenderer`. Code that previously used the terminal branch's
+`ui::Renderer::Terminal` should use `ui::PlatformRenderer::Terminal`
+or the unchanged `platform::Renderer::Terminal`.
+
 ## Coordinates and typography
 
 `CellMetrics::default()` is 8 points wide by 16 points high. A 120×40
@@ -181,6 +190,9 @@ Selectable text has mouse drag selection and Ctrl+A/C, with inline link
 hit testing through the shaped runs' UTF-16 ranges. Pointer input also
 reports raw touch events, native long press and mounted pan gesture
 values; the terminal reports one mouse pointer rather than multitouch.
+Selection remains local to one selectable text node: `SelectionArea`
+does not yet enable cross-node selection or copying in the terminal,
+including across `TextView` blocks.
 
 The native animation graph and `motion.rs` presentation tracks run on
 terminal ticks. Layout animations interpolate frames and retain exiting

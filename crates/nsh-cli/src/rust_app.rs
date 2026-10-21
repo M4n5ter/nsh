@@ -253,6 +253,10 @@ impl Nsh {
     }
 }
 
+/// `nsh-base`'s features the hosts and runners name: they show TextView's
+/// code blocks highlighted, whatever `nsh-base`'s defaults are.
+const HIGHLIGHT: &str = ", features = [\"highlight\"]";
+
 /// The checkout of nsh the crate directory `path` is in: the nearest
 /// directory above it with `crates/nsh-core` (GPUI's crates are in
 /// `crates/gpui`, a level deeper).
@@ -970,7 +974,7 @@ opt-level = 3
                 self.android_lib(false),
                 src("nsh-core"),
                 src("nsh-platform-android"),
-                src("nsh-base"),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
             ),
         )?;
         write(
@@ -1083,7 +1087,7 @@ opt-level = 3
                 self.bin("rust-android"),
                 self.android_lib(true),
                 self.nsh.dep("nsh-core", ""),
-                self.nsh.dep("nsh-base", ""),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 self.nsh
                     .dep("nsh-platform-android", ", default-features = false"),
             ),
@@ -1113,7 +1117,7 @@ opt-level = 3
                 self.bin("rust-web"),
                 self.rust_web_lib(),
                 self.nsh.dep("nsh-core", ""),
-                self.nsh.dep("nsh-base", ""),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 self.nsh
                     .dep("nsh-platform-web", ", default-features = false"),
             ),
@@ -1191,7 +1195,7 @@ opt-level = 3
                 self.nsh
                     .dep(lib, &format!(", default-features = false{features}")),
                 self.nsh.dep("nsh-core", ""),
-                self.nsh.dep("nsh-base", ""),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 self.nsh.dep(platform, ", default-features = false"),
             ),
         )?;
@@ -1261,7 +1265,7 @@ opt-level = 3
                 self.bin("web"),
                 self.web_lib(),
                 src("nsh-core"),
-                src("nsh-base"),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 src("nsh-platform-web"),
             ),
         )?;
@@ -1492,7 +1496,7 @@ opt-level = 3
                 self.bin(dir),
                 src(lib),
                 src("nsh-core"),
-                src("nsh-base"),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 src(platform),
             ),
         )?;
