@@ -28,6 +28,8 @@
 //! image is the same. A frame whose path batches don't overlap is drawn in two
 //! passes; one whose batches all overlap still saves a pass, and every
 //! `write_buffer` and bind group of its paths.
+//! Instance textures pack the same arrays into reusable CPU storage, uploaded
+//! as one rectangle of complete rows and, when needed, one final partial row.
 //!
 //! The recording borrows the GPU objects it draws with through
 //! [`FrameHost`], so the pixel tests' surfaceless harness records frames
@@ -67,6 +69,7 @@ pub(crate) struct FrameState {
     vertices: Vec<PathRasterizationVertex>,
     sprites: Vec<PathSprite>,
     path_batches: Vec<PathBatch>,
+    instance_texture_bytes: Vec<u8>,
 }
 
 /// The GPU objects a frame is recorded with, borrowed from whoever owns them:
@@ -308,7 +311,14 @@ fn record_with(
         path_batches,
     );
 
-    let result = upload(host, &state.bind_groups, &scenes, &vertices, &sprites)
+    let result = upload(
+        host,
+        &state.bind_groups,
+        &mut state.instance_texture_bytes,
+        &scenes,
+        &vertices,
+        &sprites,
+    )
         .with_context(|| {
             format!(
                 "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} monochrome sprites, {} subpixel sprites, {} polychrome sprites, {} layer tiles to rasterize",
@@ -425,6 +435,7 @@ fn close_group(group: &mut [PathBatch]) {
 fn upload(
     host: &mut impl FrameHost,
     bind_groups: &BindGroupCache,
+    texture_bytes: &mut Vec<u8>,
     scenes: &[PlannedScene],
     vertices: &[PathRasterizationVertex],
     sprites: &[PathSprite],
@@ -502,10 +513,21 @@ fn upload(
     }
 
     let texture_binding = if let InstanceSource::Texture(view) = target.instance_data {
-        for (&offset, data) in offsets.iter().zip(&arrays) {
-            if !data.is_empty() {
-                host.write_instance_texture(offset, data);
+        if arrays.iter().any(|data| !data.is_empty()) {
+            let length =
+                usize::try_from(end).context("instance texture upload exceeds address space")?;
+            texture_bytes.clear();
+            texture_bytes
+                .try_reserve(length)
+                .context("failed to allocate instance texture upload")?;
+            // Padding separates absolute record indices and clears every final
+            // partial texel, including when a smaller frame reuses the storage.
+            texture_bytes.resize(length, 0);
+            for (&offset, data) in offsets.iter().zip(&arrays) {
+                let offset = offset as usize;
+                texture_bytes[offset..offset + data.len()].copy_from_slice(data);
             }
+            host.write_instance_texture(0, texture_bytes);
         }
         Some(target.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frame_instance_texture"),

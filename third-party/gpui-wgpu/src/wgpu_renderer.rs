@@ -2010,7 +2010,16 @@ impl WgpuRendererCore {
             let complete_texels = remaining_bytes as u64 / INSTANCE_TEXTURE_TEXEL_SIZE;
             let texels = complete_texels.min(available_texels);
             if texels > 0 {
-                let byte_count = (texels * INSTANCE_TEXTURE_TEXEL_SIZE) as usize;
+                // A frame's packed upload starts at zero: complete rows share
+                // one staging allocation, followed by at most one partial row.
+                // Legacy allocations may also start partway through a row.
+                let rows = if x == 0 && texels == u64::from(*width) {
+                    (complete_texels / texels).min(u64::from(*height - y))
+                } else {
+                    1
+                };
+                let bytes_per_row = (texels * INSTANCE_TEXTURE_TEXEL_SIZE) as u32;
+                let byte_count = bytes_per_row as usize * rows as usize;
                 resources.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
@@ -2021,17 +2030,17 @@ impl WgpuRendererCore {
                     &data[byte_offset..byte_offset + byte_count],
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(byte_count as u32),
+                        bytes_per_row: Some(bytes_per_row),
                         rows_per_image: None,
                     },
                     wgpu::Extent3d {
                         width: texels as u32,
-                        height: 1,
+                        height: rows as u32,
                         depth_or_array_layers: 1,
                     },
                 );
                 byte_offset += byte_count;
-                texel_offset += texels;
+                texel_offset += texels * rows;
                 continue;
             }
 

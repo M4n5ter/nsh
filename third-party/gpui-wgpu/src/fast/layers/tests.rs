@@ -1131,7 +1131,7 @@ fn create_instance_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
     })
 }
 
-/// The pixels of `texture` as RGBA bytes, row by row.
+/// Unpadded texture bytes, with BGRA color targets converted to RGBA.
 pub(super) fn read_back(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1139,7 +1139,7 @@ pub(super) fn read_back(
     format: wgpu::TextureFormat,
 ) -> Vec<u8> {
     let (width, height) = (texture.width(), texture.height());
-    let row = width * 4;
+    let row = width * format.block_copy_size(None).expect("texture texel size");
     let padded_row = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("harness_readback"),
