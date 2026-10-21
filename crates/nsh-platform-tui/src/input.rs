@@ -1165,10 +1165,77 @@ impl Surface {
         {
             return steps;
         }
-        let Some(id) = self.scroll_ancestor(hit.or(self.focus)) else {
+        let scroll = self.scroll_ancestor(hit.or(self.focus));
+        if mouse.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(hit) = hit
+        {
+            let path = self.ancestors(hit);
+            if let Some(id) = scroll.filter(|id| path.contains(id)) {
+                let consumed = self.scroll_wheel_owner(id, mouse, steps);
+                if consumed != 0 {
+                    return consumed;
+                }
+            }
+            if let Some(id) = path.into_iter().find(|id| {
+                self.node(*id)
+                    .is_some_and(|node| nsh_core::input::transforms(&node.gestures, node.events).0)
+            }) {
+                return self.pinch_wheel(id, mouse.kind, steps);
+            }
+        }
+        let Some(id) = scroll else {
             return 0;
         };
         self.scroll_wheel_owner(id, mouse, steps)
+    }
+
+    fn pinch_wheel(&mut self, id: NodeId, kind: MouseEventKind, mut steps: u16) -> u16 {
+        let Some(node) = self.node(id) else {
+            return 0;
+        };
+        // Detents have no begin/end phases. As with terminal Scroll zoom,
+        // each delivery is a complete gesture. Let real callbacks run before
+        // the host admits another detent against their possibly changed view.
+        if node.events.contains(EventKind::PinchStart) || node.events.contains(EventKind::PinchEnd)
+        {
+            steps = 1;
+        }
+        let value = node.gestures.pinch;
+        let scale = nsh_core::input::zoom_factor(
+            f32::from(steps)
+                * if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollRight) {
+                    -1.0
+                } else {
+                    1.0
+                },
+        );
+        if !scale.is_finite() || scale == 0.0 {
+            return 0;
+        }
+        let next = value.and_then(|value| {
+            self.animation
+                .value(value)
+                .map(|old| (value, old, old * scale))
+        });
+        if next.is_some_and(|(_, old, next)| !next.is_finite() || (old != 0.0 && next == 0.0)) {
+            return 0;
+        }
+        let payload = |scale: f32| {
+            EventPayload::Map(vec![
+                ("scale", PayloadValue::Number(f64::from(scale))),
+                ("velocity", PayloadValue::Number(0.0)),
+            ])
+        };
+        self.emit_if(id, EventKind::PinchStart, payload(1.0));
+        if let Some((value, _, next)) = next {
+            let mut finished = Vec::new();
+            self.animation.set(value, next, &mut finished);
+            if !finished.is_empty() {
+                self.events.push(SurfaceEvent::AnimationsFinished(finished));
+            }
+        }
+        self.emit_if(id, EventKind::PinchEnd, payload(scale));
+        steps
     }
 
     pub(crate) fn scroll_wheel_owner(&mut self, id: NodeId, mouse: MouseEvent, steps: u16) -> u16 {
@@ -2775,13 +2842,26 @@ mod tests {
 
     #[test]
     fn wheel_burst_counts_horizontal_rtl_shift_and_zoom_with_mounted_limits() {
-        use nsh_core::{MountBatch, MountItem, Size};
+        use nsh_core::{GestureValues, MountBatch, MountItem, Size, animation::AnimationOp};
         let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
         let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
         items.push(MountItem::ScrollContent {
             id: 2,
             size: Size::new(px(1000.0), px(1000.0)),
         });
+        items.extend([
+            MountItem::Animation(AnimationOp::CreateValue {
+                node: 11,
+                value: 3.0,
+            }),
+            MountItem::Gestures {
+                id: ROOT_ID,
+                values: GestureValues {
+                    pinch: Some(11),
+                    ..Default::default()
+                },
+            },
+        ]);
         surface.apply(MountBatch { items });
         let mouse = MouseEvent {
             kind: MouseEventKind::ScrollRight,
@@ -2835,6 +2915,202 @@ mod tests {
             u16::MAX
         );
         assert_eq!(surface.node(2).unwrap().scroll.physics.zoom, 0.5);
+        assert_eq!(
+            surface.animation.value(11),
+            Some(3.0),
+            "the mounted Scroll must keep its zoom instead of pinching its ancestor"
+        );
+    }
+
+    #[test]
+    fn control_wheel_pinches_the_same_image_natively_and_pairs_subscribed_gestures() {
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+
+        use nsh_core::{
+            GestureValues, MountBatch, MountItem, ResizeMode,
+            animation::{AnimationOp, AnimationProp},
+        };
+        use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+
+        let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+        let mut items = create(2, ViewKind::View, ROOT_ID, 0.0);
+        items.extend(create(4, ViewKind::Image, 2, 0.0));
+        items.extend(create(6, ViewKind::Scroll, ROOT_ID, 64.0));
+        items.extend([
+            MountItem::Frame {
+                id: 4,
+                frame: Bounds::new(point(px(0.0), px(0.0)), Size::new(px(80.0), px(32.0))),
+            },
+            MountItem::Animation(AnimationOp::CreateValue {
+                node: 11,
+                value: 1.0,
+            }),
+            MountItem::Gestures {
+                id: 2,
+                values: GestureValues {
+                    pinch: Some(11),
+                    ..Default::default()
+                },
+            },
+            MountItem::AnimationBindings {
+                id: 4,
+                bindings: vec![(AnimationProp::Transform(0), 11)],
+            },
+            MountItem::ScrollContent {
+                id: 6,
+                size: Size::new(px(1000.0), px(1000.0)),
+            },
+        ]);
+        surface.apply(MountBatch { items });
+        let behavior = &mut surface.node_mut(6).unwrap().scroll.behavior;
+        behavior.min_zoom = 0.5;
+        behavior.max_zoom = 2.0;
+        let node = surface.node_mut(4).unwrap();
+        node.style.transform_origin = nsh_core::TransformOrigin {
+            x: px(0.0).into(),
+            y: px(0.0).into(),
+            z: px(0.0),
+        };
+        node.style
+            .transform
+            .push(nsh_core::TransformKind::Scale, 1.0);
+        let request = node
+            .image
+            .update(
+                Some(nsh_core::ImageSource {
+                    uri: Arc::from("asset:/pinch.png"),
+                    scales: nsh_core::ImageScales::NONE,
+                    size: None,
+                }),
+                ResizeMode::Stretch,
+                nsh_core::ImageOptions::default(),
+                0.0,
+            )
+            .remove(0);
+        node.image.install_cached(
+            &request,
+            Arc::new(crate::image::AnimatedRaster {
+                frames: vec![Arc::new(crate::image::Raster {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![255, 0, 0, 255],
+                })],
+                delays: vec![100],
+                plays: 1,
+            }),
+            0.0,
+        );
+        let image_generation = node.generation;
+        let render = |surface: &mut Surface| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                surface.tick(0.0);
+                let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 12));
+                surface.render(buffer.area, &mut buffer);
+                if !surface.composites.borrow().pending() {
+                    return buffer;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the native image transform did not finish painting"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let before = render(&mut surface);
+        assert_eq!(before[(9, 0)].bg, Color::Rgb(255, 0, 0));
+        assert_eq!(before[(10, 0)].bg, Color::Rgb(255, 255, 255));
+        surface.events.clear();
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 2,
+            row: 0,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        assert!(surface.handle_event(Event::Mouse(mouse)));
+        assert_eq!(surface.animation.value(11), Some(1.1));
+        assert_eq!(surface.node(4).unwrap().generation, image_generation);
+        assert_eq!(surface.global_frame(4).unwrap().size.width.0, 88.0);
+        assert_eq!(render(&mut surface)[(10, 0)].bg, Color::Rgb(255, 0, 0));
+        assert!(surface.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            ..mouse
+        })));
+        assert!((surface.animation.value(11).unwrap() - 1.0).abs() < 0.000_001);
+        assert_eq!(render(&mut surface)[(10, 0)].bg, Color::Rgb(255, 255, 255));
+        assert_eq!(surface.handle_wheel(mouse, 2), 2);
+        assert!((surface.animation.value(11).unwrap() - 1.21).abs() < 0.000_001);
+        assert_eq!(render(&mut surface)[(11, 0)].bg, Color::Rgb(255, 0, 0));
+        assert_eq!(
+            surface.handle_wheel(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    ..mouse
+                },
+                2
+            ),
+            2
+        );
+        assert!((surface.animation.value(11).unwrap() - 1.0).abs() < 0.000_001);
+        assert_eq!(
+            surface.node(6).unwrap().scroll.physics.zoom,
+            1.0,
+            "a sibling Scroll cannot take the image's physical pinch"
+        );
+        assert!(
+            !surface.events.iter().any(|event| matches!(
+                event,
+                SurfaceEvent::Event(_, EventKind::PinchStart | EventKind::PinchEnd, _)
+            )),
+            "native values must not require JS gesture listeners"
+        );
+
+        surface.apply(MountBatch {
+            items: vec![MountItem::Events {
+                id: 2,
+                events: mask(&[EventKind::PinchStart, EventKind::PinchEnd]),
+            }],
+        });
+        surface.events.clear();
+        assert_eq!(
+            surface.handle_wheel(mouse, 4),
+            1,
+            "callbacks must run before another detent is admitted"
+        );
+        assert!((surface.animation.value(11).unwrap() - 1.1).abs() < 0.000_001);
+        let gestures = surface
+            .drain_events()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(
+                    2,
+                    kind @ (EventKind::PinchStart | EventKind::PinchEnd),
+                    EventPayload::Map(fields),
+                ) => Some((kind, fields)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gestures,
+            vec![
+                (
+                    EventKind::PinchStart,
+                    vec![
+                        ("scale", PayloadValue::Number(1.0)),
+                        ("velocity", PayloadValue::Number(0.0))
+                    ]
+                ),
+                (
+                    EventKind::PinchEnd,
+                    vec![
+                        ("scale", PayloadValue::Number(f64::from(1.1_f32))),
+                        ("velocity", PayloadValue::Number(0.0))
+                    ]
+                ),
+            ]
+        );
     }
 
     #[test]

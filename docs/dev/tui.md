@@ -195,6 +195,9 @@ Selectable text has mouse drag selection and Ctrl+A/C, with inline link
 hit testing through the shaped runs' UTF-16 ranges. Pointer input also
 reports raw touch events, native long press and mounted pan gesture
 values; the terminal reports one mouse pointer rather than multitouch.
+Ctrl+wheel also drives a view's mounted `pinch` animated value when no
+zoomable Scroll on its pointer path takes the input. Each delivery pairs
+`onPinchStart` and `onPinchEnd` when subscribed; native values need no JS listener.
 Hover entry and exit are reported, but continuous `onHoverMove` and
 `onMouseMove` callbacks are not emitted by this backend. The scripted
 `hover` step moves the pointer; it does not add those callbacks.
