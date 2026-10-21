@@ -153,8 +153,7 @@ mount(() => <View>
         frames
             .iter()
             .flat_map(texts)
-            .filter(|text| text.starts_with("log "))
-            .next_back()
+            .rfind(|text| text.starts_with("log "))
             .expect("the rendered log changed")
     };
 
