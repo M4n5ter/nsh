@@ -12724,69 +12724,6 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
             .expect("the tooltip anchor's mounted events")
     };
     let passive = event_mask(&batch);
-    for kind in [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut] {
-        assert!(passive.contains(kind));
-        assert!(!passive.contains_listener(kind));
-        // A native watch never erases an actual listener of the same event.
-        apply(
-            &mut c,
-            vec![Op::Listen {
-                id: 2,
-                event: kind,
-                enabled: true,
-            }],
-        );
-        let active = event_mask(&c.commit().unwrap());
-        assert!(active.contains_listener(kind));
-        assert!(active.contains_listener(EventKind::HoverIn));
-        assert!(active.hint_watch().is_none());
-        // The ordinary callback-capable path must still display its native
-        // text tooltip; producer and consumer use the same passivity rule.
-        c.component_event(2, EventKind::HoverIn, &EventPayload::None);
-        clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
-        c.run_component_tasks();
-        assert_eq!(texts_of(&c.commit().unwrap()), ["Saves it"]);
-        c.component_event(2, EventKind::HoverOut, &EventPayload::None);
-        c.commit().unwrap();
-        apply(
-            &mut c,
-            vec![Op::Listen {
-                id: 2,
-                event: kind,
-                enabled: false,
-            }],
-        );
-        let restored = event_mask(&c.commit().unwrap());
-        assert_eq!(restored.bits(), passive.bits());
-        assert!(!restored.contains_listener(kind));
-        assert!(restored.hint_watch().is_some());
-    }
-    apply(
-        &mut c,
-        vec![Op::Listen {
-            id: ROOT_ID,
-            event: EventKind::HoverIn,
-            enabled: true,
-        }],
-    );
-    let active = event_mask(&c.commit().unwrap());
-    assert!(active.contains_listener(EventKind::HoverIn));
-    assert!(active.hint_watch().is_none());
-    c.component_event(2, EventKind::HoverIn, &EventPayload::None);
-    clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
-    c.run_component_tasks();
-    assert_eq!(texts_of(&c.commit().unwrap()), ["Saves it"]);
-    c.component_event(2, EventKind::HoverOut, &EventPayload::None);
-    c.commit().unwrap();
-    apply(
-        &mut c,
-        vec![Op::Listen {
-            id: ROOT_ID,
-            event: EventKind::HoverIn,
-            enabled: false,
-        }],
-    );
-    c.commit().unwrap();
     let hint = c.overlay_state.tooltips[&2].overlay;
     for kind in [EventKind::Show, EventKind::Dismiss] {
         // The anchor must remount when a custom hint gains callbacks, although
@@ -12888,6 +12825,19 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     assert!(
         style.is_some_and(|s| s.background_color != Color::default() && s.border_radius.0 > 0.0)
     );
+    let overlay_key = c.key(overlay).unwrap();
+    let text_id = batch
+        .items
+        .iter()
+        .find_map(|item| match item {
+            MountItem::Text { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    let text_key = c.key(text_id).unwrap();
+    let text_layout = c.nodes[text_key as usize].layout.unwrap();
+    let raw_key = c.nodes[text_key as usize].children[0];
+    let raw_id = c.nodes[raw_key as usize].id;
 
     // Leaving hides it.
     c.component_event(2, EventKind::HoverOut, &EventPayload::None);
@@ -12917,6 +12867,87 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     clock.advance_to(crate::time::now() + std::time::Duration::from_millis(1000));
     c.run_component_tasks();
     assert!(c.commit().is_none());
+
+    // Reopening retains the native text and its style: the batch inserts the
+    // original bubble instead of sending its unchanged text a second time.
+    let assert_shown = |c: &Core<FakeEngine>, batch: &MountBatch| {
+        assert_eq!(c.overlay_state.tooltips[&2].overlay, overlay);
+        assert_eq!(c.key(overlay).unwrap(), overlay_key);
+        assert!(inserts(batch).contains(&(ROOT_ID, overlay, None)));
+        assert!(!batch.items.iter().any(
+            |item| matches!(item, MountItem::Delete { id } if *id == overlay || *id == text_id)
+        ));
+        let state = c.overlay(overlay_key).unwrap();
+        assert_eq!(state.host, Some(ROOT_ID));
+        assert!(state.placed.is_some());
+        let bubble = &c.nodes[overlay_key as usize];
+        assert!(bubble.created);
+        assert!(bubble.frame.size.width > px(0.0) && bubble.frame.size.height > px(0.0));
+        assert_eq!(bubble.children, [text_key]);
+        let text = &c.nodes[text_key as usize];
+        assert_eq!(text.id, text_id);
+        assert_eq!(text.kind, Kind::Text);
+        assert!(text.created);
+        assert_eq!(text.layout, Some(text_layout));
+        assert_eq!(text.parent, overlay_key);
+        assert_eq!(text.children, [raw_key]);
+        let raw = &c.nodes[raw_key as usize];
+        assert_eq!(raw.id, raw_id);
+        assert_eq!(raw.kind, Kind::RawText);
+        assert_eq!(raw.parent, text_key);
+        assert_eq!(raw.text, "Saves it");
+    };
+    for (id, kind) in [
+        (2, EventKind::Touch),
+        (2, EventKind::HoverIn),
+        (2, EventKind::HoverOut),
+        (ROOT_ID, EventKind::HoverIn),
+    ] {
+        assert!(passive.contains(kind));
+        assert!(!passive.contains_listener(kind));
+        // A native watch never erases an actual listener of the same event,
+        // including one on an ancestor in the anchor's input scope.
+        apply(
+            &mut c,
+            vec![Op::Listen {
+                id,
+                event: kind,
+                enabled: true,
+            }],
+        );
+        let active = event_mask(&c.commit().unwrap());
+        assert!(active.contains_listener(kind));
+        assert!(active.contains_listener(EventKind::HoverIn));
+        assert!(active.hint_watch().is_none());
+        // The ordinary callback-capable path still displays the same native
+        // text tooltip; producer and consumer use the same passivity rule.
+        c.component_event(2, EventKind::HoverIn, &EventPayload::None);
+        clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
+        c.run_component_tasks();
+        let shown = c.commit().unwrap();
+        assert_shown(&c, &shown);
+        c.component_event(2, EventKind::HoverOut, &EventPayload::None);
+        let hidden = c.commit().unwrap();
+        assert!(
+            hidden
+                .items
+                .iter()
+                .any(|item| matches!(item, MountItem::Remove { id } if *id == overlay))
+        );
+        assert_eq!(c.overlay(overlay_key).unwrap().host, None);
+        apply(
+            &mut c,
+            vec![Op::Listen {
+                id,
+                event: kind,
+                enabled: false,
+            }],
+        );
+        let restored = event_mask(&c.commit().unwrap());
+        assert_eq!(restored.bits(), passive.bits());
+        assert!(!restored.contains_listener(kind));
+        assert!(restored.hint_watch().is_some());
+    }
 
     // No tooltip: the element no longer follows the pointer.
     apply(
