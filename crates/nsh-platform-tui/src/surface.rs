@@ -973,8 +973,8 @@ impl Surface {
         }
         self.navigation_reconcile();
         let opened_popups = self.reconcile_focus_return(focus_return);
-        self.focus_opened_popups(&opened_popups);
         self.reconcile_focus();
+        self.focus_opened_popups(&opened_popups);
         if let Some(reveal) = focus_reveal
             && self.focus == Some(reveal.target.0)
             && self

@@ -328,10 +328,6 @@ impl Surface {
     }
 
     pub(crate) fn focus_opened_popups(&mut self, opened: &[NodeId]) {
-        if opened.is_empty() {
-            return;
-        }
-        let visible = self.visible_ids();
         for &id in opened {
             let mut owner = self.current_popup_owner();
             let mut owns = false;
@@ -348,10 +344,7 @@ impl Surface {
             if owns {
                 continue;
             }
-            if let Some(first) = self
-                .fresh_autofocus(id, &visible)
-                .or_else(|| self.first_keyboard_stop(id))
-            {
+            if let Some(first) = self.first_keyboard_stop(id) {
                 self.set_focus(Some(first));
             }
         }
@@ -2768,7 +2761,7 @@ mod tests {
 
     #[test]
     fn modal_focus_scope_traps_tab_and_restores_background_focus() {
-        use nsh_core::{MountBatch, MountItem};
+        use nsh_core::{InputConfig, MountBatch, MountItem, ViewProps};
         let mut surface = form();
         surface.set_focus(Some(4));
         let mut items = create(6, ViewKind::Modal, ROOT_ID, 0.0);
@@ -2785,6 +2778,32 @@ mod tests {
         });
         assert_eq!(surface.focused(), None);
         surface.tick(1.0);
+        assert_eq!(surface.focused(), Some(4));
+        // A popup that opens with its modal must not bypass the modal's
+        // capture of the actual background owner (4, rather than first stop 2).
+        let mut items = create(10, ViewKind::Modal, ROOT_ID, 0.0);
+        items.extend(create(12, ViewKind::View, 10, 0.0));
+        items.push(MountItem::ViewProps {
+            id: 12,
+            props: Box::new(ViewProps {
+                focus_return_parent: Some(10),
+                ..Default::default()
+            }),
+        });
+        items.extend(create(14, ViewKind::Input, 12, 0.0));
+        items.push(MountItem::Input {
+            id: 14,
+            config: Box::new(InputConfig {
+                auto_focus: true,
+                ..Default::default()
+            }),
+        });
+        surface.apply(MountBatch { items });
+        assert_eq!(surface.focused(), Some(14));
+        surface.apply(MountBatch {
+            items: vec![MountItem::Remove { id: 10 }],
+        });
+        surface.tick(2.0);
         assert_eq!(surface.focused(), Some(4));
     }
 
