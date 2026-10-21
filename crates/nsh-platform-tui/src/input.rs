@@ -2855,6 +2855,92 @@ mod tests {
         items
     }
 
+    #[test]
+    fn popup_pane_replacement_keeps_tab_autofocus_and_the_original_editor_caret() {
+        use nsh_core::{InputConfig, MountBatch, MountItem, ViewProps};
+
+        for delete in [false, true] {
+            let mut surface = form();
+            surface.apply(MountBatch {
+                items: vec![MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 4,
+                    before: Some(2),
+                }],
+            });
+            surface.input_value(2, "abcdef".into(), 0);
+            surface.selection(2, 3, 3);
+            let mut items = create(6, ViewKind::View, ROOT_ID, 96.0);
+            items.push(MountItem::ViewProps {
+                id: 6,
+                props: Box::new(ViewProps {
+                    focus_return_parent: Some(ROOT_ID),
+                    ..Default::default()
+                }),
+            });
+            items.extend(create(8, ViewKind::View, 6, 0.0));
+            items.push(MountItem::Events {
+                id: 8,
+                events: mask(&[EventKind::Press]),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(8));
+            let mut items = vec![if delete {
+                MountItem::Delete { id: 8 }
+            } else {
+                MountItem::Remove { id: 8 }
+            }];
+            items.extend(create(10, ViewKind::View, 6, 0.0));
+            items.push(MountItem::Events {
+                id: 10,
+                events: mask(&[EventKind::Press]),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(10));
+            for _ in 0..2 {
+                key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
+                assert_eq!(surface.focused(), Some(10));
+            }
+            assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
+            surface.drain_events().for_each(drop);
+            let mut items = vec![MountItem::Delete { id: 10 }];
+            items.extend(create(12, ViewKind::View, 6, 0.0));
+            items.push(MountItem::Events {
+                id: 12,
+                events: mask(&[EventKind::Press, EventKind::Focus]),
+            });
+            items.extend(create(14, ViewKind::Input, 6, 0.0));
+            items.push(MountItem::Input {
+                id: 14,
+                config: Box::new(InputConfig {
+                    auto_focus: true,
+                    ..Default::default()
+                }),
+            });
+            items.push(MountItem::Events {
+                id: 14,
+                events: mask(&[EventKind::Focus]),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(14));
+            let focused: Vec<_> = surface
+                .drain_events()
+                .filter_map(|event| match event {
+                    SurfaceEvent::Event(id, EventKind::Focus, _) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(focused, [14]);
+            surface.apply(MountBatch {
+                items: vec![MountItem::Remove { id: 6 }],
+            });
+            assert_eq!(surface.focused(), Some(2));
+            assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
+            key(&mut surface, KeyCode::Char('Z'), KeyModifiers::NONE);
+            assert_eq!(surface.node(2).unwrap().editor.text(), "abcZdef");
+        }
+    }
+
     fn disable(id: NodeId) -> nsh_core::MountItem {
         let mut props = nsh_core::ViewProps::default();
         props.accessibility.state.disabled = true;
