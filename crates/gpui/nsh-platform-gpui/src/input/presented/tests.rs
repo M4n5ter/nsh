@@ -116,6 +116,68 @@ fn presented_wheels_keep_the_original_scroll_across_growth_and_a_new_nested_owne
 }
 
 #[test]
+fn presented_wheels_keep_the_scroll_when_its_input_moves_under_the_pointer() {
+    let surface = new_surface();
+    let scroll = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
+    scroll.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(1200.0));
+    let editor = view(&surface, 4, scroll.id(), ViewKind::Input);
+    editor.state_mut().frame = crate::geom::rect(0.0, STEP + 10.0, 200.0, 32.0);
+    crate::text_input::value(&editor, "maka你好", 0);
+    crate::text_input::focus_view(&surface, &editor);
+    crate::text_input::set_selection(&editor, 1, 4);
+    let source = InputSource::new(&surface);
+    let snapshot = source.sample().unwrap();
+
+    assert_eq!(pick(&surface.root, 20.0, 20.0, true).unwrap().view, scroll);
+    assert_eq!(
+        source.dispatch(&snapshot, &wheel(-3.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, Points(STEP));
+    assert_eq!(pick(&surface.root, 20.0, 20.0, true).unwrap().view, editor);
+    // A new presentation begins on the field and keeps its ordinary route.
+    assert_eq!(
+        source.dispatch(&source.sample().unwrap(), &wheel(-3.0)),
+        InputDisposition::ExactFallback
+    );
+    // An opaque callback still invalidates the old native scroll route.
+    editor.state_mut().events.set(EventKind::MouseMove, true);
+    assert_eq!(
+        source.dispatch(&snapshot, &wheel(-3.0)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, Points(STEP));
+    editor.state_mut().events.set(EventKind::MouseMove, false);
+
+    // The rest of this original twelve-notch gesture stays on the Scroll,
+    // even while its own field passes beneath the stationary pointer.
+    for tick in 2..=12 {
+        assert_eq!(
+            source.dispatch(&snapshot, &wheel(-3.0)),
+            InputDisposition::Handled,
+            "original wheel notch {tick} was dropped"
+        );
+        assert_eq!(
+            scroll.state().scroll.as_ref().unwrap().y,
+            Points(STEP * tick as f32)
+        );
+    }
+    assert_eq!(crate::text_input::focused_view(&surface), Some(editor.clone()));
+    assert_eq!(
+        crate::text_input::accessible_value(&editor)
+            .map(|value| value.text)
+            .as_deref(),
+        Some("maka你好")
+    );
+    assert_eq!(
+        crate::text_input::ime::selected_text_range(&surface)
+            .unwrap()
+            .range,
+        1..4
+    );
+}
+
+#[test]
 fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
     let surface = new_surface();
     let original = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
