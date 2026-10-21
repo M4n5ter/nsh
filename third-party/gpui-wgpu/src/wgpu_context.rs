@@ -433,6 +433,23 @@ impl WgpuContext {
         Ok(PreparedWebGraphics { context, surface })
     }
 
+    fn adapter_uses_instance_texture(adapter: &wgpu::Adapter) -> bool {
+        if adapter.get_info().backend != wgpu::Backend::Gl {
+            return false;
+        }
+
+        // wgpu's GLES backend derives shader binding layouts and COMPUTE_SHADERS
+        // from the same capability. Without it, SSBO binding remapping loses the
+        // device even when the adapter advertises storage buffers. The existing
+        // texture-backed instance shaders avoid that unsupported backend path.
+        cfg!(target_family = "wasm")
+            || !adapter.get_downlevel_capabilities().flags.contains(
+                wgpu::DownlevelFlags::COMPUTE_SHADERS
+                    | wgpu::DownlevelFlags::VERTEX_STORAGE
+                    | wgpu::DownlevelFlags::FRAGMENT_STORAGE,
+            )
+    }
+
     pub(crate) async fn create_device(
         adapter: &wgpu::Adapter,
     ) -> anyhow::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
@@ -451,8 +468,7 @@ impl WgpuContext {
         }
 
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
-        #[cfg(target_family = "wasm")]
-        let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+        let required_limits = if Self::adapter_uses_instance_texture(adapter) {
             wgpu::Limits::downlevel_webgl2_defaults()
                 .using_resolution(adapter.limits())
                 .using_alignment(adapter.limits())
@@ -461,11 +477,6 @@ impl WgpuContext {
                 .using_resolution(adapter.limits())
                 .using_alignment(adapter.limits())
         };
-        #[cfg(not(target_family = "wasm"))]
-        let required_limits = wgpu::Limits::downlevel_defaults()
-            .using_resolution(adapter.limits())
-            .using_alignment(adapter.limits());
-
         // Rendering uses storage buffers, but no compute pipelines or storage textures.
         // Keep those optional limits when supported without excluding render-capable GPUs.
         let adapter_limits = adapter.limits();
@@ -771,7 +782,7 @@ impl WgpuContext {
     }
 
     pub fn uses_webgl_instance_data(&self) -> bool {
-        matches!(self.backend, WgpuBackend::Gl) && cfg!(target_family = "wasm")
+        Self::adapter_uses_instance_texture(&self.adapter)
     }
 
     pub fn supports_dual_source_blending(&self) -> bool {
