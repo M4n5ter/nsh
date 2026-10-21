@@ -12228,6 +12228,51 @@ fn overlay_prop(id: NodeId, prop: crate::OverlayProp) -> Op {
 }
 
 #[test]
+fn popup_focus_return_preserves_logical_parents_across_native_overlay_relocation() {
+    let mut c = core();
+    add(&mut c, 2, Tag::Overlay, ROOT_ID, &[]);
+    add(&mut c, 4, Tag::View, 2, &[]);
+    add(&mut c, 6, Tag::Overlay, 4, &[]);
+    add(&mut c, 8, Tag::Overlay, ROOT_ID, &[]);
+    add(&mut c, 10, Tag::Modal, ROOT_ID, &[]);
+    add(&mut c, 12, Tag::Overlay, 10, &[]);
+    apply(
+        &mut c,
+        vec![
+            overlay_prop(2, crate::OverlayProp::FocusReturn(true)),
+            overlay_prop(6, crate::OverlayProp::FocusReturn(true)),
+            overlay_prop(12, crate::OverlayProp::FocusReturn(true)),
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let parents = batch
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            MountItem::ViewProps { id, props } => {
+                props.focus_return_parent.map(|parent| (*id, parent))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(parents.contains(&(2, ROOT_ID)), "{parents:?}");
+    assert!(parents.contains(&(6, 2)), "{parents:?}");
+    assert!(parents.contains(&(12, 10)), "{parents:?}");
+    assert!(inserts(&batch).contains(&(ROOT_ID, 6, None)));
+    assert!(!parents.iter().any(|(id, _)| *id == 8));
+
+    apply(
+        &mut c,
+        vec![overlay_prop(2, crate::OverlayProp::FocusReturn(false))],
+    );
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::ViewProps { id: 2, props } if props.focus_return_parent.is_none())));
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::ViewProps { id: 6, props } if props.focus_return_parent == Some(ROOT_ID))));
+}
+
+#[test]
 fn overlays_show_in_their_root_view_above_its_children() {
     use StyleValue::Number;
     let mut c = core();

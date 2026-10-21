@@ -142,6 +142,9 @@ pub struct OverlayConfig {
     pub offset: Points,
     /// The distance it keeps from the edges of the root view's safe area.
     pub margin: Points,
+    /// Return native keyboard focus to the opener when this popup closes
+    /// (terminal and GPUI). This does not hide or block its background.
+    pub focus_return: bool,
     /// A hint (a tooltip), shown after the pointer rested on the anchor
     /// this long: placed against its parent when it has no anchor, shown
     /// while the pointer stays on the anchor (desktops) or [`Self::open`]

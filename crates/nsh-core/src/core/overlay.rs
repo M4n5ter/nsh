@@ -287,6 +287,31 @@ impl<M: TextEngine> Core<M> {
         depth
     }
 
+    fn sync_overlay_focus_return(&mut self, key: Key) {
+        let parent = self
+            .overlay(key)
+            .filter(|s| s.config.focus_return)
+            .map(|_| {
+                let mut parent = self.nodes[key as usize].parent;
+                while parent != NO_KEY {
+                    if self.nodes[parent as usize].kind == Kind::Modal
+                        || self.overlay(parent).is_some_and(|s| s.config.focus_return)
+                    {
+                        return self.nodes[parent as usize].id;
+                    }
+                    parent = self.nodes[parent as usize].parent;
+                }
+                self.nodes[self.root as usize].id
+            });
+        let node = &mut self.nodes[key as usize];
+        if node.props.as_ref().and_then(|p| p.focus_return_parent) != parent {
+            node.props
+                .get_or_insert_with(Default::default)
+                .focus_return_parent = parent;
+            self.mark(key, super::dirty::VIEW_PROPS);
+        }
+    }
+
     /// Shows the overlays whose views around them are shown, in their root
     /// views, and hides the others (and the hints the pointer has not
     /// asked for); then what they listen to (once per commit, before the
@@ -312,6 +337,7 @@ impl<M: TextEngine> Core<M> {
         // The hints in the view, whose anchors listen to the pointer.
         let mut hints = Vec::new();
         for (_, key) in order {
+            self.sync_overlay_focus_return(key);
             let origin = self.overlay(key).and_then(|state| {
                 state
                     .hinted

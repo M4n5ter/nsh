@@ -668,6 +668,9 @@ fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
     if view.is_some_and(|view| !view.attached()) {
         return;
     }
+    // A native focus intent (pointer, Tab or explicit focus) supersedes
+    // an earlier autoFocus request that has not mounted yet.
+    surface.pending_auto_focus.borrow_mut().take();
     if view.is_some() {
         crate::native::focus_surface(surface);
     }
@@ -1261,22 +1264,30 @@ pub(crate) fn config(surface: &Rc<Surface>, view: &NshView, config: &InputConfig
     place(view, &input);
 }
 
-/// Focuses the field once it is on screen (the batch that made it may
-/// insert it after configuring it).
+/// Focuses the field once it is mounted. An input may be configured before
+/// insertion; reconcile that request after the batch, in command order.
 fn auto_focus(surface: &Rc<Surface>, view: &NshView) {
+    surface.pending_auto_focus.borrow_mut().take();
     if view.attached() {
         return set_focus(surface, Some(view));
     }
-    let view = view.clone();
-    let mut frames = 0;
-    surface.on_frame(move |surface, _| {
-        frames += 1;
-        if view.attached() {
-            set_focus(surface, Some(&view));
-            return false;
-        }
-        frames < 30 && view.state().input.is_some()
-    });
+    *surface.pending_auto_focus.borrow_mut() = Some(view.clone());
+}
+
+/// Applies the latest still-live request before navigation chooses a
+/// default focus. Detached inputs wait for an insertion, not a frame retry.
+pub(crate) fn apply_auto_focus(surface: &Rc<Surface>) {
+    let Some(view) = surface.pending_auto_focus.borrow_mut().take() else {
+        return;
+    };
+    if surface.view(view.id()).as_ref() != Some(&view) {
+        return;
+    }
+    if view.attached() {
+        crate::input::focus_view(surface, &view);
+    } else {
+        *surface.pending_auto_focus.borrow_mut() = Some(view);
+    }
 }
 
 /// The content box in the view.

@@ -94,7 +94,7 @@ mount(App);
 
 const SCOPED_BUTTONS: &str = r#"
 import { Input, mount, signal, Text, View } from "nsh";
-import { Button, Dialog } from "nsh/base";
+import { Button, Dialog, Popover } from "nsh/base";
 import { colorScheme } from "nsh/device";
 import { keymap } from "nsh/keymap";
 import { nativeComponent } from "nsh/native";
@@ -104,9 +104,12 @@ const FocusSquare = nativeComponent<{}, {}>("test.focus-square", { props: [], ev
 function App() {
   const log = signal<string[]>([]);
   const open = signal(false);
+  const popup = signal(false);
   const record = (event: string) => log.set([...log(), event]);
-  let scope, a, b;
+  let scope, a, b, native;
   keymap.bind("f6", () => record(`global:${keymap.focusedWithin(scope)}:${keymap.focusedWithin(a)}:${keymap.focusedWithin(b)}`), { when: "always" });
+  keymap.bind("f10", () => popup.set(true), { when: "always" });
+  keymap.bind("f11", () => { popup.set(false); native.focus(); }, { when: "always" });
   return (
     <View style={{ flex: 1, gap: 8 }}>
       <Input testID="report" autoFocus value={`${log().join("|")}@${colorScheme()}`}
@@ -121,13 +124,16 @@ function App() {
       }}>
         <Button testID="a" ref={(node) => a = node} onPress={() => record("A")}><Text>A</Text></Button>
       </View>
-      <FocusSquare testID="native" style={{ width: 40, height: 24 }} />
+      <FocusSquare testID="native" ref={(node) => native = node} style={{ width: 40, height: 24 }} />
       <Button testID="b" ref={(node) => b = node} onPress={() => record("B")}><Text>B</Text></Button>
       <Button testID="opener" onPress={() => { record("open"); open.set(true); }}><Text>Open dialog</Text></Button>
       <Dialog open={open()} animation="none" onOpen={() => record("shown")}
         onClose={() => record("closed")} onOpenChange={(next) => open.set(next)}>
         <Button testID="modal" onPress={() => record("modal")}><Text>Modal action</Text></Button>
       </Dialog>
+      <Popover open={popup()} onOpenChange={(next) => popup.set(next)}>
+        <Button testID="popup-action" onPress={() => {}}><Text>Popup action</Text></Button>
+      </Popover>
     </View>
   );
 }
@@ -505,6 +511,16 @@ fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
     wait_for(&view, cx, "@dark");
     cx.simulate_keystrokes("tab f6");
     wait_for_report(&view, cx, "scope:true:true:false@dark");
+    // The component receives actual window focus after the close batch.
+    // Restoring the popup opener must not overwrite that queued intent.
+    cx.simulate_keystrokes("f10");
+    wait_for_button(&view, cx, "popup-action");
+    cx.simulate_keystrokes("f11");
+    wait_for_button(&view, cx, "native");
+    cx.simulate_keystrokes("f10");
+    wait_for_button(&view, cx, "popup-action");
+    cx.simulate_keystrokes("f11");
+    wait_for_button(&view, cx, "native");
     view.update(cx, |view, _| view.stop());
 }
 

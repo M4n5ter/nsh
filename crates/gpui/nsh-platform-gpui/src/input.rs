@@ -1016,7 +1016,8 @@ fn tab(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         return false;
     }
     let mut stops = Vec::new();
-    let scope = crate::navigation::focus_scope(surface);
+    let scope = crate::focus_return::scope(surface)
+        .unwrap_or_else(|| crate::navigation::focus_scope(surface));
     let trapped = scope != surface.root;
     collect_stops(surface, &scope, &mut stops);
     if stops.is_empty() {
@@ -1039,11 +1040,9 @@ fn tab(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
 /// other backends' windows). True when there is one.
 pub(crate) fn tab_to_edge(surface: &Rc<Surface>, shift: bool) -> bool {
     let mut stops = Vec::new();
-    collect_stops(
-        surface,
-        &crate::navigation::focus_scope(surface),
-        &mut stops,
-    );
+    let scope = crate::focus_return::scope(surface)
+        .unwrap_or_else(|| crate::navigation::focus_scope(surface));
+    collect_stops(surface, &scope, &mut stops);
     let next = if shift { stops.last() } else { stops.first() };
     match next {
         Some(view) => {
@@ -1073,7 +1072,11 @@ pub(crate) fn focusable(surface: &Surface, view: &NshView) -> bool {
     let mut current = Some(view.clone());
     while let Some(node) = current {
         let s = node.state();
-        if s.style.hidden || s.concealed || s.props.pointer_events == PointerEvents::None {
+        if s.style.hidden
+            || s.concealed
+            || s.props.pointer_events == PointerEvents::None
+            || s.live.as_ref().is_some_and(|live| live.dying())
+        {
             return false;
         }
         current = node.parent_view();
@@ -1157,6 +1160,13 @@ fn collect_stops(surface: &Surface, view: &NshView, out: &mut Vec<NshView>) {
             collect_stops(surface, child, out);
         }
     });
+}
+
+/// The first keyboard stop, without Tab's select-all behavior.
+pub(crate) fn first_focus_stop(surface: &Surface, view: &NshView) -> Option<NshView> {
+    let mut stops = Vec::new();
+    collect_stops(surface, view, &mut stops);
+    stops.into_iter().next()
 }
 
 // --- Hit testing --------------------------------------------------------------------

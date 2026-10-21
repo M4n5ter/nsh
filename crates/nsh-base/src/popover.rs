@@ -121,6 +121,7 @@ pub fn Popover(props: PopoverProps, cx: Scope<PopoverEvent>) -> impl IntoElement
                     },
                 );
                 let popup = overlay()
+                    .focus_return(true)
                     .anchor_content(&anchor)
                     .placement(props.placement)
                     .align(props.align)

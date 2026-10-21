@@ -2632,6 +2632,7 @@ impl<M: TextEngine> Core<M> {
                     OverlayProp::Align(v) => c.align = v,
                     OverlayProp::Offset(v) => c.offset = v,
                     OverlayProp::Margin(v) => c.margin = v,
+                    OverlayProp::FocusReturn(v) => c.focus_return = v,
                     OverlayProp::Hint(v) => c.hint = v,
                     OverlayProp::Open(v) => c.open = v,
                 });

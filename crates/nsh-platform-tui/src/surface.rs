@@ -180,6 +180,7 @@ pub struct Surface {
     pub(crate) drag_input: Option<NodeId>,
     pub(crate) pointer: Option<crate::input::Pointer>,
     pub(crate) focus_history: Vec<NodeId>,
+    pub(crate) focus_returns: Vec<crate::input::FocusReturn>,
     pub(crate) toast: Option<(String, f64)>,
     pub(crate) dark: bool,
     pub(crate) now: f64,
@@ -243,6 +244,7 @@ impl Surface {
             drag_input: None,
             pointer: None,
             focus_history: Vec::new(),
+            focus_returns: Vec::new(),
             toast: None,
             dark: false,
             now: 0.0,
@@ -585,6 +587,7 @@ impl Surface {
 
     /// Applies one core commit in order, then reconciles native interaction.
     pub fn apply(&mut self, batch: MountBatch) {
+        let focus_return = self.prepare_focus_return(&batch);
         self.navigation_prepare(&batch);
         let mut finished = Vec::new();
         let mut tracked = Vec::new();
@@ -969,7 +972,9 @@ impl Surface {
             self.clamp_scroll(id);
         }
         self.navigation_reconcile();
+        let opened_popups = self.reconcile_focus_return(focus_return);
         self.reconcile_focus();
+        self.focus_opened_popups(&opened_popups);
         if let Some(reveal) = focus_reveal
             && self.focus == Some(reveal.target.0)
             && self
@@ -1135,7 +1140,7 @@ impl Surface {
             })
     }
 
-    fn is_dying(&self, id: NodeId) -> bool {
+    pub(crate) fn is_dying(&self, id: NodeId) -> bool {
         if self.navigation_retains(id) {
             return true;
         }

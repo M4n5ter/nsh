@@ -801,6 +801,13 @@ impl Overlay {
         self.bind_prop(margin, |m| Prop::Overlay(OverlayProp::Margin(m)))
     }
 
+    /// Focuses this popup's controls while it is shown and returns focus to
+    /// its still-valid opener on closing (terminal and GPUI). Background
+    /// presses remain available; an outside press's new focus is preserved.
+    pub fn focus_return(self, enabled: impl IntoReactive<bool>) -> Self {
+        self.bind_prop(enabled, |v| Prop::Overlay(OverlayProp::FocusReturn(v)))
+    }
+
     /// A press went down outside it, its anchor and the overlays inside it
     /// (where, in the root view). Closing is the listener's: leave it out
     /// of the view.

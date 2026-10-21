@@ -269,6 +269,13 @@ pub struct ViewProps {
     /// `focusable`: `Some(false)` keeps a view that takes presses out of
     /// the keyboard focus's stops (Tab); `None` is the default, a stop.
     pub focusable: Option<bool>,
+    /// The logical parent of a popup's native focus-return scope: another
+    /// popup, or the surface/modal root. Overlays have native siblings even when
+    /// logically nested, so native ancestry cannot recover this relation.
+    /// `None` leaves focus unchanged. The terminal and GPUI backends capture
+    /// the real opener before a batch, focus popup controls after it, and
+    /// restore a still-valid opener when their popup closes.
+    pub focus_return_parent: Option<crate::NodeId>,
     /// The view is a selection area (`SelectionArea` of `nsh/base`): the
     /// texts in its subtree that are not `selectable={false}` share one
     /// selection, from text to text ([`crate::selection`]); an area inside

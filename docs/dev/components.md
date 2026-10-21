@@ -852,6 +852,13 @@ the level's open submenu), so the app arranges them freely. Every item of a shee
 (its content is not placed), so screen readers and tests see only the shown level. `Dialog` stays the modal
 presented by the platform (`navigation.rs`); `AlertDialog` and `nsh/desktop`'s menus stay the system's.
 
+On terminal and GPUI, a `Popover` captures its actual native opener before mounting its content. It respects an
+input's `autoFocus` or an explicit focus command, otherwise focusing its first keyboard control. Tab stays in the
+popup while it owns focus. Closing returns focus, including an input's existing caret, to its still-live opener;
+an outside press that focused another control keeps that focus. Nested popups restore their logical parent even
+though overlays are native siblings. This behavior uses `overlay().focus_return(true)` and the core's
+`ViewProps::focus_return_parent` metadata; ordinary overlays and hints leave focus unchanged.
+
 `Tooltip` is a hint overlay of the core (`elements.md` "Overlays": `overlay().hint(delay).hint_open(..)`) as its
 view's root, so the component's host is the overlay. It is given as an element's `tooltip` (as GPUI's
 `.tooltip(..)`), never placed among children: the core takes such an element as the hint overlay itself, in the

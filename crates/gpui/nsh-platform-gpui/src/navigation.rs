@@ -141,7 +141,7 @@ fn is_ancestor(ancestor: &NshView, view: &NshView) -> bool {
 
 /// True when `view` is drawn: in a surface, and neither it nor an
 /// ancestor is concealed or hidden.
-fn is_shown(view: &NshView) -> bool {
+pub(crate) fn is_shown(view: &NshView) -> bool {
     let mut v = view.clone();
     loop {
         {

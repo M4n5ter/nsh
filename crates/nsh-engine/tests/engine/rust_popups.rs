@@ -65,12 +65,16 @@ fn a_popover_shows_its_content_over_the_box_that_clips_its_trigger() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut parents: Vec<(NodeId, NodeId)> = Vec::new();
     let mut frames: Vec<(NodeId, Bounds<Points>)> = Vec::new();
+    let mut focus_parents = Vec::new();
     let mut body = None;
     while let Ok(batch) = rx.recv_deadline(deadline) {
         for item in &batch.items {
             match item {
                 MountItem::Insert { parent, child, .. } => parents.push((*parent, *child)),
                 MountItem::Frame { id, frame } => frames.push((*id, *frame)),
+                MountItem::ViewProps { id, props } if props.focus_return_parent.is_some() => {
+                    focus_parents.push((*id, props.focus_return_parent));
+                }
                 MountItem::Text { id, text, .. } if &*text.text == "Body" => body = Some(*id),
                 _ => {}
             }
@@ -91,6 +95,7 @@ fn a_popover_shows_its_content_over_the_box_that_clips_its_trigger() {
     let content = parent(body).unwrap();
     let overlay = parent(content).unwrap();
     assert_eq!(parent(overlay), Some(ROOT_ID));
+    assert!(focus_parents.contains(&(overlay, Some(ROOT_ID))));
     let frame = frames
         .iter()
         .rev()

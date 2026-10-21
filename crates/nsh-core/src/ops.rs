@@ -1122,6 +1122,10 @@ pub enum OverlayProp {
     /// safe area (default 0).
     #[prop(js = "margin", on = OVERLAY)]
     Margin(Points),
+    /// A native popup focus-return scope (terminal and GPUI); set by
+    /// components such as `nsh-base`'s `Popover`.
+    #[prop(reset = OverlayProp::FocusReturn(false))]
+    FocusReturn(bool),
     /// A hint (a tooltip) shown after the pointer rested on the anchor this
     /// long ([`crate::overlay::OverlayConfig::hint`]); set by components
     /// (`nsh-base`'s `Tooltip`).

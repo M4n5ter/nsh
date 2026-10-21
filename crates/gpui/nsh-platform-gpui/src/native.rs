@@ -570,6 +570,15 @@ pub(crate) fn focused_component(surface: &Surface) -> Option<NodeId> {
     surface.native.focused.borrow().first().map(|(id, _)| *id)
 }
 
+/// The component awaiting the window's next focus application. This is
+/// the existing native focus intent, ahead of last frame's actual owner.
+pub(crate) fn requested_focus(surface: &Surface) -> Option<NodeId> {
+    match surface.native.tab_to.get() {
+        Some(FocusTarget::Component(id)) => Some(id),
+        _ => None,
+    }
+}
+
 /// Tab moved to the component in node `id`: [`apply_focus`] focuses it.
 pub(crate) fn tab_to(surface: &Surface, id: NodeId) {
     surface.native.tab_to.set(Some(FocusTarget::Component(id)));

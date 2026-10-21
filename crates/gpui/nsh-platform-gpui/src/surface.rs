@@ -122,6 +122,10 @@ pub(crate) struct Surface {
     pub(crate) anim: RefCell<UiAnimation>,
     /// Stacks, screens and modals.
     pub(crate) nav: RefCell<crate::navigation::Nav>,
+    /// Popovers' native focus owners and return targets.
+    pub(crate) focus_returns: RefCell<crate::focus_return::FocusReturns>,
+    /// Last autoFocus request waiting for its input to be mounted.
+    pub(crate) pending_auto_focus: RefCell<Option<NshView>>,
     /// Pointer input state ([`crate::input`]).
     pub(crate) input: crate::input::Input,
     engine: RefCell<Option<Engine>>,
@@ -216,6 +220,8 @@ impl Surface {
             mounter: RefCell::new(mounter),
             anim: RefCell::new(UiAnimation::default()),
             nav: RefCell::default(),
+            focus_returns: RefCell::default(),
+            pending_auto_focus: RefCell::default(),
             input: Default::default(),
             engine: RefCell::new(None),
             control: RefCell::new(None),
@@ -357,6 +363,8 @@ impl Surface {
         self.control.borrow_mut().take();
         self.engine.borrow_mut().take();
         self.rx.borrow_mut().take();
+        self.focus_returns.borrow_mut().clear();
+        self.pending_auto_focus.borrow_mut().take();
         self.mounter.borrow_mut().clear();
         self.native.clear();
         crate::system::clear(self);
@@ -613,8 +621,20 @@ impl Surface {
     }
 
     fn apply(self: &Rc<Self>, batch: &MountBatch) {
+        let focus_return = crate::focus_return::before_batch(self, batch);
         crate::access::prepare(batch);
         for item in &batch.items {
+            if matches!(
+                item,
+                MountItem::Command {
+                    command: nsh_core::Command::Focus | nsh_core::Command::Blur,
+                    ..
+                }
+            ) {
+                // Explicit focus changes supersede preceding autoFocus
+                // requests, including inputs configured before insertion.
+                self.pending_auto_focus.borrow_mut().take();
+            }
             if let MountItem::Animation(op) = item {
                 crate::input::animation_changed(self, op);
             }
@@ -626,12 +646,14 @@ impl Surface {
                 self.mounter.borrow_mut().apply(self, item);
             }
         }
+        crate::text_input::apply_auto_focus(self);
         self.mounter.borrow_mut().end_batch(self);
         if let Some(view) = crate::text_input::focused_view(self)
             && !crate::input::focusable(self, &view)
         {
             crate::text_input::blur_view(self, &view);
         }
+        crate::focus_return::after_batch(self, batch, focus_return);
         // Removed owners are cleared quietly by focused_view; publish that
         // fact even when there is no remaining node to receive Blur.
         self.sync_focus();
@@ -743,6 +765,420 @@ pub(crate) fn flush_all(cx: &mut gpui::App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn focus_return_input(id: NodeId, parent: NodeId, auto_focus: bool) -> Vec<MountItem> {
+        vec![
+            MountItem::Create {
+                id,
+                kind: nsh_core::ViewKind::Input,
+            },
+            MountItem::Input {
+                id,
+                config: Box::new(nsh_core::InputConfig {
+                    auto_focus,
+                    ..Default::default()
+                }),
+            },
+            MountItem::InputValue {
+                id,
+                text: "a中文bc".into(),
+                count: 0,
+            },
+            MountItem::Insert {
+                parent,
+                child: id,
+                before: None,
+            },
+        ]
+    }
+
+    fn focus_return_popup(id: NodeId, parent: NodeId) -> Vec<MountItem> {
+        vec![
+            MountItem::Create {
+                id,
+                kind: nsh_core::ViewKind::View,
+            },
+            // Nested logical popups have native sibling views.
+            MountItem::Insert {
+                parent: ROOT_ID,
+                child: id,
+                before: None,
+            },
+            MountItem::ViewProps {
+                id,
+                props: Box::new(nsh_core::ViewProps {
+                    focus_return_parent: Some(parent),
+                    ..Default::default()
+                }),
+            },
+        ]
+    }
+
+    fn focus_return_form() -> Rc<Surface> {
+        let surface = Surface::new(nsh_engine::Environment::default());
+        surface.root.state_mut().frame = crate::geom::rect(0.0, 0.0, 400.0, 400.0);
+        surface.apply(&MountBatch {
+            items: focus_return_input(2, ROOT_ID, true),
+        });
+        crate::text_input::set_selection(&surface.view(2).unwrap(), 2, 2);
+        surface
+    }
+
+    fn focused_id(surface: &Surface) -> Option<NodeId> {
+        crate::text_input::focused_view(surface).map(|view| view.id())
+    }
+
+    #[test]
+    fn a_popup_returns_to_the_keyboard_opener_with_its_caret() {
+        let surface = focus_return_form();
+        let mut items = focus_return_popup(10, ROOT_ID);
+        items.extend(focus_return_input(12, 10, true));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(12));
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 10 }],
+        });
+        assert_eq!(focused_id(&surface), Some(2));
+        assert_eq!(
+            crate::text_input::ime::selected_text_range(&surface)
+                .unwrap()
+                .range,
+            2..2
+        );
+
+        // Showing the retained overlay again need not resend ViewProps.
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Insert {
+                parent: ROOT_ID,
+                child: 10,
+                before: None,
+            }],
+        });
+        assert_eq!(focused_id(&surface), Some(12));
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 10 }],
+        });
+        assert_eq!(focused_id(&surface), Some(2));
+        assert_eq!(
+            crate::text_input::ime::selected_text_range(&surface)
+                .unwrap()
+                .range,
+            2..2
+        );
+    }
+
+    #[test]
+    fn a_pointer_opened_popup_returns_to_its_actual_trigger() {
+        let surface = focus_return_form();
+        let mut events = nsh_core::EventMask::default();
+        events.set(EventKind::Press, true);
+        surface.apply(&MountBatch {
+            items: vec![
+                MountItem::Create {
+                    id: 4,
+                    kind: nsh_core::ViewKind::View,
+                },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 4,
+                    before: None,
+                },
+                MountItem::Frame {
+                    id: 4,
+                    frame: crate::geom::rect(100.0, 0.0, 100.0, 30.0),
+                },
+                MountItem::Events { id: 4, events },
+            ],
+        });
+        for kind in [
+            crate::input::PointerKind::Down,
+            crate::input::PointerKind::Up,
+        ] {
+            crate::input::pointer(
+                &surface,
+                crate::input::PointerEvent {
+                    kind,
+                    x: 110.0,
+                    y: 10.0,
+                    button: 0,
+                    pointer: 1,
+                    touch: false,
+                    pen: false,
+                    time: 1.0,
+                    modifiers: Default::default(),
+                    clicks: 1,
+                },
+            );
+        }
+        assert_eq!(focused_id(&surface), Some(4));
+        let mut items = focus_return_popup(10, ROOT_ID);
+        items.extend(focus_return_input(12, 10, true));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(12));
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 10 }],
+        });
+        assert_eq!(focused_id(&surface), Some(4));
+
+        let mut pending = focus_return_input(44, ROOT_ID, true);
+        let _ = pending.pop(); // Configured now, inserted by a later batch.
+        surface.apply(&MountBatch { items: pending });
+        crate::input::focus_view(&surface, &surface.view(4).unwrap());
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Insert {
+                parent: ROOT_ID,
+                child: 44,
+                before: None,
+            }],
+        });
+        assert_eq!(focused_id(&surface), Some(4));
+    }
+
+    #[test]
+    fn popup_focus_survives_relocation_and_respects_new_outside_focus() {
+        let surface = focus_return_form();
+        let mut items = focus_return_popup(10, ROOT_ID);
+        items.extend(focus_return_input(12, 10, false));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(12));
+        crate::text_input::set_selection(&surface.view(12).unwrap(), 3, 3);
+        surface.apply(&MountBatch {
+            items: vec![
+                MountItem::Remove { id: 10 },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 10,
+                    before: None,
+                },
+            ],
+        });
+        assert_eq!(focused_id(&surface), Some(12));
+        assert_eq!(
+            crate::text_input::ime::selected_text_range(&surface)
+                .unwrap()
+                .range,
+            3..3
+        );
+
+        // An explicit new owner, like the native focus established by an
+        // outside pointer Down, wins over the popup's later close batch.
+        surface.apply(&MountBatch {
+            items: focus_return_input(4, ROOT_ID, false),
+        });
+        crate::input::focus_view(&surface, &surface.view(4).unwrap());
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Delete { id: 10 }],
+        });
+        assert_eq!(focused_id(&surface), Some(4));
+
+        let mut items = focus_return_popup(20, ROOT_ID);
+        items.extend(focus_return_input(22, 20, false));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(22));
+        surface.apply(&MountBatch {
+            items: vec![
+                MountItem::Command {
+                    id: 22,
+                    command: nsh_core::Command::Blur,
+                },
+                MountItem::Remove { id: 20 },
+            ],
+        });
+        assert_eq!(focused_id(&surface), None);
+    }
+
+    #[test]
+    fn nested_native_siblings_unwind_after_their_owners_are_deleted() {
+        let surface = focus_return_form();
+        let mut items = focus_return_popup(10, ROOT_ID);
+        items.extend(focus_return_input(12, 10, false));
+        items.extend(focus_return_popup(20, 10));
+        items.extend(focus_return_input(22, 20, true));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(22));
+        assert_eq!(
+            surface.view(20).unwrap().parent_view(),
+            Some(surface.root.clone())
+        );
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 20 }],
+        });
+        assert_eq!(focused_id(&surface), Some(12));
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Insert {
+                parent: ROOT_ID,
+                child: 20,
+                before: None,
+            }],
+        });
+        assert_eq!(focused_id(&surface), Some(22));
+        surface.apply(&MountBatch {
+            items: vec![
+                MountItem::Delete { id: 12 },
+                MountItem::Delete { id: 10 },
+                MountItem::Delete { id: 22 },
+                MountItem::Delete { id: 20 },
+            ],
+        });
+        assert_eq!(focused_id(&surface), Some(2));
+        assert_eq!(
+            crate::text_input::ime::selected_text_range(&surface)
+                .unwrap()
+                .range,
+            2..2
+        );
+    }
+
+    #[test]
+    fn replacing_a_popup_and_reusing_an_opener_id_do_not_restore_stale_views() {
+        let surface = focus_return_form();
+        let mut items = focus_return_popup(10, ROOT_ID);
+        items.extend(focus_return_input(12, 10, false));
+        surface.apply(&MountBatch { items });
+        let mut items = vec![MountItem::Delete { id: 12 }, MountItem::Delete { id: 10 }];
+        items.extend(focus_return_popup(20, ROOT_ID));
+        items.extend(focus_return_input(22, 20, false));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(22));
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Delete { id: 20 }],
+        });
+        assert_eq!(focused_id(&surface), Some(2));
+
+        let mut items = focus_return_popup(30, ROOT_ID);
+        items.extend(focus_return_input(32, 30, false));
+        surface.apply(&MountBatch { items });
+        let original = surface.view(2).unwrap();
+        let mut items = vec![MountItem::Delete { id: 2 }];
+        items.extend(focus_return_input(2, ROOT_ID, false));
+        surface.apply(&MountBatch { items });
+        assert_ne!(surface.view(2), Some(original));
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Delete { id: 30 }],
+        });
+        assert_eq!(focused_id(&surface), None);
+    }
+
+    #[test]
+    fn popup_tab_stops_and_explicit_focus_commands_keep_their_native_authority() {
+        let surface = focus_return_form();
+        let mut press = nsh_core::EventMask::default();
+        press.set(EventKind::Press, true);
+        let mut items = focus_return_popup(10, ROOT_ID);
+        for id in [12, 14, 16] {
+            items.extend([
+                MountItem::Create {
+                    id,
+                    kind: nsh_core::ViewKind::View,
+                },
+                MountItem::Insert {
+                    parent: 10,
+                    child: id,
+                    before: None,
+                },
+                MountItem::Events { id, events: press },
+            ]);
+        }
+        items.push(MountItem::ViewProps {
+            id: 12,
+            props: Box::new(nsh_core::ViewProps {
+                focusable: Some(false),
+                ..Default::default()
+            }),
+        });
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(14));
+        let tab = crate::input::KeyEvent {
+            vk: crate::keys::VK_TAB,
+            down: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        assert!(crate::input::key(&surface, tab));
+        assert_eq!(focused_id(&surface), Some(16));
+        assert!(crate::input::key(&surface, tab));
+        assert_eq!(focused_id(&surface), Some(14));
+        assert!(crate::input::tab_to_edge(&surface, true));
+        assert_eq!(focused_id(&surface), Some(16));
+        assert!(crate::input::tab_to_edge(&surface, false));
+        assert_eq!(focused_id(&surface), Some(14));
+
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 10 }],
+        });
+        let mut items = focus_return_popup(20, ROOT_ID);
+        items.extend(focus_return_input(22, 20, true));
+        items.push(MountItem::Command {
+            id: 2,
+            command: nsh_core::Command::Focus,
+        });
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(2));
+        assert_eq!(crate::focus_return::scope(&surface), None);
+    }
+
+    #[test]
+    fn a_modal_temporarily_covering_a_popup_keeps_its_return_owner() {
+        let surface = focus_return_form();
+        let mut items = focus_return_popup(10, ROOT_ID);
+        items.extend(focus_return_input(12, 10, false));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(12));
+
+        let mut items = vec![
+            MountItem::Create {
+                id: 30,
+                kind: nsh_core::ViewKind::Modal,
+            },
+            MountItem::ModalConfig {
+                id: 30,
+                config: nsh_core::ModalConfig {
+                    animation: nsh_core::ModalAnimation::None,
+                    ..Default::default()
+                },
+            },
+            MountItem::Insert {
+                parent: ROOT_ID,
+                child: 30,
+                before: None,
+            },
+        ];
+        items.extend(focus_return_input(32, 30, false));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(32));
+        assert_eq!(crate::focus_return::scope(&surface), None);
+
+        // A popup in a modal names that actual modal as its root owner.
+        let mut items = focus_return_popup(40, 30);
+        items[1] = MountItem::Insert {
+            parent: 30,
+            child: 40,
+            before: None,
+        };
+        items.extend(focus_return_input(42, 40, false));
+        surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(42));
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 40 }],
+        });
+        assert_eq!(focused_id(&surface), Some(32));
+
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 30 }],
+        });
+        assert_eq!(focused_id(&surface), Some(12));
+        assert_eq!(crate::focus_return::scope(&surface), surface.view(10));
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 10 }],
+        });
+        assert_eq!(focused_id(&surface), Some(2));
+        assert_eq!(
+            crate::text_input::ime::selected_text_range(&surface)
+                .unwrap()
+                .range,
+            2..2
+        );
+    }
 
     fn error(text: &str) -> AppError {
         AppError::new(nsh_engine::AppErrorKind::Uncaught, text)
