@@ -1445,6 +1445,63 @@ mod tests {
     use super::*;
     use crate::EdgeInsets;
 
+    struct ExtentHost {
+        state: std::cell::RefCell<ScrollState>,
+        moved: std::cell::RefCell<Vec<Point<Points>>>,
+        reports: std::cell::RefCell<Vec<(Point<Points>, u32)>>,
+        ticks: std::cell::Cell<usize>,
+    }
+
+    impl ExtentHost {
+        fn new(x: f32, y: f32) -> Self {
+            Self {
+                state: std::cell::RefCell::new(ScrollState {
+                    x: Points(x),
+                    y: Points(y),
+                    ..scroll_state((900.0, 900.0), true)
+                }),
+                moved: Default::default(),
+                reports: Default::default(),
+                ticks: Default::default(),
+            }
+        }
+    }
+
+    impl ScrollHost for ExtentHost {
+        fn scroll<R>(&self, f: impl FnOnce(&ScrollState, Size<Points>) -> R) -> Option<R> {
+            Some(f(&self.state.borrow(), sz(300.0, 400.0)))
+        }
+        fn scroll_mut<R>(
+            &self,
+            f: impl FnOnce(&mut ScrollState, Size<Points>) -> R,
+        ) -> Option<R> {
+            Some(f(&mut self.state.borrow_mut(), sz(300.0, 400.0)))
+        }
+        fn now(&self) -> f64 {
+            0.0
+        }
+        fn listens(&self, _: EventKind) -> bool {
+            false
+        }
+        fn event(&self, _: EventKind, _: EventPayload) {
+            panic!("extent changes must not send gesture callbacks")
+        }
+        fn report(&self, offset: Point<Points>, applied: u32) {
+            self.reports.borrow_mut().push((offset, applied));
+        }
+        fn moved(&self, offset: Point<Points>) {
+            self.moved.borrow_mut().push(offset);
+        }
+        fn relayout(&self) {}
+        fn redraw(&self) {}
+        fn attached(&self) -> bool {
+            true
+        }
+        fn start_ticking(&self) {
+            self.ticks.set(self.ticks.get() + 1);
+        }
+    }
+
     fn scroll_state(content: (f32, f32), horizontal: bool) -> ScrollState {
         ScrollState {
             content: sz(content.0, content.1),
@@ -1459,6 +1516,64 @@ mod tests {
 
     fn pt(x: f32, y: f32) -> Point<Points> {
         point(Points(x), Points(y))
+    }
+
+    #[test]
+    fn content_shrink_reconciles_the_old_axis_after_the_anchor_scroll() {
+        let host = ExtentHost::new(120.0, 70.0);
+        config(&host, false, false, false);
+        frame(&host, 0.0);
+        // Changing the scrolling direction does not discard a valid position.
+        assert_eq!(host.state.borrow().origin(), pt(120.0, 70.0));
+
+        content(&host, sz(300.0, 900.0));
+        scroll_by(&host, pt(0.0, 25.0));
+        assert_eq!(host.state.borrow().origin(), pt(120.0, 95.0));
+        frame(&host, 1.0);
+        assert_eq!(host.state.borrow().origin(), pt(0.0, 95.0));
+        assert_eq!(host.moved.borrow().last(), Some(&pt(0.0, 95.0)));
+        assert_eq!(host.reports.borrow().last(), Some(&(pt(0.0, 95.0), 1)));
+
+        // An old-axis rubber band must not leave the content displaced either.
+        let host = ExtentHost::new(-30.0, 70.0);
+        config(&host, false, false, false);
+        assert_eq!(host.ticks.get(), 1);
+        frame(&host, 0.0);
+        assert_eq!(host.state.borrow().origin(), pt(0.0, 70.0));
+        assert_eq!(host.moved.borrow().last(), Some(&pt(0.0, 70.0)));
+        assert_eq!(host.reports.borrow().last(), Some(&(pt(0.0, 70.0), 0)));
+    }
+
+    #[test]
+    fn changing_axis_ends_the_old_animation_without_moving_the_new_axis() {
+        let host = ExtentHost::new(120.0, 70.0);
+        command(
+            &host,
+            &Command::ScrollTo {
+                x: Points(240.0),
+                y: Points(0.0),
+                animated: true,
+            },
+        );
+        // An indicator-only change must preserve the running animation.
+        config(&host, true, false, false);
+        frame(&host, 150.0);
+        assert_eq!(host.state.borrow().origin(), pt(225.0, 70.0));
+
+        // No ScrollContent follows this configuration change.
+        config(&host, false, false, false);
+        frame(&host, 200.0);
+        assert_eq!(host.state.borrow().origin(), pt(225.0, 70.0));
+        command(
+            &host,
+            &Command::ScrollTo {
+                x: Points(0.0),
+                y: Points(170.0),
+                animated: true,
+            },
+        );
+        frame(&host, 300.0);
+        assert_eq!(host.state.borrow().origin(), pt(225.0, 170.0));
     }
 
     #[test]
