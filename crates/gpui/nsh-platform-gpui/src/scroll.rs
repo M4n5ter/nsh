@@ -317,8 +317,8 @@ pub(crate) fn thumb_hit(view: &NshView) -> Option<ThumbHit> {
     })
 }
 
-/// The mouse moved over `view`: its indicator shows (and fades again
-/// once the mouse rests), as overlay scroll bars do.
+/// The mouse moved over `view`: its indicator brightens, then fades back
+/// to its resting opacity once the mouse rests.
 pub(crate) fn hovered(surface: &Rc<Surface>, view: &NshView) {
     shared::hovered(&Host::new(surface, view));
 }
@@ -354,7 +354,7 @@ pub(crate) fn draw_indicator(cx: &mut DrawCx<'_>, state: &ViewState) {
     {
         draw_spinner(cx, center.x.0, center.y.0, progress, s.live.spin);
     }
-    if !s.indicator || s.live.alpha <= 0.0 {
+    if !s.indicator {
         return;
     }
     let Some((rect, _)) = s.thumb(size) else {
@@ -369,7 +369,9 @@ pub(crate) fn draw_indicator(cx: &mut DrawCx<'_>, state: &ViewState) {
     // A knob with a thin border of the opposite tone, as UIKit's default
     // indicator style: the appearance says what the window is, not what
     // the content under the knob is, which may be light in a dark app.
-    let a = s.live.alpha;
+    // The desktop thumb remains draggable at rest; keep its position visible
+    // without extending the shared fade timer or requesting another frame.
+    let a = s.live.alpha.max(0.3);
     let (knob, border) = if cx.dark {
         (
             Color::rgba(255, 255, 255, (140.0 * a) as u8),

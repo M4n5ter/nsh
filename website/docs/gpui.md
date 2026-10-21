@@ -32,6 +32,8 @@ says how.
   which notifies the view.
 - **Input** comes from GPUI's mouse, scroll, key and input method events; hit testing, presses, the responder system,
   scrolling and text editing are the same logic as the Windows backend's.
+- **Scroll bars** stay faintly visible at rest and brighten during scrolling or hover, so their draggable thumbs
+  remain easy to find.
 
 ## Requirements
 
