@@ -270,6 +270,7 @@ fn opaque(surface: &Surface, view: &NshView, press: bool) -> bool {
         )
         || state.events.contains(EventKind::HoverIn)
         || state.events.contains(EventKind::HoverOut)
+        || state.events.contains(EventKind::MouseMove)
         || state.events.contains(EventKind::Touch)
         || state.events.contains(EventKind::PanStart)
         || state.events.contains(EventKind::PanEnd)

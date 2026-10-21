@@ -82,6 +82,8 @@ fn first_batch(environment: Environment, source: &str) -> MountBatch {
         data_dir: None,
         storage: None,
         clock: Default::default(),
+        pinned: Default::default(),
+        clipboard: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     rx.recv_timeout(Duration::from_secs(5))

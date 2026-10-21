@@ -193,6 +193,9 @@ Selectable text has mouse drag selection and Ctrl+A/C, with inline link
 hit testing through the shaped runs' UTF-16 ranges. Pointer input also
 reports raw touch events, native long press and mounted pan gesture
 values; the terminal reports one mouse pointer rather than multitouch.
+Hover entry and exit are reported, but continuous `onHoverMove` and
+`onMouseMove` callbacks are not emitted by this backend. The scripted
+`hover` step moves the pointer; it does not add those callbacks.
 Selection remains local to one selectable text node: `SelectionArea`
 does not yet enable cross-node selection or copying in the terminal,
 including across `TextView` blocks.

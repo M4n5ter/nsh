@@ -112,6 +112,9 @@ content with inertia, bounce and pull-to-refresh according to its props. Drag a 
 button, or click its track to page. Zoom honors the scroll view's zoom and gesture props; paging, snap offsets,
 right-to-left layout and animated scroll commands use the same native scroll state.
 
+The terminal reports hover entry and exit, but does not emit continuous `onHoverMove` or `onMouseMove` callbacks.
+The scripted `hover` step moves the pointer without adding those callbacks.
+
 Inputs support grapheme-aware cursor movement and deletion, Shift selection, word movement with Ctrl/Alt+arrows,
 Home / End, Ctrl+Home / End, select all, undo and redo. Ctrl+A/C/X/V select, copy, cut and paste; Ctrl+Z and
 Ctrl+Shift+Z or Ctrl+Y undo and redo. Secure fields mask their contents and protect

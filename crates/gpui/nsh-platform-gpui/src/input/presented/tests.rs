@@ -244,6 +244,65 @@ fn sealed_press_rebinding_cancels_the_original_capture_without_releasing_into_it
 }
 
 #[test]
+fn sealed_press_preserves_mouse_move_listeners() {
+    let event = EventKind::MouseMove;
+    let surface = new_surface();
+    let button = view(&surface, 2, ROOT_ID, ViewKind::View);
+    button.state_mut().props.input_action = Some(7);
+    button.state_mut().events.set(EventKind::Press, true);
+    button.state_mut().tracked = PRESSED;
+    let source = InputSource::new(&surface);
+
+    // An existing listener must keep the down on the exact input path.
+    button.state_mut().events.set(event, true);
+    let snapshot = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&snapshot, &click(true)),
+        InputDisposition::ExactFallback
+    );
+    assert!(surface.input.presented_press.borrow().is_none());
+
+    // A listener added to the live route invalidates an already sealed press.
+    button.state_mut().events.set(event, false);
+    let snapshot = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&snapshot, &click(true)),
+        InputDisposition::Handled
+    );
+    surface.root.state_mut().events.set(event, true);
+    let moved = PlatformInput::MouseMove(gpui::MouseMoveEvent {
+        position: gpui::point(gpui::px(100.0), gpui::px(20.0)),
+        pressed_button: Some(MouseButton::Left),
+        ..Default::default()
+    });
+    assert_eq!(
+        source.dispatch(&snapshot, &moved),
+        InputDisposition::Rejected
+    );
+    assert!(surface.input.presented_press.borrow().is_none());
+    assert!(surface.input.pointers.borrow().is_empty());
+    assert_eq!(button.state().states, 0);
+
+    // Crossing into a listener must reject even when the press owner is unchanged.
+    surface.root.state_mut().events.set(event, false);
+    let child = view(&surface, 3, button.id(), ViewKind::View);
+    child.state_mut().frame = crate::geom::rect(80.0, 0.0, 100.0, 100.0);
+    child.state_mut().events.set(event, true);
+    let snapshot = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&snapshot, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&snapshot, &moved),
+        InputDisposition::Rejected
+    );
+    assert!(surface.input.presented_press.borrow().is_none());
+    assert!(surface.input.pointers.borrow().is_empty());
+    assert_eq!(button.state().states, 0);
+}
+
+#[test]
 fn resize_and_modal_changes_cancel_only_the_original_surfaces_native_capture() {
     let surface = new_surface();
     let button = view(&surface, 2, ROOT_ID, ViewKind::View);

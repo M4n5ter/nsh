@@ -80,6 +80,10 @@ pub struct Model {
 /// What a test session's app starts with, in place of the platform's.
 struct Setup {
     storage: Arc<MemoryStorage>,
+    /// What the test fixes of the environment.
+    pins: nsh_engine::EnvironmentPins,
+    /// The clipboard the app's calls are served from: the test's own.
+    clipboard: Arc<nsh_core::clipboard::MemoryClipboard>,
     forwarder: Arc<forward::Forwarder>,
     /// Where each batch's items go when the test traces the app.
     trace: Option<SendOutgoing>,
@@ -132,11 +136,37 @@ impl Model {
 
     /// What the test sets the app up with (before its first bundle): the
     /// storage entries it starts with, whether it traces the app (`nsh test
-    /// --trace`), and what sends the test its requests and, when traced,
-    /// each batch ([`Model::set_up_engine`], [`Model::fetch_reply`]).
-    pub fn set_up(&self, storage: Vec<(String, String)>, trace: bool, send: SendOutgoing) {
+    /// --trace`), what it fixes of the environment and the clipboard's text,
+    /// and what sends the test its requests and, when traced, each batch
+    /// ([`Model::set_up_engine`], [`Model::fetch_reply`]).
+    pub fn set_up(
+        &self,
+        storage: Vec<(String, String)>,
+        trace: bool,
+        environment: nsh_dev::protocol::TestEnvironment,
+        send: SendOutgoing,
+    ) {
+        let mut pins = nsh_engine::EnvironmentPins::default();
+        pins.locale = environment
+            .locale
+            .as_deref()
+            .and_then(nsh_core::platform::Locale::parse);
+        pins.reduce_motion = environment.reduced_motion;
+        pins.safe_area =
+            environment
+                .safe_area
+                .map(|[top, right, bottom, left]| nsh_core::geometry::Edges {
+                    top: Points(top),
+                    right: Points(right),
+                    bottom: Points(bottom),
+                    left: Points(left),
+                });
         *self.setup.lock().unwrap_or_else(|e| e.into_inner()) = Some(Setup {
             storage: MemoryStorage::new(storage),
+            pins,
+            clipboard: Arc::new(nsh_core::clipboard::MemoryClipboard::new(
+                environment.clipboard,
+            )),
             trace: trace.then(|| send.clone()),
             forwarder: forward::Forwarder::new(send),
         });
@@ -145,8 +175,9 @@ impl Model {
     /// Sets `config`, the engine of a test session's app, up as the test
     /// says ([`Model::set_up`]; nothing before): its storage is the test's,
     /// its requests go to the test (which answers them or lets them through
-    /// to the host's network), and a traced app's engine logs each commit's
-    /// timings.
+    /// to the host's network), a traced app's engine logs each commit's
+    /// timings, the environment keeps what the test fixed, and the app's
+    /// clipboard calls are served from the test's clipboard.
     pub fn set_up_engine(&self, config: &mut nsh_engine::EngineConfig) {
         let setup = self.setup.lock().unwrap_or_else(|e| e.into_inner());
         let Some(setup) = &*setup else { return };
@@ -156,6 +187,16 @@ impl Model {
         }));
         config.storage = Some(setup.storage.clone() as Arc<dyn nsh_core::storage::StorageBackend>);
         config.trace |= setup.trace.is_some();
+        config.pinned = setup.pins;
+        config.clipboard =
+            Some(setup.clipboard.clone() as Arc<dyn nsh_core::clipboard::ClipboardBackend>);
+    }
+
+    /// The text on the test's clipboard (after [`Model::set_up`]).
+    pub fn clipboard_text(&self) -> Option<String> {
+        use nsh_core::clipboard::ClipboardBackend as _;
+        let setup = self.setup.lock().unwrap_or_else(|e| e.into_inner());
+        setup.as_ref().and_then(|s| s.clipboard.text())
     }
 
     /// The test's answer to the app's request `id` (one event of it).
@@ -238,6 +279,8 @@ pub trait Scene: Send + Sync {
     fn menu(&self) -> Result<Option<Vec<nsh_core::desktop::MenuItem>>, String>;
     /// The open context menu was chosen from or closed.
     fn menu_closed(&self) -> Result<(), String>;
+    /// The text on the test's clipboard.
+    fn clipboard(&self) -> Result<Option<String>, String>;
     /// The app's storage's entries.
     fn storage(&self) -> Result<std::collections::BTreeMap<String, String>, String>;
 }
@@ -317,6 +360,9 @@ impl Scene for Model {
     fn menu_closed(&self) -> Result<(), String> {
         self.lock().screen.menu_closed();
         Ok(())
+    }
+    fn clipboard(&self) -> Result<Option<String>, String> {
+        Ok(self.clipboard_text())
     }
     fn storage(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
         Ok(self.storage_entries())
@@ -456,6 +502,7 @@ pub fn answer(model: &Model, step: &TestStep) -> Option<Result<serde_json::Value
             SceneQuery::Answered => model.answered().map(|()| Value::Null),
             SceneQuery::Menu => model.menu().and_then(|m| json(to_value(m.map(menu_value)))),
             SceneQuery::MenuClosed => model.menu_closed().map(|()| Value::Null),
+            SceneQuery::Clipboard => Ok(Value::from(model.clipboard_text())),
             SceneQuery::Storage => json(to_value(model.storage_entries())),
             SceneQuery::Bounds { .. }
             | SceneQuery::Viewport
@@ -566,6 +613,9 @@ impl Scene for RemoteScene {
     fn menu_closed(&self) -> Result<(), String> {
         self.query::<serde_json::Value>(SceneQuery::MenuClosed)
             .map(drop)
+    }
+    fn clipboard(&self) -> Result<Option<String>, String> {
+        self.query(SceneQuery::Clipboard)
     }
     fn storage(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
         self.query(SceneQuery::Storage)
@@ -745,12 +795,17 @@ impl Tester {
         match event {
             nsh_dev::DevEvent::Testing => self.start(),
             nsh_dev::DevEvent::Step { id, step } => self.take(id, step),
-            nsh_dev::DevEvent::TestSetup { storage, trace } => {
+            nsh_dev::DevEvent::TestSetup {
+                storage,
+                trace,
+                environment,
+            } => {
                 if let Some(model) = self.model() {
                     let client = self.client.clone();
                     model.set_up(
                         storage,
                         trace,
+                        environment,
                         Arc::new(move |message| {
                             let Some(client) = client.get().and_then(std::sync::Weak::upgrade)
                             else {
@@ -871,6 +926,7 @@ impl Agent {
             }
             TestStep::ChooseMenuItem { label } => done(self.choose_menu_item(&label)),
             TestStep::CloseMenu => done(self.close_menu()),
+            TestStep::Clipboard => self.scene.clipboard().map(Value::from),
             TestStep::PressKey { keys } => {
                 done(self.native.press_keys(&keys).and_then(|()| self.settled()))
             }
@@ -953,6 +1009,7 @@ impl Agent {
             SceneQuery::Answered => scene.answered().map(|()| Value::Null),
             SceneQuery::Menu => scene.menu().and_then(|m| json(to_value(m.map(menu_value)))),
             SceneQuery::MenuClosed => scene.menu_closed().map(|()| Value::Null),
+            SceneQuery::Clipboard => scene.clipboard().map(Value::from),
             SceneQuery::Storage => scene.storage().and_then(|e| json(to_value(e))),
             SceneQuery::Bounds { id } => {
                 json(to_value(self.native.bounds(id).map(|b| {
@@ -1023,6 +1080,20 @@ impl Agent {
     /// is not: the innermost scroll view around it that hides it scrolls it
     /// towards its own middle, a gesture at a time, as a user would.
     fn scroll_into_view(&self, id: NodeId, selector: &str) -> Result<Point<Points>, String> {
+        let (at, scrolled) = self.bring_into_view(id, selector)?;
+        if !scrolled {
+            return Ok(at);
+        }
+        // What the scrolling brought (rows bound, images decoded) lands
+        // before the step acts, once: between the gestures only the view's
+        // own movement is waited for ([`Agent::stopped`]).
+        self.settled()?;
+        Ok(self.native.bounds(id).map_or(at, |b| b.center()))
+    }
+
+    /// [`Agent::scroll_into_view`]'s gestures: the view's middle, and
+    /// whether a gesture moved anything.
+    fn bring_into_view(&self, id: NodeId, selector: &str) -> Result<(Point<Points>, bool), String> {
         let not_on_screen = || {
             format!(
                 "`{selector}` is not on screen (it has no native view); {}",
@@ -1048,7 +1119,7 @@ impl Agent {
                 // is pressed where it is when it shows.
                 if anchors.peek().is_none() {
                     return if window.contains(&at) {
-                        Ok(at)
+                        Ok((at, before.is_some()))
                     } else {
                         Err(not_on_screen())
                     };
@@ -1070,7 +1141,7 @@ impl Agent {
             });
             let Some((_, horizontal, scroller)) = hiding else {
                 if window.contains(&at) {
-                    return Ok(at);
+                    return Ok((at, before.is_some()));
                 }
                 return Err(not_on_screen());
             };
@@ -1101,7 +1172,7 @@ impl Agent {
                 Point::new(Points(0.0), Points(step))
             };
             self.native.scroll(middle, delta);
-            self.settled()?;
+            self.stopped(id)?;
             before = Some(at);
         }
         Err(format!(
@@ -1290,6 +1361,29 @@ impl Agent {
                 break;
             }
             self.scene.wait_for_batch(activity.batches, POLL);
+        }
+        self.check()
+    }
+
+    /// Waits until view `id` stops moving after a gesture scrolled it: its
+    /// bounds the same over a few polls ([`SETTLE`] at most). What else the
+    /// app does meanwhile (a ticking timer, an animation of its own) does
+    /// not hold the next gesture back, as it holds a step's end
+    /// ([`Agent::settled`]).
+    fn stopped(&self, id: NodeId) -> Result<(), String> {
+        const STILL: usize = 3;
+        let start = Instant::now();
+        let mut last = self.native.bounds(id);
+        let mut still = 0;
+        while still < STILL && start.elapsed() < SETTLE {
+            std::thread::sleep(POLL);
+            let now = self.native.bounds(id);
+            if now == last {
+                still += 1;
+            } else {
+                still = 0;
+                last = now;
+            }
         }
         self.check()
     }

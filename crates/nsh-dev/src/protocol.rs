@@ -117,6 +117,27 @@ pub enum HostPlatform {
     Other,
 }
 
+/// What a test fixes of its app's environment on a host, whatever the
+/// platform reports, and the clipboard its app's calls are served from
+/// (`open`'s options; [`ServerMessage::TestSetup`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TestEnvironment {
+    /// The text on the test's clipboard at first: the app's clipboard calls
+    /// are served from a clipboard of the test's own, never the machine's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<String>,
+    /// The locale, a BCP 47 tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    /// Whether the user asked for less motion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduced_motion: Option<bool>,
+    /// The safe area insets in points: top, right, bottom, left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_area: Option<[f32; 4]>,
+}
+
 /// Messages from the server to dev hosts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -147,6 +168,9 @@ pub enum ServerMessage {
         /// ([`ClientMessage::Trace`]).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         trace: bool,
+        /// What the test fixes of the app's environment, and its clipboard.
+        #[serde(default)]
+        environment: TestEnvironment,
     },
     /// What the test answers to the app's request `id`
     /// ([`ClientMessage::Fetch`]), a message per event, in order.
@@ -291,6 +315,9 @@ pub enum TestStep {
     },
     /// The open context menu's actions (`app.menu`): `null` when none is.
     Menu,
+    /// The text on the test's clipboard (`app.clipboard`): `null` when it
+    /// holds none.
+    Clipboard,
     /// Chooses the open context menu's action (`app.chooseMenuItem`).
     ChooseMenuItem {
         /// Its label (a submenu's: `"Share > Mail"`).
@@ -426,6 +453,8 @@ pub enum SceneQuery {
     Answered,
     /// The context menu the app shows (`Menu.popup`): its items, or `null`.
     Menu,
+    /// The text on the test's clipboard, or `null`.
+    Clipboard,
     /// The open context menu was chosen from or closed.
     MenuClosed,
     /// The app's storage: its entries.

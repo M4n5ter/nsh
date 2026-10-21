@@ -480,6 +480,7 @@ class Player {
     // right-to-left layout), which replaces its inline style.
     container.append(this.root);
     this.views = new Map();
+    this.mouseTracked = new Set();
     // Of the views' own style rules (`op_css`).
     this.classPrefix = `nsh-p${++players}-`;
     this.timer = 0;
@@ -686,14 +687,15 @@ class Player {
 
   /**
    * What the test sets the app up with (`ServerMessage::TestSetup`): the
-   * storage it starts with, and whether it traces the app. Its requests,
+   * storage it starts with, whether it traces the app, and what it fixes of
+   * the environment and the clipboard. Its requests,
    * and a traced app's batches, then go to the test through `onTestSend`
    * (`{type: "fetch", id, request}`, `{type: "fetch_cancel", id}`,
    * `{type: "trace", items}`).
    */
-  testSetup(storage, trace) {
+  testSetup(storage, trace, environment) {
     if (!this.wasm.nsh_test_setup) return;
-    const setup = JSON.stringify({ storage: storage ?? [], trace: !!trace });
+    const setup = JSON.stringify({ storage: storage ?? [], trace: !!trace, environment: environment ?? {} });
     this.withStrings([setup], (p, l) => this.wasm.nsh_test_setup(p, l));
   }
 
@@ -929,6 +931,7 @@ class Player {
     root.textContent = "";
     root.append(this.live);
     this.views.clear();
+    this.mouseTracked.clear();
     root._id = ROOT_ID;
     root._kind = "root";
     root._events = new Set();
@@ -1372,6 +1375,7 @@ class Player {
     const el = this.view(id);
     if (!el) return;
     this.views.delete(id);
+    this.mouseTracked.delete(id);
     if (el._video) {
       // A removed media element keeps playing until it is collected.
       clearInterval(el._progressTimer);
@@ -1523,6 +1527,8 @@ class Player {
     const el = this.view(id);
     if (!el) return;
     el._events = new Set(events);
+    if (el._events.has("onMouseMove")) this.mouseTracked.add(id);
+    else this.mouseTracked.delete(id);
     const pressable = PRESS_EVENTS.some((e) => el._events.has(e));
     // Under the view's own `cursor` (its class).
     el.classList.toggle("nsh-pointer", pressable);
@@ -3905,6 +3911,40 @@ class Player {
     return out;
   }
 
+  /** Convert viewport coordinates through the view's composed 2D transforms. */
+  mousePoint(el, e) {
+    let a = 1, b = 0, c = 0, d = 1;
+    for (let node = el; node; node = node.parentElement) {
+      const transform = getComputedStyle(node).transform;
+      if (transform === "none") continue;
+      const m = new DOMMatrix(transform);
+      [a, b, c, d] = [m.a * a + m.c * b, m.b * a + m.d * b,
+        m.a * c + m.c * d, m.b * c + m.d * d];
+    }
+    const r = el.getBoundingClientRect();
+    const det = a * d - b * c;
+    if (!det) return null;
+    const style = getComputedStyle(el);
+    const w = parseFloat(style.width), h = parseFloat(style.height);
+    // The bounding rectangle includes transform origins and scrolling;
+    // its top left is the minimum of the transformed border-box corners.
+    const x = e.clientX - r.left + Math.min(0, a * w, c * h, a * w + c * h);
+    const y = e.clientY - r.top + Math.min(0, b * w, d * h, b * w + d * h);
+    return [(d * x - c * y) / det, (a * y - b * x) / det];
+  }
+
+  /** Mouse motion follows the hit view, even during pointer capture. */
+  mouseMoved(e) {
+    if (e.pointerType !== "mouse" || !this.mouseTracked.size) return;
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    if (!target || !this.root.contains(target)) return;
+    for (const el of this.ancestors(this.viewOf(target))) {
+      if (!el._events?.has("onMouseMove")) continue;
+      const point = this.mousePoint(el, e);
+      if (point) this.event(el._id, "onMouseMove", { x: point[0], y: point[1] });
+    }
+  }
+
   installInput() {
     const root = this.root;
     root.addEventListener("pointerdown", (e) => this.pointerDown(e));
@@ -3932,6 +3972,7 @@ class Player {
     root.addEventListener("gesturechange", (e) => this.gesture && this.gestureZoom(e, 1));
     root.addEventListener("gestureend", (e) => this.gesture && this.gestureZoom(e, 2));
     root.addEventListener("pointermove", (e) => {
+      this.mouseMoved(e);
       if (e.pointerType !== "mouse") return;
       this.hover = [e.clientX, e.clientY];
       // Reveal only a draggable thumb under the pointer.

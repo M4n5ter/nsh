@@ -2101,6 +2101,7 @@ mod tests {
             DevEvent::TestSetup {
                 storage: vec![("launches".into(), "99".into())],
                 trace: true,
+                environment: Default::default(),
             },
             DevEvent::Fetch {
                 id: 1,
