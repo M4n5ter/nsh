@@ -591,7 +591,10 @@ mod tests {
             assert_eq!(frames.len(), 2);
             let frame = &frames[1];
             assert_eq!(frame.size(), size(DevicePixels(80), DevicePixels(40)));
-            assert_eq!(&frame.pixels()[(20 * 80 + 40) * 4..][..4], &[255, 0, 0, 255]);
+            assert_eq!(
+                &frame.pixels()[(20 * 80 + 40) * 4..][..4],
+                &[255, 0, 0, 255]
+            );
             frame.token()
         };
         assert!(!platform.dispatch_input_exact(FrameToken::default(), press.clone()));
