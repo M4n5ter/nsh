@@ -170,9 +170,9 @@ impl WindowState {
         self.closed
     }
 
-    pub(crate) fn has_pending(&self) -> bool {
+    pub(crate) fn has_pending(&self, allow_draw: bool) -> bool {
         !self.closed
-            && ((self.frame_requested && self.visible.is_visible())
+            && ((allow_draw && self.frame_requested && self.visible.is_visible())
                 || self.resized
                 || self.activation.is_some()
                 || self.visibility_change.is_some())
@@ -359,7 +359,7 @@ impl WindowState {
         }
     }
 
-    pub(crate) fn pump(state: &Rc<RefCell<Self>>) -> bool {
+    pub(crate) fn pump(state: &Rc<RefCell<Self>>, allow_draw: bool) -> bool {
         let mut worked = false;
         if state.borrow().closed {
             return worked;
@@ -407,7 +407,8 @@ impl WindowState {
         }
         let callback = {
             let mut state = state.borrow_mut();
-            if state.frame_requested
+            if allow_draw
+                && state.frame_requested
                 && state.visible.is_visible()
                 && state.callbacks.frame.is_some()
             {

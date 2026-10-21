@@ -14,6 +14,10 @@ native window is supported. The platform keeps two background executor workers
 and at most 64 foreground jobs per pump. Frames are requested when dirty; there
 is no imposed 60 Hz timer. GPU readback currently waits synchronously, so this
 first API does not establish a frame-rate or input-delivery latency result.
+`pump_with_draw(false)` still runs foreground and window lifecycle work while
+the output pipeline is full. It preserves the original dirty frame without
+re-waking just for that deferred draw; the host allows drawing once a candidate
+slot is available. `has_pending()` includes that dirty frame for input barriers.
 
 The sole terminal input and output owners remain in the embedding application.
 Use actual terminal pixel dimensions for resize and actual negotiated pixel

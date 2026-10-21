@@ -118,9 +118,16 @@ impl TerminalPlatform {
     /// thread. Pending work re-wakes the host. Terminal IO remains external;
     /// this first renderer performs synchronous GPU readback during a draw.
     pub fn pump(&self) -> bool {
+        self.pump_with_draw(true)
+    }
+
+    /// Runs foreground and window lifecycle work while allowing the host to
+    /// defer drawing until its output pipeline has room for another candidate.
+    /// A deferred frame stays dirty and does not re-wake the host by itself.
+    pub fn pump_with_draw(&self, allow_draw: bool) -> bool {
         let mut worked = self.dispatcher.pump();
         if let Ok(window) = self.window() {
-            worked |= WindowState::pump(&window);
+            worked |= WindowState::pump(&window, allow_draw);
         } else {
             if self.window.borrow_mut().take().is_some() {
                 self.pending_quit.set(true);
@@ -138,7 +145,12 @@ impl TerminalPlatform {
             self.quit.set(allowed);
             worked = true;
         }
-        if self.has_pending() {
+        if self.dispatcher.has_pending()
+            || self.pending_quit.get()
+            || self
+                .window()
+                .is_ok_and(|window| window.borrow().has_pending(allow_draw))
+        {
             (self.wake)();
         }
         worked
@@ -150,7 +162,7 @@ impl TerminalPlatform {
             || self.pending_quit.get()
             || self
                 .window()
-                .is_ok_and(|window| window.borrow().has_pending())
+                .is_ok_and(|window| window.borrow().has_pending(true))
     }
 
     /// Earliest delayed dispatcher task. Native GPUI futures also wake the
