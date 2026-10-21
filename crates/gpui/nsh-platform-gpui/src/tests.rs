@@ -109,7 +109,7 @@ function App() {
   let scope, a, b, native;
   keymap.bind("f6", () => record(`global:${keymap.focusedWithin(scope)}:${keymap.focusedWithin(a)}:${keymap.focusedWithin(b)}`), { when: "always" });
   keymap.bind("f10", () => popup.set(true), { when: "always" });
-  keymap.bind("f11", () => { popup.set(false); native.focus(); }, { when: "always" });
+  keymap.bind("f9", () => { popup.set(false); native.focus(); }, { when: "always" });
   return (
     <View style={{ flex: 1, gap: 8 }}>
       <Input testID="report" autoFocus value={`${log().join("|")}@${colorScheme()}`}
@@ -517,11 +517,11 @@ fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
     // Restoring the popup opener must not overwrite that queued intent.
     cx.simulate_keystrokes("f10");
     wait_for_button(&view, cx, "popup-action");
-    cx.simulate_keystrokes("f11");
+    cx.simulate_keystrokes("f9");
     wait_for_button(&view, cx, "native");
     cx.simulate_keystrokes("f10");
     wait_for_button(&view, cx, "popup-action");
-    cx.simulate_keystrokes("f11");
+    cx.simulate_keystrokes("f9");
     wait_for_button(&view, cx, "native");
     view.update(cx, |view, _| view.stop());
 }
