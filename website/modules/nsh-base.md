@@ -1,6 +1,6 @@
 ---
 title: nsh/base
-description: "Unstyled base components for an app's UI: buttons, Markdown and HTML documents, selections across texts, navigation stacks and dialogs, safe areas, system alert dialogs, the software keyboard and the status bar of pages and dialogs."
+description: "Unstyled base components for an app's UI: buttons, checkboxes, switches, Markdown and HTML documents, selections across texts, navigation stacks and dialogs, safe areas, system alert dialogs, the software keyboard and the status bar of pages and dialogs."
 order: 2.5
 demo: ui-navigation
 ---
@@ -10,8 +10,9 @@ demo: ui-navigation
 `nsh/base` is the base component layer of an app's UI: unstyled components that own behavior, state, focus and
 accessibility, on every platform. It sits between the primitives (`nsh` and the `nsh/<module>` modules) and the
 app's own component library, as `gpui-base` sits between `gpui` and a styled library in GPUI Kit (see
-[Modules](./index.md#three-layers)). It provides controls (`Button`), documents of Markdown or HTML (`TextView`), selections across texts
-(`SelectionArea`), navigation (a `NavStack` of `NavPage`s driven
+[Modules](./index.md#three-layers)). It provides controls (`Button`, `Checkbox`, `Switch`), documents of Markdown or HTML (`TextView`), selections across texts
+(`SelectionArea`), popups shown on top of everything (`Popover`, `Menu` and `ContextMenu` with their `MenuItem`,
+`MenuSeparator` and `Submenu`, `Tooltip`, `Sheet`), navigation (a `NavStack` of `NavPage`s driven
 by the state you create with `createNavStack`, and `Dialog` for content presented over everything else), safe areas
 (`SafeAreaView`, `safeArea()` and `safeAreaInsets()`), the system's alert dialogs (`AlertDialog`), the software
 keyboard (`Keyboard`, `keyboardFrame()` and `KeyboardAvoidingView`). Pages and dialogs also decide the status bar
@@ -24,20 +25,21 @@ from the `nsh-base` crate (`nsh_base::{button, safe_area_view, …}`).
 
 ```rust tabs
 use nsh_base::{
-    AvoidBehavior, Edge, MarkdownExtension, MarkdownOptions, alert_dialog, button, dialog, keyboard_avoiding_view,
-    nav_page, nav_stack, safe_area_view, selection_area, text_view, theme,
+    AvoidBehavior, Edge, MarkdownExtension, MarkdownOptions, alert_dialog, button, checkbox, dialog,
+    keyboard_avoiding_view, nav_page, nav_stack, safe_area_view, selection_area, switch, text_view, theme,
 };
 ```
 
 ```tsx tabs
 import {
-  AlertDialog, Button, createNavStack, Dialog, Keyboard, keyboardFrame, KeyboardAvoidingView, NavPage, NavStack,
-  SafeAreaView, safeArea, safeAreaInsets, SelectionArea, TextView,
+  AlertDialog, Button, Checkbox, ContextMenu, createNavStack, Dialog, Keyboard, keyboardFrame, KeyboardAvoidingView, Menu,
+  MenuItem, MenuSeparator, NavPage, NavStack, Popover, SafeAreaView, safeArea, safeAreaInsets, SelectionArea, Sheet,
+  Submenu, Switch, TextView, Tooltip,
 } from "nsh/base";
 import type {
   AlertDialogAction, AlertDialogOptions, AlertDialogPresentation, AlertDialogRole, AvoidBehavior, ButtonProps,
-  DialogChangeReason, DialogProps, Edge, HeaderStyle, Insets, NavPageProps, NavStackProps, NavStackState, StatusBar,
-  SelectionAreaProps, StatusBarForeground, TextViewProps, TextViewDocument, MarkdownExtension, MarkdownOptions,
+  CheckboxProps, DialogChangeReason, DialogProps, Edge, HeaderStyle, Insets, NavPageProps, NavStackProps, NavStackState, StatusBar,
+  SelectionAreaProps, StatusBarForeground, SwitchProps, TextViewProps, TextViewDocument, MarkdownExtension, MarkdownOptions,
 } from "nsh/base";
 ```
 
@@ -47,6 +49,8 @@ walkthroughs, see the [Navigation guide](../docs/navigation.md) and [Forms and k
 | TSX | Rust | What it is |
 |---|---|---|
 | [`Button`](../elements/button.md) | `button()` | A press target with the disabled and selected states and a role for screen readers. |
+| [`Checkbox`](../elements/checkbox.md) | `checkbox()` | A checked, unchecked or indeterminate control with an indicator the app styles and marks. |
+| [`Switch`](../elements/switch.md) | `switch()` | An on / off control with a track and a thumb the app styles. |
 | [`NavStack`, `NavPage`, `createNavStack`](../elements/nav-stack.md) | `nav_stack()`, `nav_page()` | A native navigation stack and its pages. |
 | [`Dialog`](../elements/dialog.md) | `dialog()` | Content presented over everything else: sheets, full-screen flows, dialogs. |
 | [`SafeAreaView`](../elements/safe-area-view.md) | `safe_area_view()` | A view padded clear of system UI and headers. |
@@ -56,6 +60,10 @@ walkthroughs, see the [Navigation guide](../docs/navigation.md) and [Forms and k
 | [`AlertDialog`](../elements/alert-dialog.md) | `alert_dialog()` | The platform's alert or action sheet. |
 | [`TextView`](../elements/text-view.md) | `text_view()` | A document of Markdown, HTML or blocks, drawn with texts and views, for streamed AI replies. |
 | [`SelectionArea`](../elements/selection-area.md) | `selection_area()` | One selection across the texts inside it. |
+| [`Popover`](../elements/popover.md) | `popover()` | Content anchored to a trigger, on top of everything. |
+| [`Menu`, `ContextMenu`, `MenuItem`, `MenuSeparator`, `Submenu`](../elements/menu.md) | `menu()`, ... | Menus: popups with cascading submenus on desktops, sheets on phones. |
+| [`Tooltip`](../elements/tooltip.md) | `tooltip()` | A hint next to its trigger. |
+| [`Sheet`](../elements/sheet.md) | `sheet()` | A panel at an edge of the screen over a backdrop. |
 | `statusBar` on pages and dialogs | `.status_bar(..)` | The status bar while a page or dialog is up. See [Status bar](#status-bar). |
 
 In Rust, `theme()` reads the app's theme as design tokens (`theme().primary()`, `theme().radius()`), the same tokens
@@ -68,6 +76,21 @@ TSX's [theme classes](../docs/tailwind.md#theme-tokens) use.
 A press target that owns its behavior and has no look: presses, the disabled and selected states and its role for
 screen readers. Its look is the app's `class` and `style` with state variants, its content is its children. See
 [Button](../elements/button.md).
+
+### Checkbox
+
+A checked, unchecked or indeterminate control that owns its behavior and has no look: presses, keyboard activation,
+the disabled state and the checkbox role and value for screen readers (mixed while indeterminate), with the value
+owned by the app (`checked`, `indeterminate`, `onChange`). The app styles the checkbox and its indicator, whose
+`checked:`, `indeterminate:` and `disabled:` classes follow the checkbox, and puts its own mark in the indicator
+(`indicator`). See [Checkbox](../elements/checkbox.md).
+
+### Switch
+
+An on / off control that owns its behavior and has no look: presses, keyboard activation, the disabled state and the
+switch role and value for screen readers, with the value owned by the app (`checked`, `onChange`). The app styles the
+switch, its track and its thumb, whose `checked:` and `disabled:` classes follow the switch. See
+[Switch](../elements/switch.md).
 
 ## Documents
 
@@ -212,7 +235,7 @@ launch screen.
 
 ### The status bar on each platform
 
-- **iOS**: hiding and showing animate with a fade. In an app [embedded](../docs/embedding-ios.md) in a native one,
+- **iOS**: hiding and showing animate with a fade. In an app [embedded](../docs/ios.md) in a native one,
   the host app's view controller decides how the status bar looks. The host applies NSH's setting by returning
   `NshAppView.preferredStatusBarStyle`, `NshAppView.prefersStatusBarHidden` and
   `NshAppView.preferredStatusBarUpdateAnimation` from its view controller.
@@ -238,7 +261,7 @@ launch screen.
 
 - [Navigation guide](../docs/navigation.md).
 - [Forms and keyboard](../docs/forms-and-keyboard.md).
-- [Button](../elements/button.md), [NavStack](../elements/nav-stack.md), [Dialog](../elements/dialog.md),
+- [Button](../elements/button.md), [Checkbox](../elements/checkbox.md), [Switch](../elements/switch.md), [NavStack](../elements/nav-stack.md), [Dialog](../elements/dialog.md),
   [SafeAreaView](../elements/safe-area-view.md), [KeyboardAvoidingView](../elements/keyboard-avoiding-view.md),
   [AlertDialog](../elements/alert-dialog.md), [TextView](../elements/text-view.md),
   [SelectionArea](../elements/selection-area.md), [Text](../elements/text.md) and

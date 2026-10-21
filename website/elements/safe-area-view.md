@@ -3,6 +3,7 @@ title: SafeAreaView
 description: "The SafeAreaView component and the safeArea and safeAreaInsets accessors: content kept clear of the notch, the status bar, the home indicator and headers."
 order: 23
 group: base
+demo: el-safe-area-view
 ---
 
 # SafeAreaView
@@ -107,9 +108,8 @@ import { Text, View } from "nsh";
 import { safeArea } from "nsh/base";
 
 function BottomBar() {
-  const insets = safeArea();
   return (
-    <View style={{ flexDirection: "row", padding: 8, paddingBottom: 8 + insets().bottom }}>
+    <View style={{ flexDirection: "row", padding: 8, paddingBottom: 8 + safeArea().bottom }}>
       <Text>Bottom bar</Text>
     </View>
   );
@@ -124,7 +124,7 @@ insets change.
 - **iOS**: the insets come from UIKit's safe area: the status bar, the notch or Dynamic Island, and the home
   indicator.
 - **Android**: NSH reports the parts of the system bars and the display cutout that overlap the NSH view. When NSH is
-  [embedded](../docs/embedding-android.md) below a native toolbar, the view's top inset is 0.
+  [embedded](../docs/android.md) below a native toolbar, the view's top inset is 0.
 - **Mac Catalyst**: the top inset is the window's title bar.
 - **Desktops (macOS, Windows, Linux, GPUI) and the web**: a page's content starts below its `header`, and a dialog
   gives its content insets of its own, as on the phones.

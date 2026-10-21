@@ -261,3 +261,112 @@ fn a_rust_apps_button_hears_its_press() {
         .dispatch_event(first.tracked[0], EventKind::Press, EventPayload::None);
     assert!(seen(&rx).texts.iter().any(|(_, t)| t.text == "pressed 1"));
 }
+
+/// `nsh/base`'s `Switch` styled by a Rust app (as its page shows it): its
+/// track's typed style takes a `checked` variant that follows the switch,
+/// as a TSX app's `checked:` classes in `trackClass` do.
+#[component]
+fn Switches() -> impl IntoElement {
+    let switch = |checked: bool| {
+        let on = signal(checked);
+        nsh_base::switch()
+            .checked(on)
+            .on_change(move |next: &bool| on.set(*next))
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .track_style(|s| {
+                s.w(px(44.0))
+                    .p(px(2.0))
+                    .rounded_full()
+                    .bg(rgb(0x0000ff))
+                    .transition_colors()
+                    .checked(|s| s.bg(rgb(0x00ff00)))
+            })
+            .thumb_style(|s| {
+                s.size(px(20.0))
+                    .rounded_full()
+                    .bg(white())
+                    .shadow_sm()
+                    .transition_transform()
+                    .checked(|s| s.translate_x(px(20.0)))
+            })
+            .child(text("Wi-Fi"))
+    };
+    view().flex_1().child(switch(false)).child(switch(true))
+}
+
+#[test]
+fn a_rust_apps_switch_styles_its_parts_by_its_value() {
+    let (_engine, rx) = start_root(Root::new::<Switches>(|| ()));
+    let first = seen(&rx);
+    let backgrounds: Vec<u32> = first
+        .styles
+        .iter()
+        .map(|(_, s)| s.background_color.0)
+        .collect();
+    for color in [0x0000_ffff, 0x00ff_00ff] {
+        assert_eq!(
+            backgrounds.iter().filter(|&&c| c == color).count(),
+            1,
+            "{color:08x} in {backgrounds:08x?}"
+        );
+    }
+}
+
+/// `nsh/base`'s `Checkbox` styled by a Rust app (as its page shows it): its
+/// indicator's typed style takes `checked` and `indeterminate` variants
+/// that follow the checkbox, as a TSX app's classes in `indicatorClass` do,
+/// and its mark is the app's element in the indicator.
+#[component]
+fn Checkboxes() -> impl IntoElement {
+    let checkbox = |checked: bool, indeterminate: bool| {
+        let on = signal(checked);
+        nsh_base::checkbox()
+            .checked(on)
+            .indeterminate(indeterminate)
+            .on_change(move |next: &bool| on.set(*next))
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .indicator_style(|s| {
+                s.size(px(20.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .border_2()
+                    .border_color(rgb(0xa1a1aa))
+                    .bg(rgb(0x0000ff))
+                    .transition_colors()
+                    .checked(|s| s.bg(rgb(0x00ff00)))
+                    .indeterminate(|s| s.bg(rgb(0xff0000)))
+            })
+            .indicator(text(move || if on.get() { "✓" } else { "-" }).text_color(white()))
+            .child(text("Notify me"))
+    };
+    view()
+        .flex_1()
+        .child(checkbox(false, false))
+        .child(checkbox(true, false))
+        .child(checkbox(true, true))
+}
+
+#[test]
+fn a_rust_apps_checkbox_styles_its_indicator_by_its_value() {
+    let (_engine, rx) = start_root(Root::new::<Checkboxes>(|| ()));
+    let first = seen(&rx);
+    let backgrounds: Vec<u32> = first
+        .styles
+        .iter()
+        .map(|(_, s)| s.background_color.0)
+        .collect();
+    for color in [0x0000_ffff, 0x00ff_00ff, 0xff00_00ff] {
+        assert_eq!(
+            backgrounds.iter().filter(|&&c| c == color).count(),
+            1,
+            "{color:08x} in {backgrounds:08x?}"
+        );
+    }
+    let marks = |mark: &str| first.texts.iter().filter(|(_, t)| t.text == mark).count();
+    assert_eq!((marks("-"), marks("✓")), (1, 2));
+}

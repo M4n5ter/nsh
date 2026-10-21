@@ -3006,6 +3006,13 @@ class Player {
     if (!el) return;
     el._modal = { animation, closeOnEscape };
     if (el.isConnected && !el._leaving) this.placeModal(el);
+    // Its config comes after its insert in the batch that presents it: it
+    // starts out of sight the way it now comes in.
+    if (el._entering) {
+      el.style.transform = "";
+      el.style.opacity = "";
+      this.hideModal(el, this.modalMotion(el));
+    }
   }
 
   /** Sizes presented modal `el` to the root (a transparent layer over it,
@@ -3053,9 +3060,11 @@ class Player {
     this.placeModal(el);
     el.style.transition = "none";
     this.hideModal(el, motion);
+    el._entering = true;
     this.scopeFocus();
     this.syncHistorySoon();
     requestAnimationFrame(() => requestAnimationFrame(() => {
+      el._entering = false;
       el.style.transition = "";
       el.style.transform = "";
       el.style.opacity = "";

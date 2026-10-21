@@ -7,12 +7,15 @@ import { type JSX, View, mount, signal } from "nsh";
 import BaseStatusBar from "./base-status-bar";
 import BaseAlertDialog from "./base-alert-dialog";
 import BaseButton from "./base-button";
+import BaseCheckbox from "./base-checkbox";
 import BaseDialog from "./base-dialog";
 import BaseDialogBackdrop from "./base-dialog-backdrop";
 import BaseNavPage from "./base-nav-page";
 import BaseNavStack from "./base-nav-stack";
+import BasePopups from "./base-popups";
 import BaseSafeAreaKeyboard from "./base-safe-area-keyboard";
 import BaseSelectionArea from "./base-selection-area";
+import BaseSwitch from "./base-switch";
 import BaseTextView from "./base-text-view";
 
 const cases: Record<string, () => JSX.Element> = {
@@ -23,9 +26,12 @@ const cases: Record<string, () => JSX.Element> = {
   "base-dialog-backdrop": BaseDialogBackdrop,
   "base-nav-page": BaseNavPage,
   "base-nav-stack": BaseNavStack,
+  "base-popups": BasePopups,
   "base-safe-area-keyboard": BaseSafeAreaKeyboard,
   "base-text-view": BaseTextView,
   "base-selection-area": BaseSelectionArea,
+  "base-switch": BaseSwitch,
+  "base-checkbox": BaseCheckbox,
 };
 const shown = signal("");
 

@@ -120,7 +120,7 @@ impl<M: TextEngine> Core<M> {
             return;
         }
         for &id in &path {
-            if let Some(host) = self.host_of(id) {
+            if let Some(host) = self.touch_host(id) {
                 let mut from = 0;
                 while !dispatch.stopped()
                     && let Some((at, listener)) =
@@ -193,8 +193,15 @@ impl<M: TextEngine> Core<M> {
 
     /// Whether a component's node `id` has a touch handler or takes part in
     /// the negotiation.
+    /// The component whose handlers node `id` has: the one whose view has
+    /// it, or the one it is a slot of (a trigger the app passed).
+    fn touch_host(&self, id: NodeId) -> Option<NodeId> {
+        self.host_of(id)
+            .or_else(|| self.components.slot_hosts.get(&id).copied())
+    }
+
     fn hears_touches(&self, id: NodeId) -> bool {
-        self.host_of(id).is_some_and(|host| {
+        self.touch_host(id).is_some_and(|host| {
             self.next_handler(host, id, EventKind::Touch, 0).is_some()
                 || self.responder_el(host, id).is_some()
         })
@@ -283,7 +290,7 @@ impl<M: TextEngine> Core<M> {
         let event = self.responder_event_now(about, touch);
         if let Some(r) = responder {
             let keeps = self
-                .host_of(r)
+                .touch_host(r)
                 .and_then(|host| self.responder_el(host, r))
                 .is_some_and(|el| el.keep);
             if keeps {
@@ -312,7 +319,7 @@ impl<M: TextEngine> Core<M> {
         if dispatch.stopped() {
             return None;
         }
-        let host = self.host_of(id)?;
+        let host = self.touch_host(id)?;
         let el = self.responder_el(host, id)?;
         let gated = el.claims.iter().any(|c| c.phase == ClaimPhase::Pan);
         if gated != (phase == ClaimPhase::Pan) {
@@ -370,7 +377,7 @@ impl<M: TextEngine> Core<M> {
         event: ResponderEvent,
         dispatch: &mut EventDispatch<'_>,
     ) {
-        let Some(host) = self.host_of(id) else {
+        let Some(host) = self.touch_host(id) else {
             return;
         };
         let Some(el) = self.responder_el(host, id) else {

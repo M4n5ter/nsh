@@ -1290,7 +1290,7 @@ fn set_prop(
             return set_prop(cx, content, name, value, prev);
         }
         "activeStyle" | "hoverStyle" | "focusStyle" | "disabledStyle" | "selectedStyle"
-        | "checkedStyle" | "headerStyle" => {
+        | "checkedStyle" | "indeterminateStyle" | "headerStyle" => {
             let patch = part_style(cx, name, value)?;
             let prop = match name {
                 "activeStyle" => nsh_core::Prop::ActiveStyle(patch),
@@ -1299,6 +1299,7 @@ fn set_prop(
                 "disabledStyle" => nsh_core::Prop::DisabledStyle(patch),
                 "selectedStyle" => nsh_core::Prop::SelectedStyle(patch),
                 "checkedStyle" => nsh_core::Prop::CheckedStyle(patch),
+                "indeterminateStyle" => nsh_core::Prop::IndeterminateStyle(patch),
                 _ => nsh_core::Prop::HeaderStyle(patch),
             };
             return dom(cx).push(cx, Op::SetProp { id, prop });
@@ -1332,10 +1333,18 @@ fn set_prop(
     {
         return set_event(cx, p, event, value);
     }
-    // Native animation nodes these props use stay alive with the view.
-    if let Some(&key) = ["style", "pan", "pinch", "rotation", "scrollValue"]
-        .iter()
-        .find(|k| **k == name)
+    // Native animation nodes these props use, and a `tooltip`'s element,
+    // stay alive with the view.
+    if let Some(&key) = [
+        "style",
+        "pan",
+        "pinch",
+        "rotation",
+        "scrollValue",
+        "tooltip",
+    ]
+    .iter()
+    .find(|k| **k == name)
     {
         retain_in(cx, p, key, value);
     }
