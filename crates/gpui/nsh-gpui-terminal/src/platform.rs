@@ -483,3 +483,127 @@ impl Platform for TerminalPlatform {
         self.callbacks.borrow_mut().keyboard = Some(callback);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use gpui::{
+        AppContext, Application, Bounds, Context, InteractiveElement, IntoElement, MouseButton,
+        Render, Styled, Window, WindowBounds, WindowOptions, div, point, px, rgb, size,
+    };
+
+    use super::*;
+
+    struct RedQuad(Rc<Cell<usize>>);
+
+    impl Render for RedQuad {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let presses = self.0.clone();
+            div()
+                .id("red-quad")
+                .size_full()
+                .bg(rgb(0xff0000))
+                .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                    presses.set(presses.get() + 1);
+                })
+        }
+    }
+
+    #[test]
+    fn deferred_frames_keep_foreground_work_live_without_self_waking() -> Result<()> {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wake = wakes.clone();
+        let frames = Rc::new(RefCell::new(Vec::new()));
+        let received = frames.clone();
+        let platform = TerminalPlatform::new(
+            Box::new(gpui_wgpu::WgpuHeadlessRenderer::new()?),
+            Box::new(move |frame| received.borrow_mut().push(frame)),
+            Arc::new(move || {
+                wake.fetch_add(1, Ordering::SeqCst);
+            }),
+        )?;
+        let presses = Rc::new(Cell::new(0));
+        let pressed = presses.clone();
+        let window = Rc::new(RefCell::new(None));
+        let created = window.clone();
+        let application = Application::with_platform(platform.clone()).run_embedded(move |cx| {
+            *created.borrow_mut() = Some(
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            point(px(0.0), px(0.0)),
+                            size(px(64.0), px(48.0)),
+                        ))),
+                        inactive_frame_interval: None,
+                        ..Default::default()
+                    },
+                    move |_, cx| cx.new(|_| RedQuad(pressed)),
+                )
+                .unwrap(),
+            );
+        });
+        assert!(platform.pump());
+        assert_eq!(frames.borrow().len(), 1);
+        let original = frames.borrow()[0].token();
+        platform.mark_presented(original.clone())?;
+
+        let foreground = Rc::new(Cell::new(0));
+        let progressed = foreground.clone();
+        platform
+            .foreground_executor()
+            .spawn(async move { progressed.set(7) })
+            .detach();
+        platform.resize(size(DevicePixels(80), DevicePixels(40)))?;
+        platform.set_active(false)?;
+        let press = PlatformInput::MouseDown(gpui::MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(16.0), px(16.0)),
+            click_count: 1,
+            ..Default::default()
+        });
+        assert!(!platform.dispatch_input_exact(original.clone(), press.clone()));
+        assert!(platform.pump_with_draw(false));
+        assert_eq!(foreground.get(), 7);
+        application.update(|cx| {
+            window
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .update(cx, |_, window, _| {
+                    assert_eq!(window.viewport_size(), size(px(80.0), px(40.0)));
+                    assert!(!window.is_window_active());
+                })
+                .unwrap();
+        });
+        platform.set_active(true)?;
+        assert!(platform.pump_with_draw(false));
+
+        wakes.store(0, Ordering::SeqCst);
+        assert!(!platform.pump_with_draw(false));
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+        assert_eq!(frames.borrow().len(), 1);
+        assert!(platform.has_pending());
+
+        assert!(platform.pump());
+        let current = {
+            let frames = frames.borrow();
+            assert_eq!(frames.len(), 2);
+            let frame = &frames[1];
+            assert_eq!(frame.size(), size(DevicePixels(80), DevicePixels(40)));
+            assert_eq!(&frame.pixels()[(20 * 80 + 40) * 4..][..4], &[255, 0, 0, 255]);
+            frame.token()
+        };
+        assert!(!platform.dispatch_input_exact(FrameToken::default(), press.clone()));
+        assert!(!platform.dispatch_input_exact(original, press.clone()));
+        assert!(!platform.dispatch_input_exact(current.clone(), press.clone()));
+        assert_eq!(presses.get(), 0);
+        platform.mark_presented(current.clone())?;
+        assert!(platform.dispatch_input_exact(current, press));
+        assert_eq!(presses.get(), 1);
+        assert_eq!(platform.take_error(), None);
+        drop(application);
+        platform.shutdown();
+        Ok(())
+    }
+}
