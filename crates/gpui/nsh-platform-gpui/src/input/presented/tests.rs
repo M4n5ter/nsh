@@ -714,7 +714,8 @@ fn idle_native_zoom_retires_without_delivering_a_new_pinch_end_callback(
     // changes, reproducing a callback mounted while the idle timer is pending.
     owner.state_mut().events.set(EventKind::PinchEnd, true);
     cx.run_until_parked();
-    cx.advance_clock(Duration::from_millis(ZOOM_IDLE + 1));
+    cx.executor()
+        .advance_clock(Duration::from_millis(ZOOM_IDLE + 1));
     cx.run_until_parked();
     synchronize();
     assert!(surface.input.zoom.borrow().is_none());
@@ -733,7 +734,8 @@ fn idle_native_zoom_retires_without_delivering_a_new_pinch_end_callback(
     assert!(wheel_zoom(&surface, 20.0, 20.0, -48.0));
     assert_pinch(&image, 2.42);
     cx.run_until_parked();
-    cx.advance_clock(Duration::from_millis(ZOOM_IDLE + 1));
+    cx.executor()
+        .advance_clock(Duration::from_millis(ZOOM_IDLE + 1));
     cx.run_until_parked();
     synchronize();
     let scale = ended_rx.recv_timeout(Duration::from_secs(5)).unwrap();
