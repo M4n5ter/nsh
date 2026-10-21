@@ -115,6 +115,7 @@ expect Nothing here
 tap id:add
 expect 4. Item 4
 expect 3. Cherry
+expect Updated plum
 covers [nsh/list] List
 covers [nsh:rt] list
 covers [props] contentStyle

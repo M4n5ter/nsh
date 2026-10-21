@@ -51,5 +51,8 @@
   flight) until the rows in the viewport are all measured, the user scrolls away or the items change. Platforms only
   apply what they get.
 - **List internals** (the window, binding cells, recycling): `crates/nsh-core/src/core/list.rs`.
+- **Indexed data**: TSX `each` also accepts `ReadonlyListSource<T>`, a readonly snapshot with `length` and `at(index)`.
+  Only bound and viewable items are read. Replacing a snapshot's identity replaces the full range without reading its
+  items; arrays retain their identity-based common-prefix / suffix splice behavior. Counts use the core's existing u32 range.
 - **Rust components**: the same props are `Scrollable`'s methods (`scroll()`, `virtual_list(..)`) and
   `VirtualList`'s (header, footer, empty view, separators, sticky rows, viewability); `docs/dev/components.md`.

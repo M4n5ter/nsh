@@ -197,6 +197,64 @@ fn length(cx: *mut JsContext, array: JsValue) -> i64 {
     len
 }
 
+/// The data is either an array or a readonly indexed snapshot. Keep the
+/// array path unchanged; indexed lengths use the core's existing u32 range.
+fn source_length(cx: *mut JsContext, source: JsValue) -> Result<i64, JsValue> {
+    // SAFETY: property reads and conversions of a live value.
+    unsafe {
+        if qjs::JS_IsException(source) {
+            return Err(source);
+        }
+        if qjs::JS_IsArray(source) || !qjs::JS_IsObject(source) {
+            return Ok(length(cx, source));
+        }
+        let at = Guard(cx, get(cx, source, "at"));
+        if qjs::JS_IsException(at.1) {
+            return Err(at.1);
+        }
+        if !qjs::JS_IsFunction(cx, at.1) {
+            return Err(qjs::JS_ThrowTypeError(
+                cx,
+                c"List source must have an at(index) method".as_ptr(),
+            ));
+        }
+        let value = Guard(cx, get(cx, source, "length"));
+        if qjs::JS_IsException(value.1) {
+            return Err(value.1);
+        }
+        let mut len = 0f64;
+        if !qjs::JS_IsNumber(value.1)
+            || qjs::JS_ToFloat64(cx, &mut len, value.1) != 0
+            || !len.is_finite()
+            || len < 0.0
+            || len > u32::MAX as f64
+            || len.fract() != 0.0
+        {
+            return Err(qjs::JS_ThrowRangeError(
+                cx,
+                c"List source length must be an unsigned 32-bit integer".as_ptr(),
+            ));
+        }
+        Ok(len as i64)
+    }
+}
+
+fn source_item(cx: *mut JsContext, source: JsValue, index: i64) -> JsValue {
+    // SAFETY: reads one array item or calls the snapshot's method with its
+    // original receiver; the method value is owned by the guard.
+    unsafe {
+        if qjs::JS_IsArray(source) {
+            return qjs::JS_GetPropertyInt64(cx, source, index);
+        }
+        let at = Guard(cx, get(cx, source, "at"));
+        if qjs::JS_IsException(at.1) {
+            return at.1;
+        }
+        let mut args = [qjs::JS_NewFloat64(index as f64)];
+        qjs::JS_Call(cx, at.1, source, 1, args.as_mut_ptr())
+    }
+}
+
 fn native(
     cx: *mut JsContext,
     f: unsafe extern "C" fn(
@@ -400,7 +458,16 @@ unsafe extern "C" fn splice_run(
         if qjs::JS_IsException(next) {
             return next;
         }
-        let (old_len, next_len) = (length(cx, old), length(cx, next));
+        let lengths = source_length(cx, old).and_then(|old_len| {
+            source_length(cx, next).map(|next_len| (old_len, next_len))
+        });
+        let (old_len, next_len) = match lengths {
+            Ok(lengths) => lengths,
+            Err(e) => {
+                qjs::JS_FreeValue(cx, next);
+                return e;
+            }
+        };
         if old_len > 0 && !qjs::JS_IsStrictEqual(cx, old, next) {
             let max = old_len.min(next_len);
             let same = |i: i64, j: i64| {
@@ -412,12 +479,16 @@ unsafe extern "C" fn splice_run(
                 s
             };
             let mut start = 0;
-            while start < max && same(start, start) {
-                start += 1;
-            }
             let mut end = 0;
-            while end < max - start && same(old_len - 1 - end, next_len - 1 - end) {
-                end += 1;
+            // A new indexed source is a new snapshot. Comparing its items
+            // would materialize the whole source just to find a splice.
+            if qjs::JS_IsArray(old) && qjs::JS_IsArray(next) {
+                while start < max && same(start, start) {
+                    start += 1;
+                }
+                while end < max - start && same(old_len - 1 - end, next_len - 1 - end) {
+                    end += 1;
+                }
             }
             let removed = old_len - start - end;
             let inserted = next_len - start - end;
@@ -654,8 +725,12 @@ unsafe extern "C" fn empty_run(
     unsafe {
         let (list, props, state) = (*data, *data.add(1), *data.add(2));
         let each = get(cx, props, "each");
-        let empty = length(cx, each) == 0;
+        let len = source_length(cx, each);
         qjs::JS_FreeValue(cx, each);
+        let empty = match len {
+            Ok(len) => len == 0,
+            Err(e) => return e,
+        };
         let shown = length(cx, state) > 0;
         if empty && !shown {
             let Some(id) = dom::node_id(cx, list) else {
@@ -844,7 +919,7 @@ fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<
     r
 }
 
-/// A cell's item: `props.each[index()]`, or the last one past the end (the
+/// A cell's item from `props.each`, or the last one past the end (the
 /// data shrank before the core unbound the cell).
 unsafe extern "C" fn item_run(
     cx: *mut JsContext,
@@ -862,9 +937,15 @@ unsafe extern "C" fn item_run(
         qjs::JS_ToFloat64(cx, &mut n, i);
         qjs::JS_FreeValue(cx, i);
         let each = get(cx, props, "each");
-        let len = length(cx, each);
+        let len = match source_length(cx, each) {
+            Ok(len) => len,
+            Err(e) => {
+                qjs::JS_FreeValue(cx, each);
+                return e;
+            }
+        };
         let r = if n >= 0.0 && (n as i64) < len {
-            qjs::JS_GetPropertyInt64(cx, each, n as i64)
+            source_item(cx, each, n as i64)
         } else {
             qjs::JS_DupValue(cx, arg(argc, argv, 0))
         };
@@ -897,8 +978,12 @@ unsafe extern "C" fn separated_run(
         qjs::JS_ToFloat64(cx, &mut n, i);
         qjs::JS_FreeValue(cx, i);
         let each = get(cx, props, "each");
-        let len = length(cx, each);
+        let len = source_length(cx, each);
         qjs::JS_FreeValue(cx, each);
+        let len = match len {
+            Ok(len) => len,
+            Err(e) => return e,
+        };
         if (n as i64) >= len - 1 {
             return qjs::JS_DupValue(cx, content);
         }
@@ -1046,16 +1131,27 @@ fn report(cx: *mut JsContext, id: NodeId) -> JsValue {
         d.reported = d.latest;
         r
     };
-    let each = get(cx, props, "each");
-    let key_of = get(cx, props, "keyExtractor");
-    let len = length(cx, each);
+    let props = Guard(cx, props);
+    let each = Guard(cx, get(cx, props.1, "each"));
+    let len = match source_length(cx, each.1) {
+        Ok(len) => len,
+        Err(e) => return e,
+    };
+    let key_of = Guard(cx, get(cx, props.1, "keyExtractor"));
+    // SAFETY: inline tag check on the property read above.
+    if unsafe { qjs::JS_IsException(key_of.1) } {
+        return key_of.1;
+    }
     // SAFETY: tokens are new objects; values got are freed or moved.
-    let token = |index: i64, viewable: bool| -> JsValue {
+    let token = |index: i64, viewable: bool| -> Result<JsValue, JsValue> {
         unsafe {
-            let item = qjs::JS_GetPropertyInt64(cx, each, index);
-            let key = if qjs::JS_IsFunction(cx, key_of) {
+            let item = source_item(cx, each.1, index);
+            if qjs::JS_IsException(item) {
+                return Err(item);
+            }
+            let key = if qjs::JS_IsFunction(cx, key_of.1) {
                 let mut args = [item, qjs::JS_NewFloat64(index as f64)];
-                qjs::JS_Call(cx, key_of, UNDEFINED, 2, args.as_mut_ptr())
+                qjs::JS_Call(cx, key_of.1, UNDEFINED, 2, args.as_mut_ptr())
             } else {
                 let mut k = get(cx, item, "key");
                 if qjs::JS_IsUndefined(k) || qjs::JS_IsNull(k) {
@@ -1066,10 +1162,18 @@ fn report(cx: *mut JsContext, id: NodeId) -> JsValue {
                     qjs::JS_FreeValue(cx, k);
                     k = qjs::JS_NewFloat64(index as f64);
                 }
+                if qjs::JS_IsException(k) {
+                    qjs::JS_FreeValue(cx, item);
+                    return Err(k);
+                }
                 let s = qjs::JS_ToString(cx, k);
                 qjs::JS_FreeValue(cx, k);
                 s
             };
+            if qjs::JS_IsException(key) {
+                qjs::JS_FreeValue(cx, item);
+                return Err(key);
+            }
             let o = qjs::JS_NewObject(cx);
             qjs::JS_SetPropertyStr(cx, o, c"item".as_ptr(), item);
             qjs::JS_SetPropertyStr(cx, o, c"key".as_ptr(), key);
@@ -1084,25 +1188,35 @@ fn report(cx: *mut JsContext, id: NodeId) -> JsValue {
                     qjs::JS_FALSE
                 },
             );
-            o
+            Ok(o)
         }
     };
     let mut viewable = Vec::new();
     let mut changed = Vec::new();
-    if first >= 0 {
-        for i in first..=last.min(len - 1) {
-            viewable.push(token(i, true));
-            if i < prev_first || i > prev_last {
-                changed.push(token(i, true));
+    let mut read_tokens = || -> Result<(), JsValue> {
+        if first >= 0 {
+            for i in first..=last.min(len - 1) {
+                viewable.push(token(i, true)?);
+                if i < prev_first || i > prev_last {
+                    changed.push(token(i, true)?);
+                }
             }
         }
-    }
-    if prev_first >= 0 {
-        for i in prev_first..=prev_last.min(len - 1) {
-            if i < first || i > last {
-                changed.push(token(i, false));
+        if prev_first >= 0 {
+            for i in prev_first..=prev_last.min(len - 1) {
+                if i < first || i > last {
+                    changed.push(token(i, false)?);
+                }
             }
         }
+        Ok(())
+    };
+    if let Err(e) = read_tokens() {
+        // SAFETY: tokens not yet transferred to their arrays.
+        for token in viewable.into_iter().chain(changed) {
+            unsafe { qjs::JS_FreeValue(cx, token) };
+        }
+        return e;
     }
     // SAFETY: the info object takes the arrays; the handler is called and
     // values are freed.
@@ -1122,14 +1236,14 @@ fn report(cx: *mut JsContext, id: NodeId) -> JsValue {
             c"changed".as_ptr(),
             qjs::JS_NewArrayFrom(cx, c.len() as c_int, c.as_mut_ptr()),
         );
-        let handler = get(cx, props, "onViewableItemsChange");
+        let handler = get(cx, props.1, "onViewableItemsChange");
         let mut args = [info];
         let r = if qjs::JS_IsFunction(cx, handler) {
             qjs::JS_Call(cx, handler, UNDEFINED, 1, args.as_mut_ptr())
         } else {
             UNDEFINED
         };
-        for v in [handler, info, each, key_of, props] {
+        for v in [handler, info] {
             qjs::JS_FreeValue(cx, v);
         }
         r
@@ -1156,6 +1270,16 @@ pub(crate) const TYPES: &str = r#"/** A component (`Header`) or an element (`<He
  * their returned children stay reactive, as in ordinary JSX children. */
 export type ListSlot = (() => JSX.Element) | JSX.Element;
 
+/** A readonly indexed snapshot. Only rendered and viewable items are read.
+ * Replace the source object to replace the snapshot; unlike arrays, a new
+ * source replaces the entire item range without comparing individual items. */
+export interface ReadonlyListSource<T> {
+  /** The item count, an integer in the same unsigned 32-bit range as arrays. */
+  readonly length: number;
+  /** Returns the item at a requested index, with this source as its receiver. */
+  at(index: number): T;
+}
+
 /** An item that became viewable or stopped being viewable. */
 export interface ViewToken<T> {
   item: T;
@@ -1177,7 +1301,7 @@ export interface ViewabilityConfig {
  * id, accessibility, classes, touch and layout events, ...), which it
  * passes on as they are. */
 export interface ListProps<T> extends Omit<ViewProps, "children">, ScrollingHostProps, ListHostProps {
-  each: readonly T[];
+  each: readonly T[] | ReadonlyListSource<T>;
   /** Above the items, scrolling with them. */
   header?: ListSlot;
   /** Below the items, scrolling with them. */
@@ -1213,7 +1337,9 @@ export type ListItemsProps<T> = Pick<ListProps<T>, "each" | "children" | "keyExt
 
 #[cfg(test)]
 mod tests {
-    use nsh_core::{NodeId, Op, Tag};
+    use std::{cell::RefCell, rc::Rc};
+
+    use nsh_core::{EventKind, EventPayload, NodeId, Op, PayloadValue, Prop, Tag};
 
     use crate::{Host, HostOptions};
 
@@ -1230,6 +1356,167 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("missing text {wanted:?}: {ops:?}"))
+    }
+
+    #[test]
+    fn indexed_snapshots_render_requested_rows_and_keep_cell_owners() {
+        let host = Host::new().unwrap();
+        host.eval_source(
+            r#"
+            import { mount, signal, cleanup } from "nsh";
+            import { cond, text } from "nsh:rt";
+            import { List } from "nsh/list";
+            const shown = signal(true);
+            let made = 0, cleaned = 0, visible;
+            function snapshot(prefix) {
+                return {
+                    length: 1000000, prefix,
+                    at(index) {
+                        if (index !== 2 && index !== 999999)
+                            throw Error(`unrequested item ${index}`);
+                        return { id: String(index), text: `${this.prefix} ${index}` };
+                    },
+                };
+            }
+            const source = signal(snapshot("Original"));
+            globalThis.replace = () => source.set(snapshot("Updated"));
+            globalThis.hide = () => shown.set(false);
+            globalThis.check = (expectedMade, expectedCleaned, expectedVisible) => {
+                if (made !== expectedMade || cleaned !== expectedCleaned || visible !== expectedVisible)
+                    throw Error(`state ${made}/${cleaned}/${visible}`);
+            };
+            mount(() => cond(() => shown(), () => List({
+                get each() { return source(); },
+                keyExtractor: (item) => item.id,
+                onViewableItemsChange: ({ viewableItems }) => {
+                    visible = viewableItems.map(({ item, key, index }) => `${key}:${index}:${item.text}`).join(",");
+                },
+                children: (item) => {
+                    made++;
+                    cleanup(() => cleaned++);
+                    return () => item().text;
+                },
+            }), () => text("Gone")));
+            "#,
+        )
+        .unwrap();
+        let initial = take_ops(&host);
+        let list = initial
+            .iter()
+            .find_map(|op| match op {
+                Op::Create { id, tag: Tag::List } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        assert!(initial.iter().any(|op| matches!(
+            op,
+            Op::SetProp { id, prop: Prop::Count(1_000_000) } if *id == list
+        )));
+        host.bind_list(list, &[(0, 2)]);
+        created_text(&take_ops(&host), "Original 2");
+        host.bind_list(list, &[(0, 999_999)]);
+        let recycled = take_ops(&host);
+        created_text(&recycled, "Original 999999");
+        assert!(
+            !recycled
+                .iter()
+                .any(|op| matches!(op, Op::Create { tag: Tag::Cell, .. }))
+        );
+        host.eval_script("replace.js", "replace(); check(1, 0, undefined)")
+            .unwrap();
+        let replaced = take_ops(&host);
+        created_text(&replaced, "Updated 999999");
+        assert!(replaced.iter().any(|op| matches!(
+            op,
+            Op::SetProp { id, prop: Prop::Splice(0, 1_000_000, 1_000_000) } if *id == list
+        )));
+        host.dispatch_event(
+            list,
+            EventKind::ViewableItemsChange,
+            &EventPayload::Map(vec![
+                ("first", PayloadValue::Number(999_999.0)),
+                ("last", PayloadValue::Number(999_999.0)),
+            ]),
+        );
+        host.eval_script(
+            "visible.js",
+            "check(1, 0, '999999:999999:Updated 999999'); hide(); check(1, 1, '999999:999999:Updated 999999')",
+        )
+        .unwrap();
+        created_text(&take_ops(&host), "Gone");
+        host.eval_script("disposed.js", "replace()").unwrap();
+        assert!(take_ops(&host).is_empty());
+        assert!(!host.has_exception());
+    }
+
+    #[test]
+    fn indexed_source_exceptions_reach_the_host_without_poisoning_the_context() {
+        for (source, expected) in [
+            (
+                "{ get length() { throw Error('source length failed'); }, at() {} }",
+                "source length failed",
+            ),
+            (
+                "{ length: 1, get at() { throw Error('source method failed'); } }",
+                "source method failed",
+            ),
+        ] {
+            let host = Host::new().unwrap();
+            let error = host
+                .eval_source(&format!(
+                    "import {{ mount }} from 'nsh'; import {{ List }} from 'nsh/list';\n\
+                     mount(() => List({{ each: {source}, children: (item) => () => item() }}));"
+                ))
+                .unwrap_err();
+            assert_eq!(error.message, expected);
+            assert!(!host.has_exception());
+        }
+        let mut host = Host::new().unwrap();
+        let errors = Rc::new(RefCell::new(Vec::new()));
+        let seen = errors.clone();
+        host.set_error_handler(Box::new(move |error| {
+            seen.borrow_mut().push(error.message.clone())
+        }));
+        host.eval_source(
+            r#"
+            import { mount } from "nsh";
+            import { List } from "nsh/list";
+            mount(() => List({
+                each: { length: 3, at(index) {
+                    if (index === 1) throw Error("source item failed");
+                    return `Row ${index}`;
+                } },
+                onViewableItemsChange: () => { throw Error("invalid source reported"); },
+                children: (item) => () => item(),
+            }));
+            "#,
+        )
+        .unwrap();
+        let list = take_ops(&host)
+            .iter()
+            .find_map(|op| match op {
+                Op::Create { id, tag: Tag::List } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        host.bind_list(list, &[(0, 0)]);
+        created_text(&take_ops(&host), "Row 0");
+        host.bind_list(list, &[(0, 1)]);
+        assert_eq!(&*errors.borrow(), &["source item failed"]);
+        assert!(!host.has_exception());
+        take_ops(&host);
+        host.bind_list(list, &[(0, 2)]);
+        created_text(&take_ops(&host), "Row 2");
+        host.dispatch_event(
+            list,
+            EventKind::ViewableItemsChange,
+            &EventPayload::Map(vec![
+                ("first", PayloadValue::Number(0.0)),
+                ("last", PayloadValue::Number(1.0)),
+            ]),
+        );
+        assert_eq!(&*errors.borrow(), &["source item failed", "source item failed"]);
+        assert!(!host.has_exception());
     }
 
     const REACTIVE_SLOTS: &str = r#"

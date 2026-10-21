@@ -93,7 +93,7 @@ with the cell and shows up on another item.
 
 | Prop | Rust | Type | Default | Description |
 |---|---|---|---|---|
-| `each` | `virtual_list(count, ..)` | `readonly T[]` | | The items. |
+| `each` | `virtual_list(count, ..)` | `readonly T[] \| ReadonlyListSource<T>` | | The items: an array or an [indexed snapshot](../modules/nsh-list.md#data-and-rendering). |
 | `children` | `virtual_list(.., \|at\| row)` | `(item: () => T, index: () => number) => JSX.Element` | | Renders one row. |
 | `estimatedItemSize` | `.estimated_item_size(px(..))` | `number` | `50` | The size of items not measured yet, in points. Close estimates keep the scroll bar steady. |
 | `horizontal` | `.horizontal()` | `boolean` | `false` | Scrolls sideways. |

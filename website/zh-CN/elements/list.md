@@ -82,7 +82,7 @@ virtual_list(move || messages.with(|m| m.len()), move |at| {
 
 | 属性 | Rust | 类型 | 默认值 | 说明 |
 |---|---|---|---|---|
-| `each` | `virtual_list(count, ..)` | `readonly T[]` | | 条目。 |
+| `each` | `virtual_list(count, ..)` | `readonly T[] \| ReadonlyListSource<T>` | | 条目：数组或[索引快照](../modules/nsh-list.md#数据与渲染)。 |
 | `children` | `virtual_list(.., \|at\| row)` | `(item: () => T, index: () => number) => JSX.Element` | | 渲染一行。 |
 | `estimatedItemSize` | `.estimated_item_size(px(..))` | `number` | `50` | 尚未测量的条目尺寸（点）。估值越接近，滚动条越稳定。 |
 | `horizontal` | `.horizontal()` | `boolean` | `false` | 横向滚动。 |

@@ -5,13 +5,21 @@
 // `contentClass`), and what an empty list shows; `Scroll`'s view around its
 // content (`contentStyle`, `contentClass`). Its script checks each.
 import { Scroll, Text, View, signal } from "nsh";
-import { List } from "nsh/list";
+import { List, type ReadonlyListSource } from "nsh/list";
+
+function plumSource(name: string): ReadonlyListSource<string> {
+  return { length: 1, at: () => name };
+}
 
 function App() {
   const items = signal(["Apple", "Banana", "Cherry"]);
+  const plums = signal(plumSource("Plum"));
   return (
     <View testID="root" style={{ flex: 1, paddingTop: 64 }}>
-      <View testID="add" onPress={() => items.set([...items(), `Item ${items().length + 1}`])}>
+      <View testID="add" onPress={() => {
+        items.set([...items(), `Item ${items().length + 1}`]);
+        plums.set(plumSource("Updated plum"));
+      }}>
         <Text>Add</Text>
       </View>
       <List
@@ -33,7 +41,7 @@ function App() {
       </List>
       <List
         testID="classed"
-        each={["Plum"]}
+        each={plums()}
         style={{ height: 60 }}
         contentClass="px-4"
         empty={<Text>No plums</Text>}
@@ -44,7 +52,7 @@ function App() {
           </View>
         )}
       </List>
-      <List testID="none" each={[] as string[]} style={{ height: 60 }} empty={() => <Text>Nothing here</Text>}>
+      <List testID="none" each={{ length: 0, at: (_index: number): string => "" }} style={{ height: 60 }} empty={() => <Text>Nothing here</Text>}>
         {(item) => <Text>{item()}</Text>}
       </List>
       <Scroll testID="scroll" style={{ height: 80 }} contentStyle={{ padding: 12 }}>
