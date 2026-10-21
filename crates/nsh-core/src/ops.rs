@@ -208,6 +208,7 @@ events! {
     FileDrop = "onFileDrop": "Local files were dropped (payload: [`EventPayload::FileDrop`]).",
     HoverMove = "onHoverMove": "The mouse moved over a hovered view, with no button down (payload: [`EventPayload::Hover`]; at most one per frame).",
     ContextMenu = "onContextMenu": "The secondary button was pressed over the view (payload: [`EventPayload::ContextMenu`]): the nearest listener around the view under the pointer hears it, unless a text input or selectable text is nearer.",
+    CompositionChange = "onCompositionChange": "An input method's composition in an input started, changed or ended (payload: `composing`, `text`: the text being composed, empty once it ends; after the `onChangeText` of the committed text).",
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -1198,7 +1199,8 @@ impl StatusBarSetting {
 }
 
 /// How a dialog button looks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DialogButtonStyle {
     /// A regular button.
     #[default]
@@ -1210,7 +1212,7 @@ pub enum DialogButtonStyle {
 }
 
 /// A dialog button.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DialogButton {
     /// Label.
     pub text: String,
@@ -1219,7 +1221,7 @@ pub struct DialogButton {
 }
 
 /// An alert, or with `sheet` an action sheet.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Dialog {
     /// Echoed in the answer.
     pub id: u32,

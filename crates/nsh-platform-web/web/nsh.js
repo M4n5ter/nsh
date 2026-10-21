@@ -1803,7 +1803,7 @@ class Player {
   }
 
   // Desktop scroll bars (the desktop idiom): nsh's own, thin, over the
-  // content, shown while the view scrolls or the mouse moves over it and
+  // content, shown while the view scrolls or the mouse reaches its thumb and
   // fading after, and dragged by the mouse as a scroll bar's thumb, as on
   // the desktop backends.
 
@@ -1850,6 +1850,22 @@ class Player {
     if (!el._barHeld) el._barTimer = setTimeout(() => el._bar && (el._bar.firstChild.style.opacity = "0"), BAR_HOLD);
   }
 
+  /** Whether the pointer reaches the draggable thumb, even while faded. */
+  barHit(el, e) {
+    if (!this.barShown(el)) return false;
+    const thumb = this.barThumb(el);
+    if (!thumb) return false;
+    const r = el.getBoundingClientRect();
+    const [x, y] = [e.clientX - r.left, e.clientY - r.top];
+    const [along, across, edge] = el._horizontal ? [x, y, el.clientHeight] : [y, x, el.clientWidth];
+    return across >= edge - BAR_GRAB && across <= edge && along >= thumb[0] - 4 && along <= thumb[0] + thumb[1] + 4;
+  }
+
+  /** Content hover leaves the bar and its fade timer unchanged. */
+  hoverBar(el, e) {
+    if (this.barHit(el, e)) this.showBar(el);
+  }
+
   /** A mouse press on the bar of a scroll view around `e`'s target grabs
    * it, faded or not: the content moves the other way, so the thumb
    * follows the pointer. */
@@ -1857,14 +1873,8 @@ class Player {
     const view = this.viewOf(e.target);
     if (!view) return false;
     for (const el of this.ancestors(view)) {
-      if (el._kind !== "scroll" || !this.barShown(el)) continue;
-      const thumb = this.barThumb(el);
-      if (!thumb) continue;
-      const r = el.getBoundingClientRect();
-      const [x, y] = [e.clientX - r.left, e.clientY - r.top];
+      if (!this.barHit(el, e)) continue;
       const h = !!el._horizontal;
-      const [along, across, edge] = h ? [x, y, el.clientHeight] : [y, x, el.clientWidth];
-      if (across < edge - BAR_GRAB || across > edge || along < thumb[0] - 4 || along > thumb[0] + thumb[1] + 4) continue;
       e.preventDefault();
       el._barHeld = true;
       // Snapping would move the content under the thumb: back once it ends.
@@ -2261,19 +2271,19 @@ class Player {
       canvas.width = pw;
       canvas.height = ph;
     }
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    ctx.save();
+    const cx = canvas.getContext("2d");
+    cx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    cx.clearRect(0, 0, w, h);
+    cx.save();
     const slots = el._slots;
     const v = (n) => (Array.isArray(n) && n[0] === "$" ? (slots[n[1]] ?? 0) : n);
     const paint = (p) => {
       if (Array.isArray(p) && p[0] === "$") return slots[p[1]] ?? "transparent";
       if (p && typeof p === "object" && p.g) {
         const a = p.args;
-        const g = p.g === "linear" ? ctx.createLinearGradient(a[0], a[1], a[2], a[3])
-          : p.g === "radial" ? ctx.createRadialGradient(a[0], a[1], a[2], a[3], a[4], a[5])
-            : ctx.createConicGradient(a[0], a[1], a[2]);
+        const g = p.g === "linear" ? cx.createLinearGradient(a[0], a[1], a[2], a[3])
+          : p.g === "radial" ? cx.createRadialGradient(a[0], a[1], a[2], a[3], a[4], a[5])
+            : cx.createConicGradient(a[0], a[1], a[2]);
         for (const [offset, color] of p.stops) g.addColorStop(Math.min(1, Math.max(0, offset)), color);
         return g;
       }
@@ -2291,36 +2301,36 @@ class Player {
       try {
         if (name.startsWith("=")) {
           const prop = name.slice(1);
-          ctx[prop] = prop.endsWith("Style") ? paint(args[0]) : v(args[0]);
+          cx[prop] = prop.endsWith("Style") ? paint(args[0]) : v(args[0]);
         } else if (name === "fill" || name === "clip") {
-          if (args[0]) ctx[name](path(args[0]), args[1]);
-          else ctx[name](args[1]);
+          if (args[0]) cx[name](path(args[0]), args[1]);
+          else cx[name](args[1]);
         } else if (name === "stroke") {
-          if (args[0]) ctx.stroke(path(args[0]));
-          else ctx.stroke();
+          if (args[0]) cx.stroke(path(args[0]));
+          else cx.stroke();
         } else if (name === "shadowOffset") {
-          ctx.shadowOffsetX = args[0];
-          ctx.shadowOffsetY = args[1];
+          cx.shadowOffsetX = args[0];
+          cx.shadowOffsetY = args[1];
         } else if (name === "roundRect") {
-          ctx.roundRect(...args.slice(0, 4).map(v), args[4].map(v));
+          cx.roundRect(...args.slice(0, 4).map(v), args[4].map(v));
         } else if (name === "drawImage") {
           const img = this.canvasImage(args[0], el);
           if (!img) continue;
           const dest = args.slice(2).map(v);
-          if (args[1]) ctx.drawImage(img, ...args[1], ...dest);
-          else ctx.drawImage(img, ...dest);
+          if (args[1]) cx.drawImage(img, ...args[1], ...dest);
+          else cx.drawImage(img, ...dest);
         } else if (name === "fillText" || name === "strokeText") {
-          ctx[name](args[0], ...args.slice(1).map(v));
+          cx[name](args[0], ...args.slice(1).map(v));
         } else if (name === "setLineDash") {
-          ctx.setLineDash(args[0]);
-        } else if (typeof ctx[name] === "function") {
-          ctx[name](...args.map(v));
+          cx.setLineDash(args[0]);
+        } else if (typeof cx[name] === "function") {
+          cx[name](...args.map(v));
         }
       } catch (err) {
         console.warn("[nsh] canvas", name, err);
       }
     }
-    ctx.restore();
+    cx.restore();
   }
 
   canvasImage(uri, el) {
@@ -2363,6 +2373,10 @@ class Player {
       field = document.createElement(tag);
       field.className = "nsh-field";
       field._count = 0;
+      // The text last reported or set: an `input` event that leaves it
+      // (a composition's end in Safari, after the text it committed was
+      // reported) reports nothing.
+      field._known = "";
       this.wireInput(el, field);
       el._field = field;
       el.append(field);
@@ -2397,9 +2411,25 @@ class Player {
   }
 
   wireInput(el, field) {
-    field.addEventListener("input", () => {
-      field._count++;
-      this.event(el._id, "onChangeText", { text: field.value, count: field._count });
+    field.addEventListener("input", () => this.textChanged(el, field));
+    // An input method's composition: the app's value is held while it
+    // lasts (`op_iv`), since setting a field's value ends the composition
+    // and commits its text as typed (pinyin letters instead of the
+    // characters chosen).
+    field.addEventListener("compositionstart", (e) => {
+      field._composing = true;
+      this.compositionChanged(el, field, e.data ?? "");
+    });
+    field.addEventListener("compositionupdate", (e) => this.compositionChanged(el, field, e.data ?? ""));
+    field.addEventListener("compositionend", () => {
+      field._composing = false;
+      // The committed text is reported before the end (browsers differ in
+      // whether its `input` event comes before or after).
+      this.textChanged(el, field);
+      this.compositionChanged(el, field, "");
+      const pending = field._pending;
+      field._pending = null;
+      if (pending) this.op_iv([, el._id, ...pending]);
     });
     field.addEventListener("keydown", (e) => {
       if (el._events.has("onKeyPress")) {
@@ -2430,6 +2460,21 @@ class Player {
     field.addEventListener("pointerup", () => this.selectionChanged(el, field));
   }
 
+  textChanged(el, field) {
+    if (field.value === field._known) return;
+    field._known = field.value;
+    field._count++;
+    this.event(el._id, "onChangeText", { text: field.value, count: field._count });
+  }
+
+  compositionChanged(el, field, text) {
+    const composing = !!field._composing;
+    const last = field._composition;
+    if (last && last[0] === composing && last[1] === text) return;
+    field._composition = [composing, text];
+    if (el._events.has("onCompositionChange")) this.event(el._id, "onCompositionChange", { composing, text });
+  }
+
   selectionChanged(el, field) {
     if (!el._events.has("onSelectionChange")) return;
     const sel = [field.selectionStart ?? 0, field.selectionEnd ?? 0];
@@ -2441,6 +2486,11 @@ class Player {
   op_iv([, id, text, count]) {
     const field = this.view(id)?._field;
     if (!field || count < field._count) return;
+    if (field._composing) {
+      field._pending = [text, count];
+      return;
+    }
+    field._known = text;
     if (field.value !== text) field.value = text;
   }
 
@@ -3693,10 +3743,10 @@ class Player {
     root.addEventListener("pointermove", (e) => {
       if (e.pointerType !== "mouse") return;
       this.hover = [e.clientX, e.clientY];
-      // The scroll views under the mouse show their bars.
+      // Reveal only a draggable thumb under the pointer.
       if (!this.desktopUI || e.buttons) return;
       const view = this.viewOf(e.target);
-      if (view) for (const el of this.ancestors(view)) if (el._kind === "scroll") this.showBar(el);
+      if (view) for (const el of this.ancestors(view)) if (el._kind === "scroll") this.hoverBar(el, e);
     });
     root.addEventListener("focusin", () => (Player.active = this));
     window.addEventListener("keydown", (e) => this.keyDown(e));

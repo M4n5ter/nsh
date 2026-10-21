@@ -302,6 +302,7 @@ impl AppView {
         self.set_asset_base(Some(AssetBase::Http(base)));
         let host = HostInfo {
             device: "Terminal".into(),
+            tests: false,
             platform: HostPlatform::Tui,
             bytecode_version: nsh_engine::BYTECODE_VERSION.into(),
             ui_sets: self
@@ -733,6 +734,7 @@ impl AppView {
     fn dev_event(&mut self, event: nsh_dev::DevEvent) -> io::Result<()> {
         use nsh_dev::{DevEvent, protocol::BundleFormat};
         match event {
+            DevEvent::Testing | DevEvent::Step { .. } => {}
             DevEvent::Connected => self.status = None,
             DevEvent::Disconnected => {
                 self.status = Some("Dev server disconnected; reconnecting".into())
