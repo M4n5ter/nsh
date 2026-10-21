@@ -466,6 +466,34 @@ impl WgpuContext {
             .using_resolution(adapter.limits())
             .using_alignment(adapter.limits());
 
+        // Rendering uses storage buffers, but no compute pipelines or storage textures.
+        // Keep those optional limits when supported without excluding render-capable GPUs.
+        let adapter_limits = adapter.limits();
+        let required_limits = wgpu::Limits {
+            max_storage_textures_per_shader_stage: required_limits
+                .max_storage_textures_per_shader_stage
+                .min(adapter_limits.max_storage_textures_per_shader_stage),
+            max_compute_workgroup_storage_size: required_limits
+                .max_compute_workgroup_storage_size
+                .min(adapter_limits.max_compute_workgroup_storage_size),
+            max_compute_invocations_per_workgroup: required_limits
+                .max_compute_invocations_per_workgroup
+                .min(adapter_limits.max_compute_invocations_per_workgroup),
+            max_compute_workgroup_size_x: required_limits
+                .max_compute_workgroup_size_x
+                .min(adapter_limits.max_compute_workgroup_size_x),
+            max_compute_workgroup_size_y: required_limits
+                .max_compute_workgroup_size_y
+                .min(adapter_limits.max_compute_workgroup_size_y),
+            max_compute_workgroup_size_z: required_limits
+                .max_compute_workgroup_size_z
+                .min(adapter_limits.max_compute_workgroup_size_z),
+            max_compute_workgroups_per_dimension: required_limits
+                .max_compute_workgroups_per_dimension
+                .min(adapter_limits.max_compute_workgroups_per_dimension),
+            ..required_limits
+        };
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("gpui_device"),
