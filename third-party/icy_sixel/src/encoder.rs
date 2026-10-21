@@ -187,7 +187,7 @@ fn sixel_encode_impl_into<W: Write + ?Sized>(
     let indices: Vec<u8> = indexed_image.indices().to_vec();
 
     // Encode to SIXEL with transparency support
-    encode_indexed_to_sixel(&palette, &indices, &opacity_mask, width, height, pixel_aspect_ratio, background_mode, output)
+    encode_indexed_to_sixel(&palette, &indices, &opacity_mask, (width, height), pixel_aspect_ratio, background_mode, output)
 }
 
 /// Encode RGBA with default options.
@@ -203,12 +203,12 @@ fn encode_indexed_to_sixel<W: Write + ?Sized>(
     palette: &[Rgb],
     indices: &[u8],
     opacity_mask: &BitMask,
-    width: usize,
-    height: usize,
+    size: (usize, usize),
     aspect_ratio: PixelAspectRatio,
     background_mode: BackgroundMode,
     out: &mut W,
 ) -> Result<()> {
+    let (width, height) = size;
     // DCS introducer for SIXEL: ESC P p1 ; p2 ; p3 q
     // p1=aspect ratio, p2=background mode, p3=0 (grid size default)
     out.write_all(b"\x1bP")?;
