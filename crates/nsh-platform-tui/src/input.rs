@@ -228,7 +228,7 @@ impl Surface {
                 };
                 if retained.iter().any(|scope| scope.scope == target) {
                     if Some(target) != batch.owner
-                        && let Some(first) = self.first_keyboard_stop(target.0)
+                        && let Some(first) = self.popup_focus_target(target)
                     {
                         self.set_focus(Some(first));
                     }
@@ -283,7 +283,7 @@ impl Surface {
             };
             let opener = if opened.contains(&parent.0) {
                 self.fresh_autofocus(parent.0, &visible)
-                    .or_else(|| self.first_keyboard_stop(parent.0))
+                    .or_else(|| self.popup_focus_target(parent))
                     .and_then(|id| self.focus_target(id))
             } else {
                 opener
@@ -344,7 +344,10 @@ impl Surface {
             if owns {
                 continue;
             }
-            if let Some(first) = self.first_keyboard_stop(id) {
+            if let Some(first) = self
+                .focus_target(id)
+                .and_then(|scope| self.popup_focus_target(scope))
+            {
                 self.set_focus(Some(first));
             }
         }
@@ -379,15 +382,25 @@ impl Surface {
 
     fn keyboard_stop(&self, id: NodeId) -> bool {
         self.focusable(id)
-            && self
-                .node(id)
-                .is_some_and(|n| n.props.focusable != Some(false))
+            && self.node(id).is_some_and(|n| {
+                n.props
+                    .focusable
+                    .unwrap_or(n.props.focus_return_parent.is_none())
+            })
     }
 
-    fn first_keyboard_stop(&self, root: NodeId) -> Option<NodeId> {
-        self.visible_ids()
-            .into_iter()
-            .find(|id| self.keyboard_stop(*id) && self.in_focus_scope(*id, root))
+    fn popup_focus_target(&self, scope: FocusTarget) -> Option<NodeId> {
+        if self.focus_target(scope.0) != Some(scope) {
+            return None;
+        }
+        let visible = self.visible_ids();
+        visible
+            .iter()
+            .copied()
+            .find(|id| self.keyboard_stop(*id) && self.in_focus_scope(*id, scope.0))
+            // A loading or busy popup still owns native keyboard focus when
+            // none of its controls can receive it yet.
+            .or_else(|| (visible.contains(&scope.0) && self.focusable(scope.0)).then_some(scope.0))
     }
 
     /// The focused node followed by its mounted ancestors, including itself.
@@ -572,6 +585,12 @@ impl Surface {
     /// Focus follows the active scope and returns when that scope closes.
     pub(crate) fn reconcile_focus(&mut self) {
         let visible = self.visible_ids();
+        let popup = self
+            .current_popup_owner()
+            .map(|scope| scope.scope)
+            .filter(|scope| {
+                visible.contains(&scope.0) && self.focus_target(scope.0) == Some(*scope)
+            });
         let displaced = self
             .focus
             .is_some_and(|id| !visible.contains(&id) || !self.focusable(id));
@@ -590,7 +609,7 @@ impl Surface {
             .rev()
             .find_map(|scope| self.fresh_autofocus(scope.scope.0, &visible))
             .or_else(|| {
-                self.current_popup_owner()
+                popup
                     .is_none()
                     .then(|| self.fresh_autofocus(ROOT_ID, &visible))
                     .flatten()
@@ -607,16 +626,20 @@ impl Surface {
         if let Some(id) = fresh_auto {
             self.set_focus(Some(id));
         } else if self.focus.is_none() {
-            let restore = self
-                .focus_history
-                .iter()
-                .rposition(|id| visible.contains(id) && self.focusable(*id));
-            if let Some(index) = restore {
-                let id = self.focus_history.remove(index);
+            if let Some(id) = popup.and_then(|scope| self.popup_focus_target(scope)) {
                 self.set_focus(Some(id));
-            } else if displaced || !self.autofocus_seen.contains(&ROOT_ID) {
-                let first = visible.iter().copied().find(|id| self.focusable(*id));
-                self.set_focus(first);
+            } else {
+                let restore = self
+                    .focus_history
+                    .iter()
+                    .rposition(|id| visible.contains(id) && self.focusable(*id));
+                if let Some(index) = restore {
+                    let id = self.focus_history.remove(index);
+                    self.set_focus(Some(id));
+                } else if displaced || !self.autofocus_seen.contains(&ROOT_ID) {
+                    let first = visible.iter().copied().find(|id| self.focusable(*id));
+                    self.set_focus(first);
+                }
             }
         }
         if !self.autofocus_seen.contains(&ROOT_ID) {
@@ -742,7 +765,8 @@ impl Surface {
         }) {
             return false;
         }
-        node.kind == ViewKind::Input
+        node.props.focus_return_parent.is_some()
+            || node.kind == ViewKind::Input
             || node
                 .text
                 .as_ref()
@@ -2833,25 +2857,87 @@ mod tests {
         items
     }
 
+    fn disable(id: NodeId) -> nsh_core::MountItem {
+        let mut props = nsh_core::ViewProps::default();
+        props.accessibility.state.disabled = true;
+        nsh_core::MountItem::ViewProps {
+            id,
+            props: Box::new(props),
+        }
+    }
+
     #[test]
-    fn popup_autofocus_returns_keyboard_opener_without_changing_its_caret() {
-        use nsh_core::{MountBatch, MountItem};
-        let mut surface = form();
-        surface.input_value(2, "abcdef".into(), 0);
-        surface.selection(2, 3, 3);
-        surface.apply(MountBatch {
-            items: popup(6, 8, ROOT_ID, true),
-        });
-        assert_eq!(surface.focused(), Some(8));
-        key(&mut surface, KeyCode::Char('x'), KeyModifiers::NONE);
-        assert_eq!(surface.node(8).unwrap().editor.text(), "x");
-        surface.apply(MountBatch {
-            items: vec![MountItem::Delete { id: 8 }, MountItem::Delete { id: 6 }],
-        });
-        assert_eq!(surface.focused(), Some(2));
-        assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
-        key(&mut surface, KeyCode::Char('Z'), KeyModifiers::NONE);
-        assert_eq!(surface.node(2).unwrap().editor.text(), "abcZdef");
+    fn busy_popup_keeps_native_focus_and_returns_its_actual_opener() {
+        use nsh_core::{MountBatch, MountItem, ViewProps};
+
+        for opener in [2, 4] {
+            let mut surface = form();
+            surface.input_value(2, "abcdef".into(), 0);
+            surface.selection(2, 3, 3);
+            if opener == 4 {
+                for kind in [
+                    MouseEventKind::Down(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                ] {
+                    surface.handle_event(Event::Mouse(MouseEvent {
+                        kind,
+                        column: 1,
+                        row: 3,
+                        modifiers: KeyModifiers::NONE,
+                    }));
+                }
+            }
+            let mut items = popup(6, 8, ROOT_ID, true);
+            items.extend(create(10, ViewKind::View, 6, 32.0));
+            items.push(MountItem::Events {
+                id: 10,
+                events: mask(&[EventKind::Press]),
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(8));
+            key(&mut surface, KeyCode::Char('x'), KeyModifiers::NONE);
+            assert_eq!(surface.node(8).unwrap().editor.text(), "x");
+            surface.apply(MountBatch {
+                items: vec![disable(8)],
+            });
+            assert_eq!(surface.focused(), Some(10));
+            surface.apply(MountBatch {
+                items: vec![disable(10)],
+            });
+            assert_eq!(surface.focused(), Some(6));
+            surface.apply(MountBatch::default());
+            for code in [KeyCode::Tab, KeyCode::BackTab] {
+                key(&mut surface, code, KeyModifiers::NONE);
+                assert_eq!(surface.focused(), Some(6));
+            }
+            surface.apply(MountBatch {
+                items: vec![MountItem::ViewProps {
+                    id: 10,
+                    props: Box::new(ViewProps::default()),
+                }],
+            });
+            for _ in 0..2 {
+                key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
+                assert_eq!(surface.focused(), Some(10));
+            }
+            surface.apply(MountBatch {
+                items: vec![disable(10)],
+            });
+            assert_eq!(surface.focused(), Some(6));
+            surface.apply(MountBatch {
+                items: [8, 10, 6]
+                    .into_iter()
+                    .map(|id| MountItem::Delete { id })
+                    .collect(),
+            });
+            assert_eq!(surface.focused(), Some(opener));
+            assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
+            key(&mut surface, KeyCode::Char('Z'), KeyModifiers::NONE);
+            assert_eq!(
+                surface.node(2).unwrap().editor.text(),
+                if opener == 2 { "abcZdef" } else { "abcdef" }
+            );
+        }
     }
 
     #[test]
@@ -2949,7 +3035,9 @@ mod tests {
                 }),
             });
             surface.apply(MountBatch { items });
-            assert_eq!(surface.focused(), Some(8));
+            // Even before its search mounts, the newly opened popup owns
+            // native focus instead of leaving keyboard input in its opener.
+            assert_eq!(surface.focused(), Some(10));
             let mut items = create(12, ViewKind::View, 10, 0.0);
             items.push(MountItem::Events {
                 id: 12,
@@ -3031,6 +3119,10 @@ mod tests {
             }],
         });
         assert_eq!(surface.focused(), Some(10));
+        surface.apply(MountBatch {
+            items: vec![disable(8), disable(10), disable(12)],
+        });
+        assert_eq!(surface.focused(), Some(6));
         surface.handle_event(pointer(1, 0));
         assert_eq!(surface.focused(), Some(2));
         // A controlled popup may remain open after the outside press.
@@ -3073,6 +3165,29 @@ mod tests {
                 .map(|id| MountItem::Delete { id })
                 .collect(),
         });
+        assert_eq!(surface.focused(), Some(18));
+        surface.apply(MountBatch {
+            items: popup(20, 22, 6, true),
+        });
+        assert_eq!(surface.focused(), Some(22));
+        surface.apply(MountBatch {
+            items: vec![disable(18), disable(22)],
+        });
+        assert_eq!(surface.focused(), Some(20));
+        surface.apply(MountBatch {
+            items: [22, 20]
+                .into_iter()
+                .map(|id| MountItem::Delete { id })
+                .collect(),
+        });
+        assert_eq!(surface.focused(), Some(6));
+        surface.apply(MountBatch {
+            items: vec![MountItem::ViewProps {
+                id: 18,
+                props: Box::new(nsh_core::ViewProps::default()),
+            }],
+        });
+        key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(surface.focused(), Some(18));
         surface.apply(MountBatch {
             items: popup(20, 22, 6, true),
@@ -3153,6 +3268,23 @@ mod tests {
             items: vec![MountItem::Remove { id: 10 }],
         });
         assert_eq!(surface.focused(), Some(2));
+        surface.apply(MountBatch {
+            items: popup(14, 16, ROOT_ID, true),
+        });
+        surface.apply(MountBatch {
+            items: vec![disable(16)],
+        });
+        assert_eq!(surface.focused(), Some(14));
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Remove { id: 14 },
+                MountItem::Command {
+                    id: 4,
+                    command: Command::Focus,
+                },
+            ],
+        });
+        assert_eq!(surface.focused(), Some(4));
     }
 
     #[test]
@@ -3203,13 +3335,29 @@ mod tests {
 
     #[test]
     fn a_modal_covers_a_popup_without_retiring_its_focus_return_scope() {
-        use nsh_core::{MountBatch, MountItem, ViewProps};
+        use nsh_core::{InputConfig, MountBatch, MountItem, ViewProps};
         let mut surface = form();
         surface.apply(MountBatch {
             items: popup(6, 8, ROOT_ID, false),
         });
         let mut items = create(10, ViewKind::Modal, ROOT_ID, 0.0);
-        items.extend(create(12, ViewKind::Input, 10, 0.0));
+        items.push(MountItem::Frame {
+            id: 10,
+            frame: Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(160.0), px(96.0))),
+        });
+        items.extend(create(14, ViewKind::View, 10, 0.0));
+        items.push(MountItem::Events {
+            id: 14,
+            events: mask(&[EventKind::Press]),
+        });
+        items.extend(create(12, ViewKind::Input, 10, 32.0));
+        items.push(MountItem::Input {
+            id: 12,
+            config: Box::new(InputConfig {
+                auto_focus: true,
+                ..Default::default()
+            }),
+        });
         surface.apply(MountBatch { items });
         assert_eq!(surface.focused(), Some(12));
         // A popup prop update while covered does not close or reopen it.
