@@ -359,10 +359,42 @@ fn wait_for_button(view: &Entity<AppView>, cx: &mut VisualTestContext, id: &str)
         }
         assert!(
             start.elapsed() < Duration::from_secs(10),
-            "button {id} did not take native focus"
+            "button {id} did not take native focus: {}",
+            view.read_with(cx, |view, _| focus_diagnostic(view.surface()))
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn focus_diagnostic(surface: &crate::surface::Surface) -> String {
+    fn nodes(view: &crate::view::NshView, out: &mut Vec<String>) {
+        let s = view.state();
+        out.push(format!(
+            "{}:{:?}:test={:?}:disabled={}:hidden={}:focusable={:?}:press={}:input={}",
+            s.id,
+            s.kind,
+            s.props.test_id,
+            s.props.accessibility.state.disabled,
+            s.style.hidden || s.concealed,
+            s.props.focusable,
+            s.events.contains(nsh_core::EventKind::Press),
+            s.input.is_some(),
+        ));
+        drop(s);
+        view.with_children(|children| {
+            for child in children {
+                nodes(child, out);
+            }
+        });
+    }
+    let generic = crate::text_input::focused_view(surface).map(|view| view.id());
+    let native = crate::native::focused_component(surface);
+    let mut tree = Vec::new();
+    nodes(&surface.root, &mut tree);
+    format!(
+        "generic={generic:?} native={native:?} path={:?} tree={tree:?}",
+        surface.focus_path()
+    )
 }
 
 fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
