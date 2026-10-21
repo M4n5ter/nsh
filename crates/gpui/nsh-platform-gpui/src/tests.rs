@@ -9,8 +9,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App as GpuiApp, Entity, Focusable, IntoElement, Styled, TestAppContext,
-    VisualTestContext, Window, div,
+    AnyElement, App as GpuiApp, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    Styled, TestAppContext, VisualTestContext, Window, div,
 };
 
 use crate::{App, AppOptions, AppView, Bundle, NativeComponent};
@@ -91,6 +91,78 @@ function App() {
 }
 mount(App);
 "#;
+
+const SCOPED_BUTTONS: &str = r#"
+import { Input, mount, signal, Text, View } from "nsh";
+import { Button, Dialog } from "nsh/base";
+import { colorScheme } from "nsh/device";
+import { keymap } from "nsh/keymap";
+import { nativeComponent } from "nsh/native";
+
+const FocusSquare = nativeComponent<{}, {}>("test.focus-square", { props: [], events: [] });
+
+function App() {
+  const log = signal<string[]>([]);
+  const open = signal(false);
+  const record = (event: string) => log.set([...log(), event]);
+  let scope, a, b;
+  keymap.bind("f6", () => record(`global:${keymap.focusedWithin(scope)}:${keymap.focusedWithin(a)}:${keymap.focusedWithin(b)}`), { when: "always" });
+  return (
+    <View style={{ flex: 1, gap: 8 }}>
+      <Input testID="report" autoFocus value={`${log().join("|")}@${colorScheme()}`}
+        onChange={() => record("unexpected edit")} style={{ height: 30 }} />
+      <Button disabled onPress={() => record("disabled")}><Text>Disabled</Text></Button>
+      <Button style={{ display: "none" }} onPress={() => record("hidden")}><Text>Hidden</Text></Button>
+      <Button focusable={false} onPress={() => record("not tabbable")}><Text>No Tab stop</Text></Button>
+      <View ref={(node) => {
+        scope = node;
+        keymap.bind("f6", () => record(`scope:${keymap.focusedWithin(scope)}:${keymap.focusedWithin(a)}:${keymap.focusedWithin(b)}`),
+          { when: "always", within: node });
+      }}>
+        <Button testID="a" ref={(node) => a = node} onPress={() => record("A")}><Text>A</Text></Button>
+      </View>
+      <FocusSquare testID="native" style={{ width: 40, height: 24 }} />
+      <Button testID="b" ref={(node) => b = node} onPress={() => record("B")}><Text>B</Text></Button>
+      <Button testID="opener" onPress={() => { record("open"); open.set(true); }}><Text>Open dialog</Text></Button>
+      <Dialog open={open()} animation="none" onOpen={() => record("shown")}
+        onClose={() => record("closed")} onOpenChange={(next) => open.set(next)}>
+        <Button testID="modal" onPress={() => record("modal")}><Text>Modal action</Text></Button>
+      </Dialog>
+    </View>
+  );
+}
+mount(App);
+"#;
+
+struct FocusSquare {
+    focus: Option<FocusHandle>,
+}
+
+impl NativeComponent for FocusSquare {
+    fn render(&mut self, _: &mut Window, cx: &mut GpuiApp) -> Option<AnyElement> {
+        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        Some(
+            div()
+                .id("focus-square")
+                .track_focus(&focus)
+                .size_full()
+                .into_any_element(),
+        )
+    }
+
+    fn focus_handle(&self) -> Option<FocusHandle> {
+        self.focus.clone()
+    }
+
+    fn set_prop(
+        &mut self,
+        _: &str,
+        _: Option<&serde_json::Value>,
+        _: &mut Window,
+        _: &mut GpuiApp,
+    ) {
+    }
+}
 
 /// A native component that only draws a box.
 struct Square;
@@ -234,6 +306,126 @@ fn windows(cx: &mut TestAppContext) {
     keys_reach_the_fields_of_a_surface_showing_a_native_component(cx);
     compositions_are_reported_and_hold_values_until_they_end(cx);
     configured_assets_stay_with_their_original_load(cx);
+    buttons_keep_native_focus_and_live_key_scopes(cx);
+}
+
+fn find_test_view(view: &crate::view::NshView, id: &str) -> Option<crate::view::NshView> {
+    if view.state().props.test_id.as_deref() == Some(id) {
+        return Some(view.clone());
+    }
+    view.with_children(|children| children.iter().find_map(|child| find_test_view(child, id)))
+}
+
+fn wait_for_report(view: &Entity<AppView>, cx: &mut VisualTestContext, expected: &str) {
+    let start = Instant::now();
+    loop {
+        cx.run_until_parked();
+        let current = view.read_with(cx, |view, _| {
+            find_test_view(&view.surface().root, "report")
+                .and_then(|view| crate::text_input::accessible_value(&view))
+                .map(|value| value.text)
+        });
+        if current.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "report {current:?}, expected {expected:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_button(view: &Entity<AppView>, cx: &mut VisualTestContext, id: &str) {
+    let start = Instant::now();
+    loop {
+        cx.run_until_parked();
+        let focused = view.read_with(cx, |view, _| {
+            let surface = view.surface();
+            let generic = crate::text_input::focused_view(surface);
+            let native = crate::native::focused_component(surface).and_then(|id| surface.view(id));
+            let owns = if id == "native" {
+                generic.is_none()
+                    && native.is_some_and(|view| view.state().props.test_id.as_deref() == Some(id))
+            } else {
+                native.is_none()
+                    && generic.is_some_and(|view| view.state().props.test_id.as_deref() == Some(id))
+            };
+            owns && crate::text_input::focused(surface).is_none()
+                && !crate::text_input::wants_text(surface)
+        });
+        if focused {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "button {id} did not take native focus"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
+    let code =
+        nsh_bundler::compile_module("App.tsx", SCOPED_BUTTONS, &[nsh_base::registry().into()])
+            .unwrap();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    view.update(cx, |view, cx| {
+        view.register_component(
+            "test.focus-square",
+            Rc::new(|_| Box::new(FocusSquare { focus: None })),
+        );
+        view.set_appearance(nsh_core::platform::Appearance::Light, cx);
+        view.load(App::Js(Bundle::source(code.clone())));
+    });
+    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    wait_for(&view, cx, "@light");
+    cx.simulate_keystrokes("tab");
+    wait_for_button(&view, cx, "a");
+    cx.simulate_keystrokes("x enter space f6");
+    wait_for_report(&view, cx, "A|A|scope:true:true:false@light");
+    cx.simulate_keystrokes("tab");
+    wait_for_button(&view, cx, "native");
+    cx.simulate_keystrokes("tab");
+    wait_for_button(&view, cx, "b");
+    cx.simulate_keystrokes("enter f6");
+    wait_for_report(
+        &view,
+        cx,
+        "A|A|scope:true:true:false|B|global:false:false:true@light",
+    );
+    cx.simulate_keystrokes("tab");
+    wait_for_button(&view, cx, "opener");
+    cx.simulate_keystrokes("enter");
+    let mut report = "A|A|scope:true:true:false|B|global:false:false:true|open|shown".to_owned();
+    wait_for_report(&view, cx, &format!("{report}@light"));
+    wait_for_button(&view, cx, "modal");
+    cx.simulate_keystrokes("tab");
+    wait_for_button(&view, cx, "modal");
+    cx.simulate_keystrokes("enter escape");
+    report.push_str("|modal|closed");
+    wait_for_report(&view, cx, &format!("{report}@light"));
+    wait_for_button(&view, cx, "opener");
+    cx.simulate_keystrokes("enter");
+    report.push_str("|open|shown");
+    wait_for_report(&view, cx, &format!("{report}@light"));
+    wait_for_button(&view, cx, "modal");
+    cx.simulate_keystrokes("escape");
+    report.push_str("|closed");
+    wait_for_report(&view, cx, &format!("{report}@light"));
+    view.update(cx, |view, cx| {
+        view.set_appearance(nsh_core::platform::Appearance::Dark, cx)
+    });
+    wait_for_report(&view, cx, &format!("{report}@dark"));
+    cx.simulate_keystrokes("f6");
+    report.push_str("|global:false:false:false");
+    wait_for_report(&view, cx, &format!("{report}@dark"));
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    wait_for(&view, cx, "@dark");
+    cx.simulate_keystrokes("tab f6");
+    wait_for_report(&view, cx, "scope:true:true:false@dark");
+    view.update(cx, |view, _| view.stop());
 }
 
 fn configured_assets_stay_with_their_original_load(cx: &mut TestAppContext) {
