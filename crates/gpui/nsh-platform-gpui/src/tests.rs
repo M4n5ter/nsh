@@ -341,7 +341,8 @@ fn wait_for(view: &Entity<AppView>, cx: &mut VisualTestContext, text: &str) {
         }
         assert!(
             start.elapsed() < Duration::from_secs(10),
-            "the field reads {now:?}, not {text:?}"
+            "the field reads {now:?}, not {text:?}: {}",
+            view.read_with(cx, |view, _| focus_diagnostic(view.surface()))
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -463,6 +464,7 @@ fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
             Rc::new(|_| Box::new(FocusSquare { focus: None })),
         );
         view.set_appearance(nsh_core::platform::Appearance::Light, cx);
+        view.on_app_error(|error| panic!("{error}"));
         view.load(App::Js(Bundle::source(code.clone())));
     });
     cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
