@@ -1264,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn a_throwing_effect_throws_from_the_write_and_the_graph_goes_on() {
+    fn throwing_computations_report_the_error_and_recover_with_the_graph() {
         assert_eq!(
             run(r#"
                 const [a, setA] = R.createSignal(0);
@@ -1278,6 +1278,29 @@ mod tests {
                 return log;
             "#),
             r#"["ok 0","other 0","other 1","caught boom","ok 2","other 2"]"#
+        );
+        assert_eq!(
+            run(r#"
+                const [a, setA] = R.createSignal(0);
+                const log = [];
+                let value;
+                R.createRoot(() => {
+                    value = R.createMemo(() => {
+                        const n = a();
+                        if (n === 1) throw new Error("memo boom");
+                        return n * 2;
+                    });
+                    const derived = R.createMemo(() => value() + 1);
+                    R.createRenderEffect(() => log.push(`value ${derived()}`));
+                });
+                try { setA(1); } catch (e) { log.push(`caught ${e.message}`); }
+                // A lazy read of the unchanged failing memo still throws;
+                // it must not silently return its last successful value.
+                try { value(); } catch (e) { log.push(`read ${e.message}`); }
+                setA(2);
+                return log;
+            "#),
+            r#"["value 1","caught memo boom","read memo boom","value 5"]"#
         );
     }
 

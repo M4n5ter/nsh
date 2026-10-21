@@ -38,6 +38,8 @@ fn is_node(owner: u32) -> bool {
 const CLEAN: u8 = 0;
 const STALE: u8 = 1;
 const PENDING: u8 = 2;
+/// A failed memo still needs recomputing, but is no longer queued.
+const FAILED: u8 = 3;
 
 /// Runs of computations in one flush before it counts as an infinite loop.
 const MAX_RUNS: u64 = 1_000_000;
@@ -784,7 +786,7 @@ fn run_top<H: Host>(h: H, id: u32) {
         if n.disposed {
             continue;
         }
-        if n.state == STALE {
+        if n.state == STALE || n.state == FAILED {
             update_computation(h, node);
         } else if n.state == PENDING {
             let updates = g(h).updates.take();
@@ -808,7 +810,7 @@ fn look_upstream<H: Host>(h: H, id: u32, ignore: u32) {
         if s.kind != Kind::Memo {
             continue;
         }
-        if s.state == STALE {
+        if s.state == STALE || s.state == FAILED {
             if source != ignore && s.updated_at.is_none_or(|t| t < graph.exec) {
                 run_top(h, source);
             }
@@ -847,7 +849,7 @@ fn run_computation<H: Host>(h: H, id: u32, time: u64) {
     let Some(next) = result else {
         let n = &mut graph.nodes[id as usize];
         if n.kind == Kind::Memo {
-            n.state = STALE;
+            n.state = FAILED;
             let owned = std::mem::take(&mut n.owned);
             for c in owned {
                 dispose(h, c);
@@ -914,7 +916,7 @@ pub fn write<H: Host>(h: H, id: u32, next: H::Value) {
             if graph.nodes[o as usize].disposed {
                 continue;
             }
-            if graph.nodes[o as usize].state == CLEAN {
+            if graph.nodes[o as usize].state == CLEAN || graph.nodes[o as usize].state == FAILED {
                 if graph.nodes[o as usize].kind == Kind::Memo {
                     graph.queue_update(o);
                 } else {
@@ -934,7 +936,7 @@ pub fn write<H: Host>(h: H, id: u32, next: H::Value) {
 pub fn read<H: Host>(h: H, id: u32) -> H::Value {
     let n = &g(h).nodes[id as usize];
     if n.kind == Kind::Memo && !n.disposed && n.state != CLEAN {
-        if n.state == STALE {
+        if n.state == STALE || n.state == FAILED {
             update_computation(h, id);
         } else {
             let updates = g(h).updates.take();

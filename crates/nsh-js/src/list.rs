@@ -458,9 +458,8 @@ unsafe extern "C" fn splice_run(
         if qjs::JS_IsException(next) {
             return next;
         }
-        let lengths = source_length(cx, old).and_then(|old_len| {
-            source_length(cx, next).map(|next_len| (old_len, next_len))
-        });
+        let lengths = source_length(cx, old)
+            .and_then(|old_len| source_length(cx, next).map(|next_len| (old_len, next_len)));
         let (old_len, next_len) = match lengths {
             Ok(lengths) => lengths,
             Err(e) => {
@@ -1364,7 +1363,9 @@ mod tests {
             .unwrap_or_else(|| panic!("missing exception stack: {message}"));
         assert_eq!(title, format!("Error: {expected}"));
         assert!(
-            stack.lines().any(|line| line.trim_start().starts_with("at ")),
+            stack
+                .lines()
+                .any(|line| line.trim_start().starts_with("at ")),
             "missing exception frames: {message}"
         );
     }
@@ -1543,10 +1544,13 @@ mod tests {
         take_ops(&host);
         host.bind_list(list, &[(0, 2)]);
         let recovered = take_ops(&host);
-        assert!(recovered.iter().any(|op| matches!(
-            op,
-            Op::SetText { id, text } if *id == body && text == "Row 2"
-        )));
+        assert!(
+            recovered.iter().any(|op| matches!(
+                op,
+                Op::SetText { id, text } if *id == body && text == "Row 2"
+            )),
+            "recovered ops: {recovered:?}; original body: {body:?}"
+        );
         host.dispatch_event(
             list,
             EventKind::ViewableItemsChange,
