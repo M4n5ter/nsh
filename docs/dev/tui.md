@@ -103,6 +103,8 @@ terminal therefore starts the engine at 960×640 points. Never feed cell
 counts directly to Taffy: text, padding, lists, hit slop, image geometry,
 scroll offsets and animation all use points. Only terminal events,
 script coordinates, Ratatui rectangles and the outer viewport use cells.
+Solid and gradient view backgrounds cover the terminal cells whose centers
+lie within both the view rectangle and its clip, using half-open bounds.
 
 Custom cell dimensions must be finite and strictly positive. Embedded
 hosts call `resize(columns, rows)` when their assigned region changes;
