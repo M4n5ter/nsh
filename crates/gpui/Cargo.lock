@@ -5280,6 +5280,7 @@ dependencies = [
  "nsh-dev",
  "nsh-engine",
  "regex",
+ "serde",
  "serde_json",
 ]
 
