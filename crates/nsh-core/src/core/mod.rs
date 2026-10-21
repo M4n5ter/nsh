@@ -453,10 +453,19 @@ impl Node {
     /// presses (React Native's `Pressable` / touchables), so it shows no
     /// press feedback either, and opens no context menu: a secondary click
     /// on it goes on to the nearest enabled listener around it.
-    fn mounted_events(&self) -> EventMask {
+    fn mounted_events(&self, hint_watch: Option<crate::overlay::HintWatchToken>) -> EventMask {
         let mut events = self.events;
-        if self.overlay_watched != 0 {
+        let passive_hint =
+            self.overlay_watched & overlay::watch::HINT_CALLBACK == 0 && hint_watch.is_some();
+        if self.overlay_watched & overlay::watch::PRESS != 0
+            || (self.overlay_watched & overlay::watch::HINT != 0 && !passive_hint)
+        {
             events.set(EventKind::Touch, true);
+        } else if self.overlay_watched & overlay::watch::HINT != 0 {
+            events.observe(
+                EventKind::Touch,
+                hint_watch.expect("the passive hint watch"),
+            );
         }
         if self.states & crate::tailwind::state::DISABLED != 0 {
             for e in DISABLED_OFF {
@@ -465,8 +474,13 @@ impl Node {
         }
         // A disabled view still shows its hint, as the desktops' do.
         if self.overlay_watched & overlay::watch::HINT != 0 {
-            events.set(EventKind::HoverIn, true);
-            events.set(EventKind::HoverOut, true);
+            for event in [EventKind::HoverIn, EventKind::HoverOut] {
+                if passive_hint {
+                    events.observe(event, hint_watch.expect("the passive hint watch"));
+                } else {
+                    events.set(event, true);
+                }
+            }
         }
         events
     }
@@ -3418,7 +3432,13 @@ impl<M: TextEngine> Core<M> {
             if flags & dirty::EVENTS != 0 {
                 self.mount.push(MountItem::Events {
                     id,
-                    events: node.mounted_events(),
+                    events: node.mounted_events(
+                        self.overlay_state
+                            .hinting
+                            .iter()
+                            .find(|watch| watch.key == key)
+                            .and_then(|watch| watch.token),
+                    ),
                 });
             }
             if flags & dirty::IMAGE != 0

@@ -25,6 +25,34 @@ use crate::{
     ops::NodeId,
 };
 
+/// Native pointer observations for a callback-free hint watch.
+/// These update tooltip presentation without granting input callbacks
+/// authority, even if subscriptions change before the engine consumes them.
+#[derive(Debug, Clone)]
+pub enum HintObservation {
+    /// The pointer entered this hint anchor.
+    Enter(HintWatchToken),
+    /// The pointer left this hint anchor.
+    Leave(HintWatchToken),
+    /// A press began along these hint anchors.
+    Press(Vec<HintWatchToken>),
+}
+
+/// The exact native hint watch published by one Core.
+/// Retain it from the mounted event mask; the default token grants nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct HintWatchToken {
+    anchor: u64,
+    revision: u64,
+}
+
+impl HintWatchToken {
+    pub(crate) fn new(anchor: u64, revision: u64) -> Self {
+        Self { anchor, revision }
+    }
+}
+
 /// What an overlay is placed against (`anchor`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum OverlayAnchor {

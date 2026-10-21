@@ -11,6 +11,7 @@ use nsh_core::{
     TouchEvent, TouchPhase, TouchPoint, ViewKind,
     geometry::{point, px},
     keymap::{Key, KeyMatch, Keystroke, Modifiers},
+    overlay::HintObservation,
     tailwind::state,
 };
 
@@ -367,8 +368,21 @@ impl Surface {
                 .find(|link| link.node == id)
                 .map(|link| link.events)
         });
-        if events.is_some_and(|events| events.contains(kind)) {
-            self.emit(id, kind, payload);
+        if let Some(events) = events.filter(|events| events.contains(kind)) {
+            if matches!(kind, EventKind::HoverIn | EventKind::HoverOut)
+                && !events.contains_listener(kind)
+            {
+                if let Some(watch) = events.hint_watch() {
+                    let observation = if kind == EventKind::HoverIn {
+                        HintObservation::Enter(watch)
+                    } else {
+                        HintObservation::Leave(watch)
+                    };
+                    self.events.push(SurfaceEvent::HintObservation(observation));
+                }
+            } else {
+                self.emit(id, kind, payload);
+            }
         }
     }
 
@@ -1780,6 +1794,22 @@ impl Surface {
             })
             .collect();
         if path.is_empty() {
+            return;
+        }
+        if !path.iter().any(|id| {
+            self.node(*id)
+                .is_some_and(|node| node.events.contains_listener(EventKind::Touch))
+        }) {
+            if phase == TouchPhase::Start {
+                let watches = path
+                    .into_iter()
+                    .filter_map(|id| self.node(id).and_then(|node| node.events.hint_watch()))
+                    .collect();
+                self.events
+                    .push(SurfaceEvent::HintObservation(HintObservation::Press(
+                        watches,
+                    )));
+            }
             return;
         }
         let location = self

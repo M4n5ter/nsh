@@ -286,9 +286,9 @@ fn native_input(surface: &Surface, view: &NshView) -> bool {
 }
 
 fn mouse_callbacks(events: nsh_core::EventMask) -> bool {
-    events.contains(EventKind::MouseMove)
-        || events.contains(EventKind::HoverIn)
-        || events.contains(EventKind::HoverOut)
+    events.contains_listener(EventKind::MouseMove)
+        || events.contains_listener(EventKind::HoverIn)
+        || events.contains_listener(EventKind::HoverOut)
 }
 
 fn opaque_native(state: &ViewState) -> bool {
@@ -311,7 +311,7 @@ fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
     state.opacity() <= 0.0
         || opaque_native(&state)
         || mouse_callbacks(state.events)
-        || state.events.contains(EventKind::Touch)
+        || state.events.contains_listener(EventKind::Touch)
         || state.events.contains(EventKind::PanStart)
         || state.events.contains(EventKind::PanEnd)
         || (press && state.events.contains(EventKind::LongPress))
@@ -682,7 +682,7 @@ impl InputSource {
                     .hovered
                     .borrow()
                     .iter()
-                    .any(|view| view.state().events.contains(EventKind::HoverOut))))
+                    .any(|view| view.state().events.contains_listener(EventKind::HoverOut))))
             || surface.input.hover_item.borrow().is_some()
         {
             cancel(surface);

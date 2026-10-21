@@ -4,7 +4,7 @@ use crate::{
     animation::AnimationOp,
     geometry::{Bounds, DevicePixels, Percentage, Point, Points, Size},
     js::host::HostProps,
-    overlay::{Align, OverlayAnchor, Placement, TooltipContent},
+    overlay::{Align, HintWatchToken, OverlayAnchor, Placement, TooltipContent},
     props::{AccessibilityProp, EdgeInsets, LayoutAnimation, PointerEvents},
     style::{Color, EllipsizeMode, Style, StylePatch},
     ui::PropEnum,
@@ -396,16 +396,30 @@ pub struct TouchEvent {
     pub activated: Option<NodeId>,
 }
 
-/// A set of [`EventKind`]s.
+/// Events a view reports, retaining which subscriptions can call a listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct EventMask(u64);
+pub struct EventMask {
+    listeners: u64,
+    observations: u64,
+    hint_watch: Option<HintWatchToken>,
+}
 
 impl std::ops::BitOr for EventMask {
     type Output = EventMask;
 
     #[inline]
     fn bitor(self, other: EventMask) -> EventMask {
-        EventMask(self.0 | other.0)
+        let conflicted = (self.observations != 0 && self.hint_watch.is_none())
+            || (other.observations != 0 && other.hint_watch.is_none());
+        EventMask {
+            listeners: self.listeners | other.listeners,
+            observations: self.observations | other.observations,
+            hint_watch: match (self.hint_watch, other.hint_watch) {
+                _ if conflicted => None,
+                (Some(left), Some(right)) if left != right => None,
+                (left, right) => left.or(right),
+            },
+        }
     }
 }
 
@@ -413,29 +427,58 @@ impl EventMask {
     /// Returns true if `event` is in the set.
     #[inline]
     pub const fn contains(self, event: EventKind) -> bool {
-        self.0 & (1 << event as u8) != 0
+        self.bits() & (1 << event as u8) != 0
+    }
+
+    /// Whether reporting `event` can invoke a listener, rather than only
+    /// update native presentation such as a callback-free tooltip.
+    #[inline]
+    pub const fn contains_listener(self, event: EventKind) -> bool {
+        self.listeners & (1 << event as u8) != 0
+    }
+
+    /// The native hint watch paired with these observations, if any.
+    #[inline]
+    pub const fn hint_watch(self) -> Option<HintWatchToken> {
+        self.hint_watch
     }
 
     /// The raw bit set, indexed by `EventKind as u8`.
     #[inline]
     pub const fn bits(self) -> u64 {
-        self.0
+        self.listeners | self.observations
     }
 
     /// Adds or removes `event`.
     #[inline]
     pub fn set(&mut self, event: EventKind, enabled: bool) {
         if enabled {
-            self.0 |= 1 << event as u8;
+            self.listeners |= 1 << event as u8;
         } else {
-            self.0 &= !(1 << event as u8);
+            self.listeners &= !(1 << event as u8);
+            self.observations &= !(1 << event as u8);
+            if self.observations == 0 {
+                self.hint_watch = None;
+            }
         }
+    }
+
+    /// Reports `event` for native presentation without adding a listener.
+    /// An existing listener of the same event retains its authority.
+    #[inline]
+    pub(crate) fn observe(&mut self, event: EventKind, watch: HintWatchToken) {
+        if self.observations == 0 {
+            self.hint_watch = Some(watch);
+        } else if self.hint_watch != Some(watch) {
+            self.hint_watch = None;
+        }
+        self.observations |= 1 << event as u8;
     }
 
     /// Returns true if no event is set.
     #[inline]
     pub const fn is_empty(self) -> bool {
-        self.0 == 0
+        self.bits() == 0
     }
 }
 

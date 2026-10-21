@@ -284,6 +284,112 @@ fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
 }
 
 #[test]
+fn native_tooltip_watches_preserve_presented_presses_and_actual_listeners_reject_them() {
+    use nsh_core::{ApproxTextEngine, Core, Op, Prop, Tag, overlay::TooltipContent};
+
+    let surface = new_surface();
+    let underlay = view(&surface, 4, ROOT_ID, ViewKind::View);
+    let button = view(&surface, 2, ROOT_ID, ViewKind::View);
+    let mut core = Core::new(ApproxTextEngine, size(Points(400.0), Points(400.0)));
+    core.set_environment(nsh_core::ui::Environment {
+        os: nsh_core::platform::Os::Linux,
+        idiom: nsh_core::platform::Idiom::Desktop,
+        ..Default::default()
+    });
+    for op in [
+        Op::Create {
+            id: 2,
+            tag: Tag::View,
+        },
+        Op::Insert {
+            parent: ROOT_ID,
+            child: 2,
+            before: None,
+        },
+        Op::Listen {
+            id: 2,
+            event: EventKind::Press,
+            enabled: true,
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::InputAction(Some(7)),
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::Tooltip(TooltipContent::Text("Saves it".into())),
+        },
+    ] {
+        core.apply(op).unwrap();
+    }
+    let mount_anchor = |core: &mut Core<ApproxTextEngine>| {
+        let batch = core.commit().unwrap();
+        for item in &batch.items {
+            if matches!(
+                item,
+                MountItem::Events { id: 2, .. } | MountItem::ViewProps { id: 2, .. }
+            ) {
+                surface.mounter.borrow_mut().apply(&surface, item);
+            }
+        }
+    };
+    mount_anchor(&mut core);
+    assert_eq!(button.state().props.input_action, Some(7));
+    for kind in [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut] {
+        assert!(button.state().events.contains(kind));
+        assert!(!button.state().events.contains_listener(kind));
+    }
+    let source = InputSource::new(&surface);
+    let snapshot = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&snapshot, &click(true)),
+        InputDisposition::Handled
+    );
+    surface.mounter.borrow_mut().apply(
+        &surface,
+        &MountItem::Frame {
+            id: underlay.id(),
+            frame: crate::geom::rect(0.0, 0.0, 300.0, 600.0),
+        },
+    );
+    assert_eq!(
+        source.dispatch(&snapshot, &click(false)),
+        InputDisposition::Handled
+    );
+
+    for kind in [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut] {
+        assert_eq!(
+            source.dispatch(&snapshot, &click(true)),
+            InputDisposition::Handled
+        );
+        core.apply(Op::Listen {
+            id: 2,
+            event: kind,
+            enabled: true,
+        })
+        .unwrap();
+        mount_anchor(&mut core);
+        assert_eq!(
+            source.dispatch(&snapshot, &click(false)),
+            InputDisposition::Rejected
+        );
+        assert!(surface.input.presented_press.borrow().is_none());
+        assert!(surface.input.pointers.borrow().is_empty());
+        assert_eq!(
+            source.dispatch(&source.sample().unwrap(), &click(true)),
+            InputDisposition::ExactFallback
+        );
+        core.apply(Op::Listen {
+            id: 2,
+            event: kind,
+            enabled: false,
+        })
+        .unwrap();
+        mount_anchor(&mut core);
+    }
+}
+
+#[test]
 fn sealed_press_rebinding_cancels_the_original_capture_without_releasing_into_its_replacement() {
     let surface = new_surface();
     let button = view(&surface, 2, ROOT_ID, ViewKind::View);

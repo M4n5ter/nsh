@@ -1654,10 +1654,33 @@ fn finish(surface: &Rc<Surface>, mut p: Pointer, cancelled: bool) {
 fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Option<NodeId>) {
     let points = {
         let pointers = surface.input.pointers.borrow();
-        pointers
-            .iter()
-            .chain(std::iter::once(changed))
-            .filter(|p| p.reporting)
+        let reporting = || {
+            pointers
+                .iter()
+                .chain(std::iter::once(changed))
+                .filter(|p| p.reporting)
+        };
+        // Stored paths also cover ongoing fingers: their event payloads
+        // carry paths only on start, but an actual responder still owns
+        // every later phase.
+        let has_listener = reporting().any(|p| {
+            p.path.iter().any(|id| {
+                surface
+                    .view(*id)
+                    .is_some_and(|view| view.state().events.contains_listener(EventKind::Touch))
+            })
+        });
+        if !has_listener {
+            if phase == TouchPhase::Start {
+                let watches = reporting()
+                    .flat_map(|p| p.path.iter())
+                    .filter_map(|id| surface.view(*id)?.state().events.hint_watch())
+                    .collect();
+                surface.observe_hint(nsh_core::overlay::HintObservation::Press(watches));
+            }
+            return;
+        }
+        reporting()
             .map(|p| {
                 let is_changed = std::ptr::eq(p, changed);
                 let (lx, ly) = local(&p.target, p.x, p.y);

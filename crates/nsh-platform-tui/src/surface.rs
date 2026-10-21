@@ -12,6 +12,7 @@ use nsh_core::{
     animation::{AnimationProp, AnimationValue, Graph},
     geometry::{point, px},
     keymap::Keymap,
+    overlay::HintObservation,
 };
 use ratatui::{buffer::Buffer, layout::Rect as CellRect};
 
@@ -34,6 +35,8 @@ struct FocusReveal {
 pub enum SurfaceEvent {
     /// An application event on a mounted view.
     Event(NodeId, EventKind, EventPayload),
+    /// A native hint anchor observation, without application event dispatch.
+    HintObservation(HintObservation),
     /// A scroll offset, with the number of core adjustments applied.
     Scroll(NodeId, Point<Points>, u32),
     /// Interaction state bits requested by the mounted view.

@@ -40,7 +40,8 @@ use crate::{
     mount::MountItem,
     ops::{Op, OverlayProp},
     overlay::{
-        HINT_DELAY, OverlayAnchor, OverlayConfig, Placed, Placement, TooltipContent, inset, place,
+        HINT_DELAY, HintObservation, HintWatchToken, OverlayAnchor, OverlayConfig, Placed,
+        Placement, TooltipContent, inset, place,
     },
     props::PointerEvents,
     ui::task::{Action, Task, act_after},
@@ -52,6 +53,18 @@ pub(super) mod watch {
     pub(in crate::core) const PRESS: u8 = 1;
     /// The pointer coming and going and touches, for a hint.
     pub(in crate::core) const HINT: u8 = 2;
+    /// A hint has a show/dismiss listener, beyond native presentation.
+    pub(in crate::core) const HINT_CALLBACK: u8 = 4;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Watch {
+    pub(super) key: Key,
+    id: NodeId,
+    kinds: u8,
+    layout: u64,
+    hints: Vec<(NodeId, u64, u64)>,
+    pub(super) token: Option<HintWatchToken>,
 }
 
 /// The classes of the bubble of an element's text `tooltip`: as little as
@@ -63,8 +76,18 @@ const TOOLTIP_TEXT_CLASS: &str = "text-xs text-popover-foreground";
 /// tooltip keeps from the safe area's edges.
 const TOOLTIP_GAP: f32 = 4.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HintOrigin {
+    Event,
+    Observation(HintWatchToken),
+}
+
 /// A hint's wait for the pointer to rest (dropping it cancels it).
-pub(super) struct HintTimer(#[allow(dead_code)] Task<()>);
+pub(super) struct HintTimer {
+    #[allow(dead_code)]
+    task: Task<()>,
+    origin: HintOrigin,
+}
 
 impl std::fmt::Debug for HintTimer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -103,7 +126,7 @@ pub(super) struct OverlayState {
     pub(super) placed: Option<(Placed, Bounds<Points>)>,
     /// A hint: the pointer rested on its anchor, and has not left or
     /// pressed it since.
-    pub(super) hinted: bool,
+    pub(super) hinted: Option<HintOrigin>,
     /// A hint: the pointer is on its anchor, resting until it shows.
     pub(super) waiting: Option<HintTimer>,
 }
@@ -115,13 +138,13 @@ pub(super) struct Overlays {
     /// The shown overlays and the other nodes listening to touches for
     /// them (their anchors and root views), checked by id (keys are
     /// reused).
-    pub(super) watched: Vec<(Key, NodeId)>,
+    pub(super) watched: Vec<Watch>,
     /// A shown overlay listens to `onCancel`: Escape is bound and the back
     /// button listened to.
     pub(super) cancel: bool,
     /// The anchors of the hints in the view listening to the pointer
     /// (desktops), checked by id.
-    pub(super) hinting: Vec<(Key, NodeId)>,
+    pub(super) hinting: Vec<Watch>,
     /// The elements with a `tooltip`, by id: the nodes made for it.
     pub(super) tooltips: FxHashMap<NodeId, CoreTooltip>,
 }
@@ -139,7 +162,7 @@ impl<M: TextEngine> Core<M> {
                 wrapper,
                 host: None,
                 placed: None,
-                hinted: false,
+                hinted: None,
                 waiting: None,
             }));
         }
@@ -289,6 +312,15 @@ impl<M: TextEngine> Core<M> {
         // The hints in the view, whose anchors listen to the pointer.
         let mut hints = Vec::new();
         for (_, key) in order {
+            let origin = self.overlay(key).and_then(|state| {
+                state
+                    .hinted
+                    .or_else(|| state.waiting.as_ref().map(|timer| timer.origin))
+            });
+            if matches!(origin, Some(HintOrigin::Observation(token)) if self.matching_hint_watch(token).is_none())
+            {
+                self.unhint(key);
+            }
             let mut target = self.overlay_host(key);
             let Some(state) = self.overlay(key) else {
                 continue;
@@ -301,7 +333,7 @@ impl<M: TextEngine> Core<M> {
                     self.unhint(key);
                 }
                 let state = self.overlay(key).expect("overlay");
-                if !state.config.open.unwrap_or(state.hinted) {
+                if !state.config.open.unwrap_or(state.hinted.is_some()) {
                     target = None;
                 }
             }
@@ -346,7 +378,7 @@ impl<M: TextEngine> Core<M> {
     /// The touches and keys the shown overlays need, and the pointer the
     /// anchors of `hints` (in the view) follow.
     fn sync_overlay_listeners(&mut self, hints: &[Key]) {
-        let mut watched: Vec<(Key, NodeId)> = Vec::new();
+        let mut watched = Vec::new();
         let mut cancel = false;
         let watching = self.overlays.iter().any(|&k| {
             self.overlay(k).is_some_and(|s| s.host.is_some())
@@ -366,22 +398,36 @@ impl<M: TextEngine> Core<M> {
             }
             // Every shown overlay, so a press in one inside a watching one
             // tells where it is.
-            watched.push((key, node.id));
+            watched.push(Watch {
+                key,
+                id: node.id,
+                kinds: watch::PRESS,
+                layout: 0,
+                hints: Vec::new(),
+                token: None,
+            });
             if node.events.contains(EventKind::PressOutside) {
                 for id in [Some(host), anchor_node(state)].into_iter().flatten() {
                     if let Ok(k) = self.key(id) {
-                        watched.push((k, self.nodes[k as usize].id));
+                        watched.push(Watch {
+                            key: k,
+                            id: self.nodes[k as usize].id,
+                            kinds: watch::PRESS,
+                            layout: 0,
+                            hints: Vec::new(),
+                            token: None,
+                        });
                     }
                 }
             }
         }
-        watched.sort_unstable();
+        watched.sort_unstable_by_key(|entry| (entry.key, entry.id));
         watched.dedup();
         let old = std::mem::take(&mut self.overlay_state.watched);
-        self.rewatch(&old, &watched, watch::PRESS);
+        self.rewatch(&old, &watched);
         self.overlay_state.watched = watched;
         // Hints only follow a pointer (the desktops).
-        let mut hinting: Vec<(Key, NodeId)> = Vec::new();
+        let mut hinting = Vec::new();
         if self
             .components
             .environment
@@ -390,14 +436,62 @@ impl<M: TextEngine> Core<M> {
         {
             for &key in hints {
                 if let Some(k) = self.hint_anchor(key) {
-                    hinting.push((k, self.nodes[k as usize].id));
+                    let events = self.nodes[key as usize].events;
+                    let callback = events.contains(EventKind::Show)
+                        || events.contains(EventKind::Dismiss)
+                        || self.hint_scope_has_callbacks(k);
+                    let layout = self.nodes[k as usize].layout.map(u64::from).unwrap_or(0);
+                    hinting.push(Watch {
+                        key: k,
+                        id: self.nodes[k as usize].id,
+                        kinds: watch::HINT
+                            | if callback || layout == 0 {
+                                watch::HINT_CALLBACK
+                            } else {
+                                0
+                            },
+                        layout,
+                        hints: vec![(
+                            self.nodes[key as usize].id,
+                            self.nodes[key as usize].layout.map(u64::from).unwrap_or(0),
+                            self.overlay_host(key)
+                                .and_then(|host| self.nodes[host as usize].layout)
+                                .map(u64::from)
+                                .unwrap_or(0),
+                        )],
+                        token: None,
+                    });
                 }
             }
-            hinting.sort_unstable();
-            hinting.dedup();
+            hinting.sort_unstable_by_key(|entry| (entry.key, entry.id));
+            hinting.dedup_by(|next, previous| {
+                if next.key != previous.key || next.id != previous.id {
+                    return false;
+                }
+                previous.kinds |= next.kinds;
+                previous.hints.append(&mut next.hints);
+                true
+            });
         }
         let old = std::mem::take(&mut self.overlay_state.hinting);
-        self.rewatch(&old, &hinting, watch::HINT);
+        for entry in &mut hinting {
+            entry.hints.sort_unstable();
+            entry.hints.dedup();
+            if entry.kinds & watch::HINT_CALLBACK == 0 {
+                entry.token = old
+                    .iter()
+                    .find(|previous| {
+                        previous.key == entry.key
+                            && previous.id == entry.id
+                            && previous.kinds == entry.kinds
+                            && previous.layout == entry.layout
+                            && previous.hints == entry.hints
+                    })
+                    .and_then(|previous| previous.token)
+                    .or_else(|| Some(HintWatchToken::new(entry.layout, self.batches)));
+            }
+        }
+        self.rewatch(&old, &hinting);
         self.overlay_state.hinting = hinting;
         if cancel != self.overlay_state.cancel {
             self.overlay_state.cancel = cancel;
@@ -407,19 +501,24 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
-    /// The nodes of `old` not in `new` stop listening for `bit`, those of
-    /// `new` not in `old` start.
-    fn rewatch(&mut self, old: &[(Key, NodeId)], new: &[(Key, NodeId)], bit: u8) {
-        for &(k, id) in old {
-            if !new.contains(&(k, id)) && self.nodes.get(k as usize).is_some_and(|n| n.id == id) {
-                self.nodes[k as usize].overlay_watched &= !bit;
-                self.mark(k, super::dirty::EVENTS);
+    /// Watch ownership or callback capability changed: remount the anchor's
+    /// event facts even when its aggregate event bits stay the same.
+    fn rewatch(&mut self, old: &[Watch], new: &[Watch]) {
+        for entry in old {
+            if !new.contains(entry)
+                && self
+                    .nodes
+                    .get(entry.key as usize)
+                    .is_some_and(|n| n.id == entry.id)
+            {
+                self.nodes[entry.key as usize].overlay_watched &= !entry.kinds;
+                self.mark(entry.key, super::dirty::EVENTS);
             }
         }
-        for &(k, id) in new {
-            if !old.contains(&(k, id)) {
-                self.nodes[k as usize].overlay_watched |= bit;
-                self.mark(k, super::dirty::EVENTS);
+        for entry in new {
+            if !old.contains(entry) {
+                self.nodes[entry.key as usize].overlay_watched |= entry.kinds;
+                self.mark(entry.key, super::dirty::EVENTS);
             }
         }
     }
@@ -481,25 +580,132 @@ impl<M: TextEngine> Core<M> {
             .collect();
         for key in hints {
             match kind {
-                EventKind::HoverIn => self.hint_wait(key),
+                EventKind::HoverIn => self.hint_wait(key, HintOrigin::Event),
                 _ => self.unhint(key),
             }
         }
     }
 
+    /// Applies a native hint observation without routing an input event to
+    /// application listeners: subscriptions may have changed since sampling.
+    pub fn observe_hint(&mut self, observation: HintObservation) {
+        let entering = matches!(&observation, HintObservation::Enter(_));
+        let anchors = match &observation {
+            HintObservation::Enter(id) | HintObservation::Leave(id) => std::slice::from_ref(id),
+            HintObservation::Press(path) => path.as_slice(),
+        };
+        for &token in anchors {
+            let Some(anchor) = self.matching_hint_watch(token) else {
+                continue;
+            };
+            let hints: Vec<_> = self
+                .overlays
+                .iter()
+                .copied()
+                .filter(|&key| {
+                    self.overlay(key)
+                        .is_some_and(|state| state.config.hint.is_some())
+                        && self.hint_anchor(key) == Some(anchor)
+                })
+                .collect();
+            for key in hints {
+                if entering {
+                    self.hint_wait(key, HintOrigin::Observation(token));
+                } else {
+                    self.unhint(key);
+                }
+            }
+        }
+    }
+
+    fn matching_hint_watch(&self, token: HintWatchToken) -> Option<Key> {
+        let watch = self
+            .overlay_state
+            .hinting
+            .iter()
+            .find(|watch| watch.token == Some(token))?;
+        let anchor = self.nodes.get(watch.key as usize)?;
+        if anchor.id != watch.id
+            || anchor.layout.map(u64::from) != Some(watch.layout)
+            || !self.passive_hint_anchor(watch.key)
+        {
+            return None;
+        }
+        let mut current: Vec<_> = self
+            .overlays
+            .iter()
+            .copied()
+            .filter(|&key| {
+                self.overlay(key)
+                    .is_some_and(|state| state.config.hint.is_some())
+                    && self.hint_anchor(key) == Some(watch.key)
+                    && self.overlay_host(key).is_some()
+            })
+            .map(|key| {
+                let hint = &self.nodes[key as usize];
+                (
+                    hint.id,
+                    hint.layout.map(u64::from).unwrap_or(0),
+                    self.overlay_host(key)
+                        .and_then(|host| self.nodes[host as usize].layout)
+                        .map(u64::from)
+                        .unwrap_or(0),
+                )
+            })
+            .collect();
+        current.sort_unstable();
+        current.dedup();
+        (current == watch.hints).then_some(watch.key)
+    }
+
+    fn passive_hint_anchor(&self, anchor: Key) -> bool {
+        if self.nodes[anchor as usize].overlay_watched & watch::HINT == 0 {
+            return false;
+        }
+        !self.hint_scope_has_callbacks(anchor)
+            && self.overlays.iter().copied().all(|key| {
+                self.overlay(key).is_none_or(|state| {
+                    state.config.hint.is_none()
+                        || self.hint_anchor(key) != Some(anchor)
+                        || self.overlay_host(key).is_none()
+                        || (!self.nodes[key as usize].events.contains(EventKind::Show)
+                            && !self.nodes[key as usize].events.contains(EventKind::Dismiss))
+                })
+            })
+    }
+
+    fn hint_scope_has_callbacks(&self, anchor: Key) -> bool {
+        let mut at = anchor;
+        while at != NO_KEY {
+            let node = &self.nodes[at as usize];
+            if node.overlay_watched & watch::PRESS != 0
+                || [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut]
+                    .into_iter()
+                    .any(|kind| node.events.contains(kind))
+            {
+                return true;
+            }
+            at = node.parent;
+        }
+        false
+    }
+
     /// The pointer is on hint `key`'s anchor: it shows once the pointer
     /// rested there for its delay ([`Self::hint_due`]).
-    fn hint_wait(&mut self, key: Key) {
+    fn hint_wait(&mut self, key: Key, origin: HintOrigin) {
         let executor = self.components.executor.clone();
         let id = self.nodes[key as usize].id;
         let Some(state) = self.overlay_mut(key) else {
             return;
         };
-        if state.hinted || state.waiting.is_some() {
+        if state.hinted.is_some() || state.waiting.is_some() {
             return;
         }
         let delay = state.config.hint.unwrap_or(HINT_DELAY);
-        state.waiting = Some(HintTimer(act_after(&executor, id, delay, Action::Hint(id))));
+        state.waiting = Some(HintTimer {
+            task: act_after(&executor, id, delay, Action::Hint(id)),
+            origin,
+        });
     }
 
     /// Hint overlay `id`'s delay is over with the pointer on its anchor: it
@@ -508,14 +714,23 @@ impl<M: TextEngine> Core<M> {
         let Ok(key) = self.key(id) else {
             return;
         };
-        let Some(state) = self.overlay_mut(key) else {
+        let Some(timer) = self.overlay_mut(key).and_then(|state| state.waiting.take()) else {
             return;
         };
-        if state.waiting.take().is_none() || state.config.hint.is_none() {
+        if let HintOrigin::Observation(token) = timer.origin {
+            let anchor = self.matching_hint_watch(token);
+            if anchor.is_none() || self.hint_anchor(key) != anchor {
+                return;
+            }
+        }
+        let state = self.overlay_mut(key).expect("the waiting hint");
+        if state.config.hint.is_none() {
             return;
         }
-        state.hinted = true;
-        self.hint_changed(key, true);
+        state.hinted = Some(timer.origin);
+        if timer.origin == HintOrigin::Event {
+            self.hint_changed(key, true);
+        }
     }
 
     /// Hint `key` stops waiting, and hides when the pointer had it shown.
@@ -524,7 +739,7 @@ impl<M: TextEngine> Core<M> {
             return;
         };
         state.waiting = None;
-        if std::mem::take(&mut state.hinted) {
+        if state.hinted.take() == Some(HintOrigin::Event) {
             self.hint_changed(key, false);
         }
     }
@@ -551,8 +766,9 @@ impl<M: TextEngine> Core<M> {
             .iter()
             .copied()
             .filter(|&k| {
-                self.overlay(k)
-                    .is_some_and(|s| s.config.hint.is_some() && (s.hinted || s.waiting.is_some()))
+                self.overlay(k).is_some_and(|s| {
+                    s.config.hint.is_some() && (s.hinted.is_some() || s.waiting.is_some())
+                })
             })
             .collect();
         for key in hints {

@@ -12495,6 +12495,10 @@ fn overlays_hear_presses_outside_and_cancel_from_the_top() {
             _ => None,
         });
         assert!(events.is_some_and(|e| e.contains(EventKind::Touch)), "{id}");
+        assert!(
+            events.is_some_and(|e| e.contains_listener(EventKind::Touch)),
+            "{id}"
+        );
     }
     // Escape is bound, back listened to.
     let keymap = batch.items.iter().find_map(|i| match i {
@@ -12667,6 +12671,15 @@ fn mounts_listening(batch: &MountBatch, id: NodeId, kind: EventKind) -> Option<b
     })
 }
 
+fn hint_watch(c: &Core<FakeEngine>, id: NodeId) -> crate::overlay::HintWatchToken {
+    c.overlay_state
+        .hinting
+        .iter()
+        .find(|watch| watch.key == c.key(id).unwrap())
+        .and_then(|watch| watch.token)
+        .expect("the mounted callback-free hint watch")
+}
+
 #[test]
 fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     use StyleValue::Number;
@@ -12699,9 +12712,157 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     let batch = c.commit().unwrap();
     // The element follows the pointer; the tooltip waits out of the view.
     assert_eq!(mounts_listening(&batch, 2, EventKind::HoverIn), Some(true));
+    let event_mask = |batch: &MountBatch| {
+        batch
+            .items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                MountItem::Events { id: 2, events } => Some(*events),
+                _ => None,
+            })
+            .expect("the tooltip anchor's mounted events")
+    };
+    let passive = event_mask(&batch);
+    for kind in [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut] {
+        assert!(passive.contains(kind));
+        assert!(!passive.contains_listener(kind));
+        // A native watch never erases an actual listener of the same event.
+        apply(
+            &mut c,
+            vec![Op::Listen {
+                id: 2,
+                event: kind,
+                enabled: true,
+            }],
+        );
+        let active = event_mask(&c.commit().unwrap());
+        assert!(active.contains_listener(kind));
+        assert!(active.contains_listener(EventKind::HoverIn));
+        assert!(active.hint_watch().is_none());
+        // The ordinary callback-capable path must still display its native
+        // text tooltip; producer and consumer use the same passivity rule.
+        c.component_event(2, EventKind::HoverIn, &EventPayload::None);
+        clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
+        c.run_component_tasks();
+        assert_eq!(texts_of(&c.commit().unwrap()), ["Saves it"]);
+        c.component_event(2, EventKind::HoverOut, &EventPayload::None);
+        c.commit().unwrap();
+        apply(
+            &mut c,
+            vec![Op::Listen {
+                id: 2,
+                event: kind,
+                enabled: false,
+            }],
+        );
+        let restored = event_mask(&c.commit().unwrap());
+        assert_eq!(restored.bits(), passive.bits());
+        assert!(!restored.contains_listener(kind));
+        assert!(restored.hint_watch().is_some());
+    }
+    apply(
+        &mut c,
+        vec![Op::Listen {
+            id: ROOT_ID,
+            event: EventKind::HoverIn,
+            enabled: true,
+        }],
+    );
+    let active = event_mask(&c.commit().unwrap());
+    assert!(active.contains_listener(EventKind::HoverIn));
+    assert!(active.hint_watch().is_none());
+    c.component_event(2, EventKind::HoverIn, &EventPayload::None);
+    clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
+    c.run_component_tasks();
+    assert_eq!(texts_of(&c.commit().unwrap()), ["Saves it"]);
+    c.component_event(2, EventKind::HoverOut, &EventPayload::None);
+    c.commit().unwrap();
+    apply(
+        &mut c,
+        vec![Op::Listen {
+            id: ROOT_ID,
+            event: EventKind::HoverIn,
+            enabled: false,
+        }],
+    );
+    c.commit().unwrap();
+    let hint = c.overlay_state.tooltips[&2].overlay;
+    for kind in [EventKind::Show, EventKind::Dismiss] {
+        // The anchor must remount when a custom hint gains callbacks, although
+        // its aggregate Touch/Hover event set stays unchanged.
+        apply(
+            &mut c,
+            vec![Op::Listen {
+                id: hint,
+                event: kind,
+                enabled: true,
+            }],
+        );
+        let callbacks = event_mask(&c.commit().unwrap());
+        assert_eq!(callbacks.bits(), passive.bits());
+        for event in [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut] {
+            assert!(callbacks.contains_listener(event));
+        }
+        apply(
+            &mut c,
+            vec![Op::Listen {
+                id: hint,
+                event: kind,
+                enabled: false,
+            }],
+        );
+        let restored = event_mask(&c.commit().unwrap());
+        assert_eq!(restored.bits(), passive.bits());
+        assert!(restored.hint_watch().is_some());
+        assert!(!restored.contains_listener(EventKind::Touch));
+    }
+    // A second hint may gain its callback before it acquires this anchor.
+    // Its addition and removal must still update the existing watch's route.
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 4,
+                tag: Tag::Overlay,
+            },
+            overlay_prop(
+                4,
+                crate::OverlayProp::Hint(Some(crate::overlay::HINT_DELAY)),
+            ),
+            Op::Listen {
+                id: 4,
+                event: EventKind::Dismiss,
+                enabled: true,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 4,
+                before: None,
+            },
+        ],
+    );
+    assert!(event_mask(&c.commit().unwrap()).contains_listener(EventKind::Touch));
+    apply(
+        &mut c,
+        vec![
+            Op::Remove {
+                parent: 2,
+                child: 4,
+            },
+            Op::Release { id: 4 },
+        ],
+    );
+    let restored = event_mask(&c.commit().unwrap());
+    assert_eq!(restored.bits(), passive.bits());
+    assert!(restored.hint_watch().is_some());
+    assert!(!restored.contains_listener(EventKind::Touch));
+    assert_ne!(restored.hint_watch(), passive.hint_watch());
+    assert!(((passive | restored) | restored).hint_watch().is_none());
+    assert!((passive | (restored | restored)).hint_watch().is_none());
     assert!(texts_of(&batch).is_empty(), "{:?}", texts_of(&batch));
 
-    c.component_event(2, EventKind::HoverIn, &EventPayload::None);
+    c.observe_hint(crate::overlay::HintObservation::Enter(hint_watch(&c, 2)));
     c.run_component_tasks();
     assert!(c.commit().is_none());
     clock.advance_to(crate::time::now() + std::time::Duration::from_millis(499));
@@ -12743,7 +12904,9 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
     c.run_component_tasks();
     assert!(c.commit().is_some());
-    c.component_event(ROOT_ID, EventKind::Touch, &touch_down(vec![2, ROOT_ID]));
+    c.observe_hint(crate::overlay::HintObservation::Press(vec![hint_watch(
+        &c, 2,
+    )]));
     let batch = c.commit().unwrap();
     assert!(
         batch
@@ -12765,6 +12928,262 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     );
     let batch = c.commit().unwrap();
     assert_eq!(mounts_listening(&batch, 2, EventKind::HoverIn), Some(false));
+}
+
+#[test]
+fn observed_hints_never_gain_callbacks_from_new_subscriptions_or_a_pending_timer() {
+    use StyleValue::Number;
+
+    use crate::overlay::HintObservation::{Enter, Leave, Press};
+    let clock = crate::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH);
+    let _clock = clock.enter();
+    let mut c = core();
+    c.set_environment(crate::ui::Environment {
+        os: crate::platform::Os::Linux,
+        idiom: crate::platform::Idiom::Desktop,
+        ..Default::default()
+    });
+    add(&mut c, 2, Tag::View, ROOT_ID, &[("height", Number(40.0))]);
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::Tooltip(crate::overlay::TooltipContent::Text("Native hint".into())),
+        }],
+    );
+    c.commit().unwrap();
+    let hint = c.overlay_state.tooltips[&2].overlay;
+    let hint_key = c.key(hint).unwrap();
+    let watch = hint_watch(&c, 2);
+    let listen = |id, event, enabled| Op::Listen { id, event, enabled };
+
+    // These changes have not reached a platform mount. The FIFO observation
+    // must inspect current Core ownership and never become an ordinary event.
+    apply(&mut c, vec![listen(2, EventKind::HoverIn, true)]);
+    c.observe_hint(Enter(watch));
+    assert!(c.overlay(hint_key).unwrap().waiting.is_none());
+    assert!(js_events(&mut c).is_empty());
+    apply(
+        &mut c,
+        vec![
+            listen(2, EventKind::HoverIn, false),
+            listen(hint, EventKind::Show, true),
+        ],
+    );
+    c.observe_hint(Enter(watch));
+    assert!(c.overlay(hint_key).unwrap().waiting.is_none());
+    assert!(js_events(&mut c).is_empty());
+
+    // An initially passive timer cannot invoke a Show listener added before
+    // its deadline, even without another commit between subscription and due.
+    apply(&mut c, vec![listen(hint, EventKind::Show, false)]);
+    c.observe_hint(Enter(watch));
+    assert!(c.overlay(hint_key).unwrap().waiting.is_some());
+    apply(&mut c, vec![listen(hint, EventKind::Show, true)]);
+    clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
+    c.run_component_tasks();
+    assert!(c.overlay(hint_key).unwrap().hinted.is_none());
+    assert!(js_events(&mut c).is_empty());
+
+    apply(&mut c, vec![listen(hint, EventKind::Show, false)]);
+    c.commit();
+    c.observe_hint(Enter(hint_watch(&c, 2)));
+    clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
+    c.run_component_tasks();
+    let shown = c.commit().expect("the native hint becomes visible");
+    assert_eq!(texts_of(&shown), ["Native hint"]);
+    assert!(js_events(&mut c).is_empty());
+
+    // A displayed passive hint also keeps its origin. New Touch/Dismiss
+    // subscriptions cannot make an old press or leave enter application code.
+    apply(
+        &mut c,
+        vec![
+            listen(2, EventKind::Touch, true),
+            listen(hint, EventKind::Dismiss, true),
+        ],
+    );
+    c.observe_hint(Press(vec![watch]));
+    c.observe_hint(Leave(watch));
+    let hidden = c.commit().expect("the old native hint is removed");
+    assert!(
+        hidden
+            .items
+            .iter()
+            .any(|item| matches!(item, MountItem::Remove { id } if *id == hint))
+    );
+    assert!(js_events(&mut c).is_empty());
+
+    // Ordinary callback-capable hints still receive their existing events.
+    c.component_event(2, EventKind::HoverIn, &EventPayload::None);
+    clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
+    c.run_component_tasks();
+    c.commit();
+    c.component_event(2, EventKind::HoverOut, &EventPayload::None);
+    assert_eq!(
+        js_events(&mut c),
+        [(hint, EventKind::Dismiss, EventPayload::None)]
+    );
+}
+
+#[test]
+fn observed_hints_keep_their_original_anchor_and_hint_lifetimes() {
+    use StyleValue::Number;
+
+    use crate::overlay::HintObservation::{Enter, Leave};
+    let clock = crate::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH);
+    let _clock = clock.enter();
+    let mut c = core();
+    c.set_environment(crate::ui::Environment {
+        os: crate::platform::Os::Linux,
+        idiom: crate::platform::Idiom::Desktop,
+        ..Default::default()
+    });
+    add(&mut c, 2, Tag::View, ROOT_ID, &[("height", Number(40.0))]);
+    add(&mut c, 6, Tag::View, ROOT_ID, &[("height", Number(40.0))]);
+    add(&mut c, 4, Tag::Overlay, 2, &[]);
+    apply(
+        &mut c,
+        vec![overlay_prop(
+            4,
+            crate::OverlayProp::Hint(Some(crate::overlay::HINT_DELAY)),
+        )],
+    );
+    c.commit().unwrap();
+    let original = hint_watch(&c, 2);
+    apply(&mut c, vec![style_op(6, &[("height", Number(41.0))])]);
+    c.commit().unwrap();
+    assert_eq!(
+        hint_watch(&c, 2),
+        original,
+        "unrelated rendering keeps the watch"
+    );
+    c.observe_hint(Enter(original));
+    let key = c.key(4).unwrap();
+    assert!(c.overlay(key).unwrap().waiting.is_some());
+
+    // Reanchoring before the timer fires cannot move the old hover to the
+    // new anchor, even before any mount reaches the platform.
+    apply(
+        &mut c,
+        vec![overlay_prop(
+            4,
+            crate::OverlayProp::Anchor(crate::overlay::OverlayAnchor::Node(6)),
+        )],
+    );
+    clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
+    c.run_component_tasks();
+    assert!(c.overlay(key).unwrap().hinted.is_none());
+    c.commit().unwrap();
+    let reanchored = hint_watch(&c, 6);
+    assert_ne!(original, reanchored);
+    c.observe_hint(Enter(original));
+    assert!(c.overlay(key).unwrap().waiting.is_none());
+    c.observe_hint(Enter(reanchored));
+    assert!(c.overlay(key).unwrap().waiting.is_some());
+
+    // Reusing the hint's public NodeId is a different generational layout
+    // owner. An old observation must not start that replacement's timer.
+    apply(
+        &mut c,
+        vec![
+            Op::Remove {
+                parent: 2,
+                child: 4,
+            },
+            Op::Release { id: 4 },
+        ],
+    );
+    add(&mut c, 4, Tag::Overlay, 6, &[]);
+    apply(
+        &mut c,
+        vec![overlay_prop(
+            4,
+            crate::OverlayProp::Hint(Some(crate::overlay::HINT_DELAY)),
+        )],
+    );
+    let replacement_key = c.key(4).unwrap();
+    c.observe_hint(Enter(reanchored));
+    assert!(c.overlay(replacement_key).unwrap().waiting.is_none());
+    c.commit().unwrap();
+    let replacement = hint_watch(&c, 6);
+    assert_ne!(replacement, reanchored);
+    c.observe_hint(Enter(replacement));
+    assert!(c.overlay(replacement_key).unwrap().waiting.is_some());
+
+    // Detached hints are not observable before the next commit either.
+    apply(
+        &mut c,
+        vec![Op::Remove {
+            parent: 6,
+            child: 4,
+        }],
+    );
+    c.observe_hint(Enter(replacement));
+    clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
+    c.run_component_tasks();
+    assert!(c.overlay(replacement_key).unwrap().hinted.is_none());
+    c.commit();
+
+    // The anchor's NodeId can also be reused. Its new layout lifetime must
+    // not inherit the observation token published for the original node.
+    apply(
+        &mut c,
+        vec![
+            Op::Remove {
+                parent: ROOT_ID,
+                child: 6,
+            },
+            Op::Release { id: 6 },
+        ],
+    );
+    add(&mut c, 6, Tag::View, ROOT_ID, &[("height", Number(40.0))]);
+    apply(
+        &mut c,
+        vec![Op::Insert {
+            parent: 6,
+            child: 4,
+            before: None,
+        }],
+    );
+    c.observe_hint(Enter(replacement));
+    assert!(c.overlay(replacement_key).unwrap().waiting.is_none());
+    c.commit().unwrap();
+    let new_anchor = hint_watch(&c, 6);
+    assert_ne!(replacement, new_anchor);
+    c.observe_hint(Enter(new_anchor));
+    assert!(c.overlay(replacement_key).unwrap().waiting.is_some());
+    c.observe_hint(Leave(new_anchor));
+    assert!(c.overlay(replacement_key).unwrap().waiting.is_none());
+    // Reuse while the original watch is still cached, before any new mount.
+    apply(
+        &mut c,
+        vec![
+            Op::Remove {
+                parent: 6,
+                child: 4,
+            },
+            Op::Remove {
+                parent: ROOT_ID,
+                child: 6,
+            },
+            Op::Release { id: 6 },
+        ],
+    );
+    add(&mut c, 6, Tag::View, ROOT_ID, &[("height", Number(40.0))]);
+    apply(
+        &mut c,
+        vec![Op::Insert {
+            parent: 6,
+            child: 4,
+            before: None,
+        }],
+    );
+    c.observe_hint(Enter(new_anchor));
+    assert!(c.overlay(replacement_key).unwrap().waiting.is_none());
+    c.commit().unwrap();
+    assert_ne!(hint_watch(&c, 6), new_anchor);
+    assert!(js_events(&mut c).is_empty());
 }
 
 #[test]

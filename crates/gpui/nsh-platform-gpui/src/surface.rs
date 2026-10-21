@@ -21,7 +21,10 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, Points, ROOT_ID, Size};
+use nsh_core::{
+    EventKind, EventPayload, MountBatch, MountItem, NodeId, Points, ROOT_ID, Size,
+    overlay::HintObservation,
+};
 use nsh_engine::{AppError, Engine, EngineConfig, EngineControl, Environment, MountSink};
 use rustc_hash::FxHashMap;
 
@@ -406,9 +409,31 @@ impl Surface {
     /// Sends an event after the matching native focus snapshot, through
     /// the same engine FIFO.
     pub(crate) fn event(&self, id: NodeId, kind: EventKind, payload: EventPayload) {
+        if matches!(kind, EventKind::HoverIn | EventKind::HoverOut)
+            && let Some(events) = self.view(id).map(|view| view.state().events)
+            && events.contains(kind)
+            && !events.contains_listener(kind)
+        {
+            if let Some(watch) = events.hint_watch() {
+                self.observe_hint(match kind {
+                    EventKind::HoverIn => HintObservation::Enter(watch),
+                    _ => HintObservation::Leave(watch),
+                });
+            }
+            return;
+        }
         self.control(|c| {
             c.set_focus_path(self.focus_path());
             c.dispatch_event(id, kind, payload);
+        });
+    }
+
+    /// Sends a passive hint observation after the matching native focus
+    /// snapshot, through the same engine FIFO as events.
+    pub(crate) fn observe_hint(&self, observation: HintObservation) {
+        self.control(|c| {
+            c.set_focus_path(self.focus_path());
+            c.observe_hint(observation);
         });
     }
 

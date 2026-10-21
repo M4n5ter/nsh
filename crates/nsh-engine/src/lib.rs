@@ -827,6 +827,7 @@ const MAX_ADVANCE_ROUNDS: usize = 100_000;
 
 enum Message {
     Event(NodeId, EventKind, EventPayload),
+    HintObservation(nsh_core::overlay::HintObservation),
     BoundEvent(NodeId, EventKind, EventPayload, u64),
     CancelTouch(u32),
     Scroll(NodeId, Point<Points>, u32),
@@ -898,6 +899,13 @@ impl EngineControl {
     /// Delivers an input event (and its data) to a node.
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: EventPayload) {
         let _ = self.tx.send(Message::Event(id, event, payload));
+    }
+
+    /// Reports native tooltip presentation without granting input callback
+    /// authority. The core revalidates this observation when the same FIFO
+    /// consumes it; it never enters ordinary component or JS event routing.
+    pub fn observe_hint(&self, observation: nsh_core::overlay::HintObservation) {
+        let _ = self.tx.send(Message::HintObservation(observation));
     }
 
     /// Delivers a sealed press binding captured from a completed presentation.
@@ -2394,6 +2402,7 @@ fn deliver_bound_event<M: TextEngine>(
 /// Returns false on shutdown.
 fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message: Message) -> bool {
     match message {
+        Message::HintObservation(observation) => state.core.observe_hint(observation),
         Message::CancelTouch(contact) => {
             if let Some((_, pending)) = &mut state.touch_move {
                 if pending

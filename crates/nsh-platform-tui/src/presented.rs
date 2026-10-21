@@ -271,8 +271,8 @@ impl Surface {
             || (self.pointer.is_some() && self.presented_press.is_none())
             || self.hovered_path.iter().any(|&id| {
                 self.node(id).is_some_and(|node| {
-                    node.events.contains(EventKind::HoverIn)
-                        || node.events.contains(EventKind::HoverOut)
+                    node.events.contains_listener(EventKind::HoverIn)
+                        || node.events.contains_listener(EventKind::HoverOut)
                 })
             })
     }
@@ -292,7 +292,7 @@ impl Surface {
                     EventKind::MomentumEnd,
                 ]
                 .into_iter()
-                .any(|kind| node.events.contains(kind))
+                .any(|kind| node.events.contains_listener(kind))
         })
     }
 
@@ -402,7 +402,7 @@ impl Surface {
                 EventKind::PanEnd,
             ]
             .into_iter()
-            .any(|kind| node.events.contains(kind))
+            .any(|kind| node.events.contains_listener(kind))
             || node.gestures.pan_x.is_some()
             || node.gestures.pan_y.is_some()
             || node.props.pan_activation.is_some()

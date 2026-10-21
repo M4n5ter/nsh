@@ -616,6 +616,7 @@ impl AppView {
         for event in events {
             match event {
                 SurfaceEvent::Event(id, kind, payload) => control.dispatch_event(id, kind, payload),
+                SurfaceEvent::HintObservation(observation) => control.observe_hint(observation),
                 SurfaceEvent::Scroll(id, offset, count) => control.scroll(id, offset, count),
                 SurfaceEvent::States(id, states) => control.set_states(id, states),
                 SurfaceEvent::AnimationsFinished(finished) => control.animations_finished(finished),

@@ -685,6 +685,150 @@ fn an_admitted_press_rejects_geometry_changes_even_when_release_stays_inside() {
 }
 
 #[test]
+fn native_tooltip_observations_preserve_presented_presses_but_listeners_revoke_them() {
+    use nsh_core::{
+        ApproxTextEngine, Core, Op, Prop, Tag,
+        overlay::{HintObservation, TooltipContent},
+        platform::{Idiom, Os},
+        ui::Environment,
+    };
+
+    const CORE_ANCHOR: NodeId = 2;
+
+    fn mount_anchor_events(core: &mut Core<ApproxTextEngine>, surface: &mut Surface) -> EventMask {
+        let events = core
+            .commit()
+            .expect("the anchor's subscriptions changed")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                MountItem::Events {
+                    id: CORE_ANCHOR,
+                    events,
+                } => Some(events),
+                _ => None,
+            })
+            .expect("the core mounts the tooltip anchor's event mask");
+        surface.apply(MountBatch {
+            items: vec![MountItem::Events { id: CLOSE, events }],
+        });
+        events
+    }
+
+    let mut core = Core::new(ApproxTextEngine, Size::new(px(320.0), px(192.0)));
+    core.set_environment(Environment {
+        os: Os::Linux,
+        idiom: Idiom::Desktop,
+        ..Environment::default()
+    });
+    for op in [
+        Op::Create {
+            id: CORE_ANCHOR,
+            tag: Tag::View,
+        },
+        Op::Insert {
+            parent: ROOT_ID,
+            child: CORE_ANCHOR,
+            before: None,
+        },
+        Op::SetProp {
+            id: CORE_ANCHOR,
+            prop: Prop::Tooltip(TooltipContent::Text("Close conversation".into())),
+        },
+    ] {
+        core.apply(op).unwrap();
+    }
+    for event in [EventKind::Press, EventKind::PressDown, EventKind::PressUp] {
+        core.apply(Op::Listen {
+            id: CORE_ANCHOR,
+            event,
+            enabled: true,
+        })
+        .unwrap();
+    }
+
+    let mut surface = surface();
+    let watch = mount_anchor_events(&mut core, &mut surface)
+        .hint_watch()
+        .expect("the core issues the native tooltip's watch token");
+    surface.handle_event(Event::Mouse(mouse(MouseEventKind::Moved, 1, 1)));
+    let lease = surface
+        .input_snapshot()
+        .press_at(1, 1)
+        .expect("a native tooltip keeps the hovered Close action eligible");
+    assert_eq!(
+        surface.handle_presented_mouse(down(1, 1), &lease),
+        Some(true)
+    );
+    assert_eq!(surface.handle_presented_mouse(up(1, 1), &lease), Some(true));
+    surface.handle_event(Event::Mouse(mouse(MouseEventKind::Moved, 20, 10)));
+
+    let mut observations = Vec::new();
+    let mut callbacks = Vec::new();
+    for event in surface.drain_events() {
+        match event {
+            SurfaceEvent::HintObservation(HintObservation::Enter(token)) => {
+                observations.push(("enter", vec![token]));
+            }
+            SurfaceEvent::HintObservation(HintObservation::Leave(token)) => {
+                observations.push(("leave", vec![token]));
+            }
+            SurfaceEvent::HintObservation(HintObservation::Press(path)) => {
+                observations.push(("press", path));
+            }
+            SurfaceEvent::Event(id, kind, _) => callbacks.push((id, kind)),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        observations,
+        [
+            ("enter", vec![watch]),
+            ("press", vec![watch]),
+            ("leave", vec![watch]),
+        ]
+    );
+    assert_eq!(
+        callbacks,
+        [
+            (CLOSE, EventKind::PressDown),
+            (CLOSE, EventKind::PressUp),
+            (CLOSE, EventKind::Press),
+        ]
+    );
+
+    for event in [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut] {
+        let lease = surface
+            .input_snapshot()
+            .press_at(1, 1)
+            .expect("only the native tooltip observes the restored route");
+        core.apply(Op::Listen {
+            id: CORE_ANCHOR,
+            event,
+            enabled: true,
+        })
+        .unwrap();
+        mount_anchor_events(&mut core, &mut surface);
+        assert_eq!(
+            surface.handle_presented_mouse(down(1, 1), &lease),
+            None,
+            "{event:?}: a real listener revokes the old presented route"
+        );
+        assert!(
+            surface.input_snapshot().press_at(1, 1).is_none(),
+            "{event:?}: the new presentation uses ordinary event dispatch"
+        );
+        core.apply(Op::Listen {
+            id: CORE_ANCHOR,
+            event,
+            enabled: false,
+        })
+        .unwrap();
+        mount_anchor_events(&mut core, &mut surface);
+    }
+}
+
+#[test]
 fn native_touch_focus_and_scroll_routes_do_not_claim_sealed_press_leases() {
     use std::sync::{
         Arc,
