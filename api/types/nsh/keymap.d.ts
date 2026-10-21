@@ -12,9 +12,9 @@ export interface KeyBindingOptions {
   /** Fire again on the auto-repeats of a held key (default false: once until
    * the key is released). */
   repeat?: boolean;
-  /** Terminal only: fires while native keyboard focus is on this node or
-   * a descendant. A nonmatching scope leaves older bindings and native
-   * defaults eligible. Throws outside the terminal renderer. */
+  /** Fires while native keyboard focus is on this node or a descendant.
+   * A nonmatching scope leaves older bindings and native defaults eligible.
+   * Throws when the host does not support native focus scopes. */
   within?: YNode;
 }
 
@@ -47,10 +47,10 @@ export interface Keymap {
    * Apple platforms (and in a browser on one), `"Ctrl+Shift+L"` elsewhere,
    * for `"mod+shift+l"`. Throws on an invalid keystroke. */
   label(keystroke: string): string;
-  /** Terminal only: reads the latest host-reported native focus path.
+  /** Reads the latest host-reported native focus path.
    * Includes the node itself and its descendants; false with no focus.
    * This read is not reactive and does not subscribe to focus changes.
-   * Throws outside the terminal renderer or for a value other than YNode. */
+   * Throws without host support or for a value other than YNode. */
   focusedWithin(node: YNode): boolean;
 }
 
