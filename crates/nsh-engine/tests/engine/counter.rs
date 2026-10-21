@@ -91,6 +91,98 @@ fn tap_after_idle_gc_updates_the_ui() {
     assert!(texts.contains(&"• 1".to_owned()), "{texts:?}");
 }
 
+#[test]
+fn queued_sealed_press_keeps_the_presented_owner_across_js_rebinding() {
+    use nsh_core::{EventPayload, NodeId};
+
+    let registry = nsh_base::registry();
+    let source = nsh_bundler::compile_module(
+        "queued-bound-input.tsx",
+        r#"import { inputAction, mount, signal, Text, View } from "nsh";
+import { Button } from "nsh/base";
+const owner = signal("A"), background = signal(0), log = signal("");
+const record = args => log.set(`${log()}${args.owner},`);
+mount(() => <View>
+  <Button testID="row" onPress={inputAction(record, {owner: owner()})} />
+  <View testID="background" onPress={() => background.set(background() + 1)} />
+  <View testID="rebind" onPress={() => owner.set("B")} />
+  <View testID="fence" onPress={() => log.set(`${log()}fence,`)} />
+  <Text>{`background ${background()}`}</Text>
+  <Text>{`log ${log()}`}</Text>
+</View>);"#,
+        &[(&registry).into()],
+    )
+    .unwrap();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let engine = Engine::start(
+        EngineConfig {
+            ui_sets: vec![registry],
+            clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
+            ..EngineConfig::new(Bundle::source(source))
+        },
+        || ApproxTextEngine,
+        ChannelSink(tx),
+    )
+    .unwrap();
+    let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let node = |name| {
+        first
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::ViewProps { id, props } if props.test_id.as_deref() == Some(name) => {
+                    Some((*id, props.input_action))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"))
+    };
+    let (row, binding) = node("row");
+    let binding = binding.expect("the base Button publishes its sealed JS binding");
+    let control = engine.control();
+    let press = |id: NodeId| control.dispatch_event(id, EventKind::Press, EventPayload::None);
+    let frame = || {
+        // A FIFO fence commits the messages before it without sleeping or
+        // depending on which engine turn took each input.
+        let (done, finished) = crossbeam_channel::bounded(1);
+        control.advance_clock(Duration::ZERO, move || done.send(()).unwrap());
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        rx.try_iter().collect::<Vec<_>>()
+    };
+    let log = |frames: &[MountBatch]| {
+        frames
+            .iter()
+            .flat_map(texts)
+            .filter(|text| text.starts_with("log "))
+            .next_back()
+            .expect("the rendered log changed")
+    };
+
+    press(node("background").0);
+    control.dispatch_bound_event(row, EventKind::Press, EventPayload::None, binding);
+    assert_eq!(log(&frame()), "log A,");
+
+    // JS rebinds the retained native node before the platform has consumed
+    // its next batch. The old presented binding must not call owner B.
+    press(node("rebind").0);
+    control.dispatch_bound_event(row, EventKind::Press, EventPayload::None, binding);
+    press(node("fence").0);
+    let rebound = frame();
+    assert_eq!(log(&rebound), "log A,fence,");
+    let current_binding = rebound
+        .iter()
+        .flat_map(|batch| &batch.items)
+        .find_map(|item| match item {
+            MountItem::ViewProps { id, props } if *id == row => props.input_action,
+            _ => None,
+        })
+        .expect("the same row publishes its replacement binding");
+    assert_ne!(current_binding, binding);
+
+    control.dispatch_bound_event(row, EventKind::Press, EventPayload::None, current_binding);
+    assert_eq!(log(&frame()), "log A,fence,B,");
+}
+
 /// What the engine handed a [`ResizeSink`].
 #[derive(Debug)]
 enum Sent {

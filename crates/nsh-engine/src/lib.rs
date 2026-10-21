@@ -785,6 +785,7 @@ const MAX_ADVANCE_ROUNDS: usize = 100_000;
 
 enum Message {
     Event(NodeId, EventKind, EventPayload),
+    BoundEvent(NodeId, EventKind, EventPayload, u64),
     Scroll(NodeId, Point<Points>, u32),
     Zoom(NodeId, f32),
     ComponentSize(NodeId, Size<Points>),
@@ -844,6 +845,25 @@ impl EngineControl {
     /// Delivers an input event (and its data) to a node.
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: EventPayload) {
         let _ = self.tx.send(Message::Event(id, event, payload));
+    }
+
+    /// Delivers a sealed press binding captured from a completed presentation.
+    ///
+    /// The platform first validates the native target's presentation lease.
+    /// The engine validates `binding` again when this FIFO message reaches the
+    /// JS owner, so queued work cannot redirect the input to a new action on
+    /// the same node. Stale bindings and opaque native routes are discarded
+    /// before entering that action. This never falls back to an unbound event.
+    pub fn dispatch_bound_event(
+        &self,
+        id: NodeId,
+        event: EventKind,
+        payload: EventPayload,
+        binding: u64,
+    ) {
+        let _ = self
+            .tx
+            .send(Message::BoundEvent(id, event, payload, binding));
     }
 
     /// Reports the content offset of a scroll view or list, and how many
@@ -1187,28 +1207,14 @@ impl<M: TextEngine + 'static> LocalEngine<M> {
         binding: u64,
     ) -> Option<bool> {
         let _clock = self.driver.clock.enter();
-        let target = self.driver.state.core.bound_press_target(id, event)?;
-        let script = self.driver.script.as_ref()?;
-        if !script.input_action_matches(target, binding) {
-            return None;
-        }
-        let mut stale = false;
-        let entered = self
-            .driver
-            .state
-            .core
-            .component_event_now(id, event, &payload, |event| {
-                match script.deliver_bound_now(event, target, binding) {
-                    Some(entered) => entered,
-                    None => {
-                        // Stop the transparent route without letting a later
-                        // listener reinterpret this rejected presentation.
-                        stale = true;
-                        true
-                    }
-                }
-            });
-        (!stale).then_some(entered)
+        deliver_bound_event(
+            self.driver.script.as_ref(),
+            &mut self.driver.state.core,
+            id,
+            event,
+            &payload,
+            binding,
+        )
     }
 
     /// Whether queued messages or due timers call for a pump in an otherwise
@@ -2195,9 +2201,43 @@ fn deliver_component_event<M: TextEngine>(
     handled
 }
 
+/// Shared by immediate hosts and the engine thread: native routing and the
+/// JS binding check happen together, immediately before the first app entry.
+fn deliver_bound_event<M: TextEngine>(
+    script: Option<&Script>,
+    core: &mut Core<M>,
+    id: NodeId,
+    kind: EventKind,
+    payload: &EventPayload,
+    binding: u64,
+) -> Option<bool> {
+    let target = core.bound_press_target(id, kind)?;
+    let script = script?;
+    if !script.input_action_matches(target, binding) {
+        return None;
+    }
+    let mut stale = false;
+    let entered = core.component_event_now(id, kind, payload, |event| {
+        match script.deliver_bound_now(event, target, binding) {
+            Some(entered) => entered,
+            None => {
+                // Stop the transparent route without letting a later
+                // listener reinterpret this rejected presentation.
+                stale = true;
+                true
+            }
+        }
+    });
+    (!stale).then_some(entered)
+}
+
 /// Returns false on shutdown.
 fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message: Message) -> bool {
     match message {
+        Message::BoundEvent(id, event, payload, binding) => {
+            state.dispatch_hover_moves(script);
+            let _ = deliver_bound_event(script, &mut state.core, id, event, &payload, binding);
+        }
         Message::Event(id, event, payload) => {
             if state.trace {
                 log::info!(target: "nsh::perf", "event {event:?} on view {id}");
