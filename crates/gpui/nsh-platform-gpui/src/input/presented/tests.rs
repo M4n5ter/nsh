@@ -322,14 +322,26 @@ fn presented_inputs_reject_occlusion_reparenting_and_replaced_owners() {
     let source = InputSource::new(&surface);
     let original = source.sample().unwrap();
     let overlay = view(&surface, 6, ROOT_ID, ViewKind::View);
-    assert_eq!(source.dispatch(&original, &click(true)), InputDisposition::Rejected);
+    assert_eq!(
+        source.dispatch(&original, &click(true)),
+        InputDisposition::Rejected
+    );
     assert_eq!(crate::text_input::focused_view(&surface), None);
-    surface.mounter.borrow_mut().apply(&surface, &MountItem::Remove { id: overlay.id() });
+    surface
+        .mounter
+        .borrow_mut()
+        .apply(&surface, &MountItem::Remove { id: overlay.id() });
 
     // Readonly editors still own native focus and selection, without giving a
     // containing press action the click or permitting text replacement.
-    assert_eq!(source.dispatch(&original, &click(true)), InputDisposition::Handled);
-    assert_eq!(crate::text_input::focused_view(&surface), Some(editor.clone()));
+    assert_eq!(
+        source.dispatch(&original, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        crate::text_input::focused_view(&surface),
+        Some(editor.clone())
+    );
     assert!(!source.editor_matches(&source.sample().unwrap()));
     let native_move = crate::view::ItemPointer {
         kind: PointerKind::Move,
@@ -345,16 +357,25 @@ fn presented_inputs_reject_occlusion_reparenting_and_replaced_owners() {
         ..Default::default()
     });
     parent.state_mut().events.set(EventKind::MouseMove, true);
-    assert_eq!(source.dispatch(&original, &moved), InputDisposition::Rejected);
+    assert_eq!(
+        source.dispatch(&original, &moved),
+        InputDisposition::Rejected
+    );
     assert!(!crate::text_input::pointer(&surface, &editor, &native_move));
-    assert_eq!(crate::text_input::focused_view(&surface), Some(editor.clone()));
+    assert_eq!(
+        crate::text_input::focused_view(&surface),
+        Some(editor.clone())
+    );
     parent.state_mut().events.set(EventKind::MouseMove, false);
 
     // Arbitrary pointer and focus callbacks retain the exact-frame path.
     for event in [EventKind::Focus, EventKind::Touch, EventKind::MouseMove] {
         editor.state_mut().events.set(event, true);
         let snapshot = source.sample().unwrap();
-        assert_eq!(source.dispatch(&snapshot, &click(true)), InputDisposition::ExactFallback);
+        assert_eq!(
+            source.dispatch(&snapshot, &click(true)),
+            InputDisposition::ExactFallback
+        );
         editor.state_mut().events.set(event, false);
     }
 
@@ -368,18 +389,39 @@ fn presented_inputs_reject_occlusion_reparenting_and_replaced_owners() {
             before: None,
         },
     );
-    assert_eq!(source.dispatch(&before_reparent, &click(true)), InputDisposition::Rejected);
+    assert_eq!(
+        source.dispatch(&before_reparent, &click(true)),
+        InputDisposition::Rejected
+    );
     let reparented = source.sample().unwrap();
-    assert_eq!(source.dispatch(&reparented, &click(true)), InputDisposition::Handled);
-    assert_eq!(source.dispatch(&reparented, &click(false)), InputDisposition::Handled);
+    assert_eq!(
+        source.dispatch(&reparented, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&reparented, &click(false)),
+        InputDisposition::Handled
+    );
 
-    surface.mounter.borrow_mut().apply(&surface, &MountItem::Remove { id: editor.id() });
+    surface
+        .mounter
+        .borrow_mut()
+        .apply(&surface, &MountItem::Remove { id: editor.id() });
     let replacement = view(&surface, editor.id(), another_parent.id(), ViewKind::Input);
-    assert_eq!(source.dispatch(&reparented, &click(true)), InputDisposition::Rejected);
+    assert_eq!(
+        source.dispatch(&reparented, &click(true)),
+        InputDisposition::Rejected
+    );
     let current = source.sample().unwrap();
-    assert_eq!(source.dispatch(&current, &click(true)), InputDisposition::Handled);
+    assert_eq!(
+        source.dispatch(&current, &click(true)),
+        InputDisposition::Handled
+    );
     assert_eq!(crate::text_input::focused_view(&surface), Some(replacement));
-    assert_eq!(source.dispatch(&current, &click(false)), InputDisposition::Handled);
+    assert_eq!(
+        source.dispatch(&current, &click(false)),
+        InputDisposition::Handled
+    );
 }
 
 #[test]
