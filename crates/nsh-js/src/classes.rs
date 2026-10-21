@@ -2677,7 +2677,7 @@ pub(crate) mod tests {
         host.eval_source(
             "import { mount } from \"nsh\";\n\
              import { Meter } from \"test/classes\";\n\
-             mount(() => Meter({ level: 1.5, testID: \"meter\" }));",
+             mount(() => Meter({ level: 1.5, testID: \"meter\", focusable: false }));",
         )
         .unwrap();
         assert!(host.warned("Meter.level: expected an integer that fits u32, got 1.5"));
@@ -2687,6 +2687,13 @@ pub(crate) mod tests {
         assert!(ops.iter().any(|op| matches!(
             op,
             nsh_core::Op::SetProp { prop: nsh_core::Prop::TestId(Some(id)), .. } if &**id == "meter"
+        )));
+        assert!(ops.iter().any(|op| matches!(
+            op,
+            nsh_core::Op::SetProp {
+                prop: nsh_core::Prop::Focusable(Some(false)),
+                ..
+            }
         )));
         assert!(!ops.iter().any(|op| matches!(
             op,
