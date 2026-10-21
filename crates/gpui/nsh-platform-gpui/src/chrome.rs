@@ -170,6 +170,11 @@ pub(crate) struct Chrome {
     drag: Cell<Option<(f32, f32)>>,
 }
 
+/// Native menus capture input above the surface's retained views.
+pub(crate) fn menu_open(surface: &Surface) -> bool {
+    surface.chrome.open.borrow().is_some()
+}
+
 /// The surface fills a window of its own titled `title`: the window's
 /// chrome is the app's.
 pub(crate) fn set_standalone(surface: &Surface, title: &str, window: AnyWindowHandle) {
