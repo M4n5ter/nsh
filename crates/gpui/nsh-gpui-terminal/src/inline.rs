@@ -24,7 +24,9 @@ use crate::{CandidateFrame, FrameToken, MAX_WIRE_BYTES, wire};
 pub enum InlineProtocol {
     /// Palette-based Sixel; the terminal must clip a final partial six-row band.
     Sixel,
-    /// OSC 1337 inline PNG, sized to the actual viewport's character cells.
+    /// OSC 1337 File-streaming PNG, sized to the actual viewport's character cells.
+    /// Its payload may exceed generic OSC limits; the embedder must establish
+    /// this protocol's streaming support on its actual terminal transport.
     Iterm2,
 }
 
@@ -219,5 +221,47 @@ mod tests {
             let admitted = InlineFrame::with_limit(&source, protocol, 1, 1, true, exact).unwrap();
             assert_eq!(admitted.bytes().len(), exact);
         }
+    }
+
+    #[test]
+    fn iterm_file_streaming_roundtrips_a_scene_larger_than_generic_osc_limits() {
+        let mut source = frame();
+        source.size = gpui::size(gpui::DevicePixels(512), gpui::DevicePixels(512));
+        let mut seed = 177u32;
+        source.pixels = (0..512 * 512 * 4)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as u8
+            })
+            .collect();
+        let encoded = InlineFrame::encode(&source, InlineProtocol::Iterm2, 120, 40, true).unwrap();
+        let payload = encoded
+            .bytes()
+            .strip_prefix(b"\x1b[?2026h\x1b[H\x1b[2J")
+            .unwrap()
+            .strip_suffix(b"\x1b[H\x1b[?2026l")
+            .unwrap();
+        assert!(payload.len() > 1_048_576);
+        assert!(encoded.bytes().len() <= 8 * 1024 * 1024);
+        let payload = std::str::from_utf8(payload).unwrap();
+        let (header, png) = payload
+            .strip_suffix('\x07')
+            .unwrap()
+            .split_once(':')
+            .unwrap();
+        let header = header
+            .strip_prefix("\x1b]1337;File=inline=1;size=")
+            .unwrap();
+        let (size, geometry) = header.split_once(';').unwrap();
+        assert_eq!(geometry, "width=120;height=40;preserveAspectRatio=0");
+        let png = STANDARD.decode(png).unwrap();
+        assert_eq!(size.parse::<usize>().unwrap(), png.len());
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(decoded.dimensions(), (512, 512));
+        assert_eq!(decoded.as_raw(), source.pixels());
     }
 }
