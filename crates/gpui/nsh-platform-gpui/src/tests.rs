@@ -109,7 +109,12 @@ function App() {
   let scope, a, b, native;
   keymap.bind("f6", () => record(`global:${keymap.focusedWithin(scope)}:${keymap.focusedWithin(a)}:${keymap.focusedWithin(b)}`), { when: "always" });
   keymap.bind("f10", () => popup.set(true), { when: "always" });
-  keymap.bind("f9", () => { popup.set(false); native.focus(); }, { when: "always" });
+  keymap.bind("f9", () => {
+    record("request-native");
+    popup.set(false);
+    native.focus();
+    record("requested-native");
+  }, { when: "always" });
   return (
     <View style={{ flex: 1, gap: 8 }}>
       <Input testID="report" autoFocus value={`${log().join("|")}@${colorScheme()}`}
@@ -425,7 +430,7 @@ fn focus_diagnostic(surface: &crate::surface::Surface) -> String {
     fn nodes(view: &crate::view::NshView, out: &mut Vec<String>) {
         let s = view.state();
         out.push(format!(
-            "{}:{:?}:test={:?}:disabled={}:hidden={}:focusable={:?}:press={}:input={}",
+            "{}:{:?}:test={:?}:disabled={}:hidden={}:focusable={:?}:press={}:input={}:value={:?}",
             s.id,
             s.kind,
             s.props.test_id,
@@ -434,6 +439,7 @@ fn focus_diagnostic(surface: &crate::surface::Surface) -> String {
             s.props.focusable,
             s.events.contains(nsh_core::EventKind::Press),
             s.input.is_some(),
+            crate::text_input::accessible_value(view).map(|value| value.text),
         ));
         drop(s);
         view.with_children(|children| {
