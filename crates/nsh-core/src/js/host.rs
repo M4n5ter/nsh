@@ -471,6 +471,12 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "The secondary button (a right click, Control-click on Apple platforms) was pressed over the view: open a menu with `Menu.popup({ x: e.pageX, y: e.pageY })`. The nearest listener hears it; a text input or selectable text nearer shows its own menu instead.",
     ),
     (
+        EventKind::MouseMove,
+        on::ALL,
+        "(e: { x: number; y: number }) => void",
+        "The mouse moved inside the view, including with a button down (desktops and web); `x`/`y` are local coordinates in points, delivered at most once per frame.",
+    ),
+    (
         EventKind::FileDragEnter,
         on::ALL,
         "() => void",
