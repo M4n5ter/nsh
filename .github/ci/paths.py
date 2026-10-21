@@ -52,6 +52,13 @@ WORKFLOWS = {
             "examples/rust-exports/**",
         ],
     },
+    "tui.yml": {
+        "packages": ["nsh-platform-tui", "nsh-tui-host", "nsh-tui-app", "nsh-cli"],
+        "files": [
+            "examples/terminal-workbench/**", "api/cases/layout/fonts/**",
+            "third-party/icy_sixel/**",
+        ],
+    },
 }
 
 ALWAYS = ["Cargo.toml", "Cargo.lock", ".cargo/**", "rust-toolchain.toml"]

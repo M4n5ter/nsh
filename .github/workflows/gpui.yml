@@ -13,12 +13,14 @@ on:
     paths:
       - "crates/gpui/**"
       - "third-party/gpui-wgpu/**"
+      - "third-party/icy_sixel/**"
       - "examples/embed-gpui/**"
       - ".github/workflows/gpui.yml"
   pull_request:
     paths:
       - "crates/gpui/**"
       - "third-party/gpui-wgpu/**"
+      - "third-party/icy_sixel/**"
       - "examples/embed-gpui/**"
       - ".github/workflows/gpui.yml"
   schedule:

@@ -6,6 +6,8 @@ on:
     paths:
       - "crates/**"
       - "examples/terminal-workbench/**"
+      - "api/cases/layout/fonts/**"
+      - "third-party/icy_sixel/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
@@ -15,6 +17,8 @@ on:
     paths:
       - "crates/**"
       - "examples/terminal-workbench/**"
+      - "api/cases/layout/fonts/**"
+      - "third-party/icy_sixel/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
