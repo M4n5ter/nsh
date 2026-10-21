@@ -395,6 +395,36 @@ fn presented_inputs_reject_occlusion_reparenting_and_replaced_owners() {
         editor.state_mut().events.set(event, false);
     }
 
+    let sibling = view(&surface, 10, ROOT_ID, ViewKind::View);
+    sibling.state_mut().frame = crate::geom::rect(320.0, 0.0, 80.0, 300.0);
+    let dragging = source.sample().unwrap();
+    assert_eq!(source.dispatch(&dragging, &click(true)), InputDisposition::Handled);
+    assert_eq!(source.dispatch(&dragging, &moved), InputDisposition::Handled);
+    sibling.state_mut().events.set(EventKind::MouseMove, true);
+    assert_eq!(source.dispatch(&dragging, &moved), InputDisposition::Rejected);
+    assert!(!crate::text_input::pointer(&surface, &editor, &native_move));
+    sibling.state_mut().events.set(EventKind::MouseMove, false);
+
+    sibling.set_native(&foreign, crate::geom::rect(0.0, 0.0, 80.0, 300.0));
+    assert_eq!(source.dispatch(&dragging, &click(true)), InputDisposition::Handled);
+    assert_eq!(source.dispatch(&dragging, &moved), InputDisposition::Rejected);
+    assert!(!crate::text_input::pointer(&surface, &editor, &native_move));
+    sibling.remove_native(&foreign);
+
+    // Leaving an earlier hover owner may also invoke its arbitrary callback.
+    assert_eq!(source.dispatch(&dragging, &click(true)), InputDisposition::Handled);
+    sibling.state_mut().events.set(EventKind::HoverOut, true);
+    set_hovered(&surface, vec![sibling.clone()]);
+    let returned = PlatformInput::MouseMove(gpui::MouseMoveEvent {
+        position: gpui::point(gpui::px(20.0), gpui::px(20.0)),
+        pressed_button: Some(MouseButton::Left),
+        ..Default::default()
+    });
+    assert_eq!(source.dispatch(&dragging, &returned), InputDisposition::Rejected);
+    assert!(!crate::text_input::pointer(&surface, &editor, &native_move));
+    sibling.state_mut().events.set(EventKind::HoverOut, false);
+    set_hovered(&surface, Vec::new());
+
     let before_reparent = source.sample().unwrap();
     let another_parent = view(&surface, 8, ROOT_ID, ViewKind::View);
     surface.mounter.borrow_mut().apply(

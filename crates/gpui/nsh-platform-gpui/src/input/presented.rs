@@ -285,25 +285,33 @@ fn native_input(surface: &Surface, view: &NshView) -> bool {
         && focus_safe(surface, view)
 }
 
-fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
-    let state = view.state();
-    state.opacity() <= 0.0
-        || state.natives.iter().any(|native| {
-            // The editor's own paint-only Hosted item never takes a pointer.
-            // Other hosted items retain their opaque native behavior.
-            state.kind != ViewKind::Input
-                || state.input.as_ref().is_none_or(|input| {
-                    let editor: Rc<dyn crate::view::Hosted> = input.clone();
-                    !Rc::ptr_eq(&native.item, &editor)
-                })
-        })
+fn mouse_callbacks(events: nsh_core::EventMask) -> bool {
+    events.contains(EventKind::MouseMove)
+        || events.contains(EventKind::HoverIn)
+        || events.contains(EventKind::HoverOut)
+}
+
+fn opaque_native(state: &ViewState) -> bool {
+    state.natives.iter().any(|native| {
+        // The editor's own paint-only Hosted item never takes a pointer.
+        // Other hosted items retain their opaque native behavior.
+        state.kind != ViewKind::Input
+            || state.input.as_ref().is_none_or(|input| {
+                let editor: Rc<dyn crate::view::Hosted> = input.clone();
+                !Rc::ptr_eq(&native.item, &editor)
+            })
+    })
         || matches!(
             state.kind,
             ViewKind::Native | ViewKind::WebView | ViewKind::Video
         )
-        || state.events.contains(EventKind::HoverIn)
-        || state.events.contains(EventKind::HoverOut)
-        || state.events.contains(EventKind::MouseMove)
+}
+
+fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
+    let state = view.state();
+    state.opacity() <= 0.0
+        || opaque_native(&state)
+        || mouse_callbacks(state.events)
         || state.events.contains(EventKind::Touch)
         || state.events.contains(EventKind::PanStart)
         || state.events.contains(EventKind::PanEnd)
@@ -665,6 +673,19 @@ impl InputSource {
                         }
                     }
             })
+            || (lease.target == PointerTarget::Input
+                && kind == PointerKind::Move
+                && (pick(&surface.root, x, y, true).is_some_and(|hit| {
+                    chain(&hit.view).iter().any(|view| {
+                        let state = view.state();
+                        opaque_native(&state) || mouse_callbacks(state.events)
+                    })
+                }) || surface
+                    .input
+                    .hovered
+                    .borrow()
+                    .iter()
+                    .any(|view| view.state().events.contains(EventKind::HoverOut))))
             || surface.input.hover_item.borrow().is_some()
         {
             cancel(surface);

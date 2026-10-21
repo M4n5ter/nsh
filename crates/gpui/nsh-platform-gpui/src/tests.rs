@@ -637,6 +637,7 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
     });
     let before_click = source.sample().unwrap();
     cx.simulate_keystrokes("f7");
+    source.dispatch(&before_click, &key("f7", false));
     wait_for_report(&view, cx, "1|5|editor:1|0:a|1|2|1|1:1");
     assert_eq!(source.dispatch(&before_click, &down), Handled);
     ime(&view, cx, |surface| {
@@ -648,9 +649,11 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
     });
     let focused = source.sample().unwrap();
     cx.simulate_keystrokes("f7");
+    source.dispatch(&focused, &key("f7", false));
     wait_for_report(&view, cx, "1|6|editor:1|0:a|1|2|1|1:1");
     assert_eq!(source.dispatch(&before_click, &drag), Handled);
     cx.simulate_keystrokes("f7");
+    source.dispatch(&focused, &key("f7", false));
     wait_for_report(&view, cx, "1|7|editor:1|0:a|1|2|1|1:1");
     assert_eq!(source.dispatch(&before_click, &up), Handled);
     ime(&view, cx, |surface| {
