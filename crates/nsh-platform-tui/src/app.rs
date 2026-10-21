@@ -734,7 +734,12 @@ impl AppView {
     fn dev_event(&mut self, event: nsh_dev::DevEvent) -> io::Result<()> {
         use nsh_dev::{DevEvent, protocol::BundleFormat};
         match event {
-            DevEvent::Testing | DevEvent::Step { .. } => {}
+            // Terminal scripts drive this host directly; it does not have
+            // the real-platform test agent that handles these messages.
+            DevEvent::Testing
+            | DevEvent::Step { .. }
+            | DevEvent::TestSetup { .. }
+            | DevEvent::Fetch { .. } => {}
             DevEvent::Connected => self.status = None,
             DevEvent::Disconnected => {
                 self.status = Some("Dev server disconnected; reconnecting".into())
@@ -2076,6 +2081,41 @@ mod tests {
         assert!(!dir.join("apps").exists());
         drop(view);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn test_agent_messages_leave_the_terminal_app_unchanged() {
+        use nsh_dev::{DevEvent, protocol::FetchReply};
+
+        let mut view = AppView::new(AppOptions::default());
+        view.load(Root::of::<ScriptApp>().into()).unwrap();
+        let engine = view.engine.as_ref().unwrap() as *const Engine;
+        view.status = Some("Building".into());
+        view.last_error = Some("previous diagnostic".into());
+
+        for event in [
+            DevEvent::Testing,
+            DevEvent::TestSetup {
+                storage: vec![("launches".into(), "99".into())],
+            },
+            DevEvent::Fetch {
+                id: 1,
+                reply: FetchReply::Pass,
+            },
+            DevEvent::Fetch {
+                id: 1,
+                reply: FetchReply::Failed {
+                    message: "test request failed".into(),
+                },
+            },
+        ] {
+            view.dev_event(event).unwrap();
+            assert_eq!(view.engine.as_ref().unwrap() as *const Engine, engine);
+            assert_eq!(view.status.as_deref(), Some("Building"));
+            assert_eq!(view.last_error(), Some("previous diagnostic"));
+            assert!(view.options.storage.is_none());
+        }
     }
 
     #[cfg(feature = "dev")]

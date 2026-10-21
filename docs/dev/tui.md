@@ -218,7 +218,8 @@ reduced motion selects fades for transitions.
 
 ## Graphics and platform boundaries
 
-PNG, JPEG, GIF and WebP decode on the graphics worker. Still images apply
+PNG, JPEG, GIF and WebP decode on the graphics worker. SVG image sources are not
+supported by the terminal backend, even though the GUI native backends support them. Still images apply
 EXIF orientation. Animated GIF/WebP preserve timing and loops within
 bounded frame/memory limits, falling back to the first frame if needed.
 Encoded images are limited to 64 MiB, 8192 pixels on either side and
