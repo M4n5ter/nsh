@@ -10,7 +10,8 @@
 //! animation frame) and hand it to the main thread with [`rt::invoke`].
 //! Decoded images are kept in a main-thread cache keyed by the resolved
 //! location (so `asset:/` URIs of surfaces with different asset bases
-//! never mix), bounded by bytes and evicting the least recently used;
+//! never mix). Host-provided assets are keyed by their surface/load binding
+//! and opaque URI. The cache is bounded by bytes and evicts the least recently used;
 //! concurrent requests for one location share one load. Images decode at
 //! their full size, up to [`MAX_DIMENSION`] pixels a side (larger ones are
 //! scaled down on the worker: GPU textures have a size limit).
@@ -124,6 +125,39 @@ impl nsh_engine::Assets for AssetReader {
         match resolve(uri, self.0.as_ref()) {
             Some(location) => read(&location, &Access::default(), &mut |_, _| {}),
             None => Err(format!("{uri}: no asset location configured")),
+        }
+    }
+}
+
+/// The default bundled location, or the reader bound to an engine load.
+/// `Engine(None)` deliberately disables assets instead of falling back to a base.
+#[derive(Default)]
+pub(crate) enum AssetSource {
+    #[default]
+    Base,
+    Engine(Option<Arc<dyn nsh_engine::Assets>>),
+}
+
+/// One worker's original source, retained until its read finishes.
+enum LoadSource {
+    Location(Location),
+    Asset {
+        uri: String,
+        reader: Arc<dyn nsh_engine::Assets>,
+    },
+}
+
+impl LoadSource {
+    fn read(&self, access: &Access, progress: &mut dyn FnMut(u64, u64)) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Location(location) => read(location, access, progress),
+            Self::Asset { uri, reader } => {
+                let bytes = reader.read(uri)?;
+                if bytes.len() as u64 > MAX_BYTES {
+                    return Err(format!("{uri}: image exceeds the encoded-byte limit"));
+                }
+                Ok(bytes)
+            }
         }
     }
 }
@@ -554,7 +588,7 @@ fn spawn(job: impl FnOnce() + Send + 'static) {
 }
 
 /// Loads `location` on a worker and hands the result to the main thread.
-fn work(key: String, location: Location, access: Arc<Access>, progress: bool) {
+fn work(key: String, source: LoadSource, access: Arc<Access>, progress: bool) {
     let mut last: Option<Instant> = None;
     let mut report = |loaded: u64, total: u64| {
         let now = Instant::now();
@@ -568,7 +602,7 @@ fn work(key: String, location: Location, access: Arc<Access>, progress: bool) {
             LOADER.with(|l| l.progress(&key, loaded, total));
         });
     };
-    let result = read(&location, &access, &mut report).and_then(decode);
+    let result = source.read(&access, &mut report).and_then(decode);
     rt::invoke(move || finish(key, result.map(Image::shared)));
 }
 
@@ -1190,14 +1224,60 @@ fn finish(key: String, result: Result<Picture, String>) {
     }
 }
 
+fn source(surface: &Surface, uri: &str) -> Result<(String, LoadSource), String> {
+    if uri.starts_with("asset:/")
+        && let AssetSource::Engine(reader) = &*surface.image_assets.borrow()
+    {
+        let reader = reader
+            .clone()
+            .ok_or_else(|| format!("{uri}: no asset reader configured"))?;
+        // A load binding, rather than an Arc address: a stopped Host may be
+        // freed while the decoded picture still lives in the global cache.
+        let key = format!(
+            "host-asset:{}:{}:{uri}",
+            surface.key(),
+            surface.load_generation()
+        );
+        return Ok((
+            key,
+            LoadSource::Asset {
+                uri: uri.to_owned(),
+                reader,
+            },
+        ));
+    }
+    let location = resolve(uri, surface.asset_base.borrow().as_ref())
+        .ok_or_else(|| format!("unsupported image source `{uri}`"))?;
+    Ok((location.key(), LoadSource::Location(location)))
+}
+
 /// Loads `uri` for `surface`; `done` runs on the main thread. Returns
 /// whether it already ran (cached, or a source that cannot load).
 fn fetch(surface: &Surface, uri: &str, progress: Option<Progress>, done: Done) -> bool {
-    let Some(location) = resolve(uri, surface.asset_base.borrow().as_ref()) else {
-        done(Err(format!("unsupported image source `{uri}`")));
-        return true;
+    let surface_key = surface.key();
+    let generation = surface.load_generation();
+    let current = move || {
+        Surface::by_key(surface_key).is_some_and(|surface| surface.load_generation() == generation)
     };
-    let key = location.key();
+    let done: Done = Box::new(move |result| {
+        if current() {
+            done(result);
+        }
+    });
+    let progress: Option<Progress> = progress.map(|progress| {
+        Box::new(move |loaded, total| {
+            if current() {
+                progress(loaded, total);
+            }
+        }) as Progress
+    });
+    let (key, source) = match source(surface, uri) {
+        Ok(source) => source,
+        Err(reason) => {
+            done(Err(reason));
+            return true;
+        }
+    };
     if let Some(picture) = LOADER.with(|l| l.cached(&key)) {
         done(Ok(picture));
         return true;
@@ -1211,7 +1291,7 @@ fn fetch(surface: &Surface, uri: &str, progress: Option<Progress>, done: Done) -
     });
     if start {
         let access = surface.access.borrow().clone();
-        spawn(move || work(key, location, access, listens));
+        spawn(move || work(key, source, access, listens));
     }
     false
 }

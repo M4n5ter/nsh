@@ -152,6 +152,12 @@ import -window root -display :170 whole.png        # the display, if the window'
   scrolling, keymap and editing code reads.
 - **Embedding**: `AppView` (`app.rs`) is one surface as a GPUI view: `cx.new(|cx| AppView::new(options, window,
   cx))`, then `load(App::Js(bundle))` or `load(App::Rust(root))`; it renders a `SurfaceElement` and is `Focusable`.
+  Hosts that already own an `nsh_engine::EngineConfig` use `load_with_config(config)` instead of rebuilding its UI
+  registries, runtime, storage or asset reader in platform options. The surface still supplies its actual viewport
+  and GPUI device environment. The original reader serves engine resources and opaque image `asset:/` URIs; an
+  explicit `None` does not fall back to `asset_base`. Image cache entries and in-flight loads are isolated by
+  surface/load binding, and completions from a stopped load cannot enter its replacement. `set_asset_base` keeps
+  controlling the default `load(app)` path; it does not replace an explicit configuration's current reader.
   `open_app_window` opens one in a window of a running GPUI app; `run_app` runs one app on its own, as the development
   host does (one `AppView` filling a window, the process quits when the last window closes). `register_component`
   registers native components (GPUI elements); `set_theme` / `set_appearance` give the surface the host's theme and mode; `set_ui_sets`

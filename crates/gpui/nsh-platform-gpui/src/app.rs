@@ -258,12 +258,6 @@ impl AppView {
 
     /// Runs `app`, replacing what ran.
     pub fn load(&self, app: App) {
-        let access = match &app {
-            App::Js(bundle) => bundle.policy.access(),
-            // Native code reaches what the platform allows.
-            App::Rust(_) => nsh_engine::Policy::default().access(),
-        };
-        self.surface.native.set_access(Arc::new(access));
         let options = self.options.borrow();
         let config = EngineConfig {
             app,
@@ -283,11 +277,31 @@ impl AppView {
             storage: options.storage.clone(),
             clock: Default::default(),
         };
-        crate::image::set_asset_base(&self.surface, options.asset_base.clone());
-        self.surface
-            .native
-            .set_asset_base(options.asset_base.clone());
-        self.surface.start(config);
+        drop(options);
+        self.start(config, false);
+    }
+
+    /// Runs the host's original engine configuration, replacing what ran.
+    ///
+    /// The GPUI surface supplies its actual viewport and device environment.
+    /// The remaining settings, including UI registries, runtime, bundle policy
+    /// and asset reader, are kept. Its asset reader serves both engine resources
+    /// and image `asset:/` URIs; `None` makes those URIs unavailable. The provider
+    /// stays bound to this load, independently of [`Self::set_asset_base`].
+    pub fn load_with_config(&self, config: EngineConfig) {
+        self.start(config, true);
+    }
+
+    fn start(&self, config: EngineConfig, use_engine_assets: bool) {
+        let access = match &config.app {
+            App::Js(bundle) => bundle.policy.access(),
+            App::Rust(_) => nsh_engine::Policy::default().access(),
+        };
+        self.surface.native.set_access(Arc::new(access));
+        let base = self.options.borrow().asset_base.clone();
+        crate::image::set_asset_base(&self.surface, base.clone());
+        self.surface.native.set_asset_base(base);
+        self.surface.start(config, use_engine_assets);
     }
 
     /// Runs a verified signed package ([`crate::verify_package`] or
@@ -308,6 +322,8 @@ impl AppView {
     /// loaded later. Fonts the running app already registered stay; a
     /// running engine keeps reading the files it asks for itself (fonts)
     /// from the base it was loaded with, until the next [`AppView::load`].
+    /// An explicit [`Self::load_with_config`] asset reader stays bound to that
+    /// load; changing this base does not replace that provider.
     pub fn set_asset_base(&self, base: Option<AssetBase>) {
         crate::image::set_asset_base(&self.surface, base.clone());
         self.surface.native.set_asset_base(base.clone());

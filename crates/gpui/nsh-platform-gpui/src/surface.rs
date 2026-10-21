@@ -169,6 +169,8 @@ pub(crate) struct Surface {
     generation: Cell<u64>,
     /// Where `asset:/` image URIs resolve ([`crate::image::set_asset_base`]).
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
+    /// The current load's source for image `asset:/` URIs.
+    pub(crate) image_assets: RefCell<crate::image::AssetSource>,
     /// What the running app may reach (checked for image redirects).
     pub(crate) access: RefCell<Arc<nsh_core::access::Access>>,
     /// Videos, web views and registered native components.
@@ -236,6 +238,7 @@ impl Surface {
             on_hot_update_failed: RefCell::new(None),
             generation: Cell::new(0),
             asset_base: RefCell::new(None),
+            image_assets: RefCell::default(),
             access: RefCell::new(Arc::default()),
             native: Default::default(),
             keymap: Default::default(),
@@ -280,8 +283,13 @@ impl Surface {
     }
 
     /// Starts `config`'s app, replacing what ran.
-    pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig) {
+    pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig, use_engine_assets: bool) {
         self.stop();
+        *self.image_assets.borrow_mut() = if use_engine_assets {
+            crate::image::AssetSource::Engine(config.assets.clone())
+        } else {
+            crate::image::AssetSource::Base
+        };
         *self.access.borrow_mut() = Arc::new(match &config.app {
             nsh_engine::App::Js(bundle) => bundle.policy.access(),
             nsh_engine::App::Rust(_) => nsh_engine::Policy::default().access(),
@@ -322,9 +330,15 @@ impl Surface {
         }
     }
 
+    /// Identifies this engine load, including while its image requests settle.
+    pub(crate) fn load_generation(&self) -> u64 {
+        self.generation.get()
+    }
+
     /// Stops the app and removes its views.
     pub(crate) fn stop(&self) {
         self.generation.set(self.generation.get() + 1);
+        *self.image_assets.borrow_mut() = crate::image::AssetSource::Base;
         // Dropping the engine joins its thread.
         self.control.borrow_mut().take();
         self.engine.borrow_mut().take();
