@@ -525,6 +525,9 @@ fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
     wait_for_button(&view, cx, "popup-action");
     cx.simulate_keystrokes("f9");
     wait_for_button(&view, cx, "native");
+    // Native controls own their keys; Tab returns to a surface control.
+    cx.simulate_keystrokes("tab");
+    wait_for_button(&view, cx, "b");
     cx.simulate_keystrokes("f10");
     wait_for_button(&view, cx, "popup-action");
     cx.simulate_keystrokes("f9");
