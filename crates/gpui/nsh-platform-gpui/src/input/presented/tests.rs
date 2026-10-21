@@ -368,6 +368,22 @@ fn presented_inputs_reject_occlusion_reparenting_and_replaced_owners() {
     );
     parent.state_mut().events.set(EventKind::MouseMove, false);
 
+    struct ForeignItem;
+    impl crate::view::Hosted for ForeignItem {
+        fn draw(&self, _: &mut crate::render::DrawCx<'_>, _: (f32, f32)) {}
+    }
+    let foreign: Rc<dyn crate::view::Hosted> = Rc::new(ForeignItem);
+    editor.set_native(&foreign, crate::geom::rect(0.0, 0.0, 300.0, 300.0));
+    assert_eq!(
+        source.dispatch(&original, &click(true)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(
+        source.dispatch(&source.sample().unwrap(), &click(true)),
+        InputDisposition::ExactFallback
+    );
+    editor.remove_native(&foreign);
+
     // Arbitrary pointer and focus callbacks retain the exact-frame path.
     for event in [EventKind::Focus, EventKind::Touch, EventKind::MouseMove] {
         editor.state_mut().events.set(event, true);

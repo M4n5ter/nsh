@@ -288,7 +288,15 @@ fn native_input(surface: &Surface, view: &NshView) -> bool {
 fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
     let state = view.state();
     state.opacity() <= 0.0
-        || !state.natives.is_empty()
+        || state.natives.iter().any(|native| {
+            // The editor's own paint-only Hosted item never takes a pointer.
+            // Other hosted items retain their opaque native behavior.
+            state.kind != ViewKind::Input
+                || state.input.as_ref().is_none_or(|input| {
+                    let editor: Rc<dyn crate::view::Hosted> = input.clone();
+                    !Rc::ptr_eq(&native.item, &editor)
+                })
+        })
         || matches!(
             state.kind,
             ViewKind::Native | ViewKind::WebView | ViewKind::Video
