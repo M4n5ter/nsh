@@ -782,7 +782,8 @@ fn font_features(variant: FontVariant) -> Vec<rustybuzz::Feature> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const PACIFICO: &[u8] = include_bytes!("../../../api/cases/layout/fonts/Pacifico-Regular.ttf");
+    const PACIFICO: &[u8] =
+        include_bytes!("../../../tests/compat/cases/layout/fonts/Pacifico-Regular.ttf");
 
     fn with_tables(additional: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
         let count = u16::from_be_bytes(PACIFICO[4..6].try_into().unwrap()) as usize;

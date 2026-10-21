@@ -1348,7 +1348,7 @@ mod tests {
         let before = engine.measure(&engine.prepare(&value), None);
         engine
             .register_font(include_bytes!(
-                "../../../api/cases/layout/fonts/Pacifico-Regular.ttf"
+                "../../../tests/compat/cases/layout/fonts/Pacifico-Regular.ttf"
             ))
             .unwrap();
         assert_eq!(engine.measure(&engine.prepare(&value), None), before);

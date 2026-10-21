@@ -1973,7 +1973,7 @@ mod tests {
         let fonts = FontCatalog::default();
         fonts
             .register(include_bytes!(
-                "../../../api/cases/layout/fonts/Pacifico-Regular.ttf"
+                "../../../tests/compat/cases/layout/fonts/Pacifico-Regular.ttf"
             ))
             .unwrap();
         let engine =
