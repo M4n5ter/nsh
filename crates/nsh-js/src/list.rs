@@ -1358,6 +1358,17 @@ mod tests {
             .unwrap_or_else(|| panic!("missing text {wanted:?}: {ops:?}"))
     }
 
+    fn assert_js_exception(message: &str, expected: &str) {
+        let (title, stack) = message
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("missing exception stack: {message}"));
+        assert_eq!(title, format!("Error: {expected}"));
+        assert!(
+            stack.lines().any(|line| line.trim_start().starts_with("at ")),
+            "missing exception frames: {message}"
+        );
+    }
+
     #[test]
     fn indexed_snapshots_render_requested_rows_and_keep_cell_owners() {
         let host = Host::new().unwrap();
@@ -1413,10 +1424,25 @@ mod tests {
             Op::SetProp { id, prop: Prop::Count(1_000_000) } if *id == list
         )));
         host.bind_list(list, &[(0, 2)]);
-        created_text(&take_ops(&host), "Original 2");
+        let bound = take_ops(&host);
+        let body = created_text(&bound, "Original 2");
+        let cell = bound
+            .iter()
+            .find_map(|op| match op {
+                Op::Create { id, tag: Tag::Cell } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
         host.bind_list(list, &[(0, 999_999)]);
         let recycled = take_ops(&host);
-        created_text(&recycled, "Original 999999");
+        assert!(recycled.iter().any(|op| matches!(
+            op,
+            Op::SetText { id, text } if *id == body && text == "Original 999999"
+        )));
+        assert!(recycled.iter().any(|op| matches!(
+            op,
+            Op::SetProp { id, prop: Prop::CellIndex(999_999) } if *id == cell
+        )));
         assert!(
             !recycled
                 .iter()
@@ -1425,7 +1451,10 @@ mod tests {
         host.eval_script("replace.js", "replace(); check(1, 0, undefined)")
             .unwrap();
         let replaced = take_ops(&host);
-        created_text(&replaced, "Updated 999999");
+        assert!(replaced.iter().any(|op| matches!(
+            op,
+            Op::SetText { id, text } if *id == body && text == "Updated 999999"
+        )));
         assert!(replaced.iter().any(|op| matches!(
             op,
             Op::SetProp { id, prop: Prop::Splice(0, 1_000_000, 1_000_000) } if *id == list
@@ -1468,8 +1497,11 @@ mod tests {
                      mount(() => List({{ each: {source}, children: (item) => () => item() }}));"
                 ))
                 .unwrap_err();
-            assert_eq!(error.message, expected);
+            assert_js_exception(&error.message, expected);
             assert!(!host.has_exception());
+            host.eval_source("import { text } from 'nsh:rt'; text('Context recovered');")
+                .unwrap();
+            created_text(&take_ops(&host), "Context recovered");
         }
         let mut host = Host::new().unwrap();
         let errors = Rc::new(RefCell::new(Vec::new()));
@@ -1500,13 +1532,21 @@ mod tests {
             })
             .unwrap();
         host.bind_list(list, &[(0, 0)]);
-        created_text(&take_ops(&host), "Row 0");
+        let body = created_text(&take_ops(&host), "Row 0");
         host.bind_list(list, &[(0, 1)]);
-        assert_eq!(&*errors.borrow(), &["source item failed"]);
+        {
+            let errors = errors.borrow();
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_js_exception(&errors[0], "source item failed");
+        }
         assert!(!host.has_exception());
         take_ops(&host);
         host.bind_list(list, &[(0, 2)]);
-        created_text(&take_ops(&host), "Row 2");
+        let recovered = take_ops(&host);
+        assert!(recovered.iter().any(|op| matches!(
+            op,
+            Op::SetText { id, text } if *id == body && text == "Row 2"
+        )));
         host.dispatch_event(
             list,
             EventKind::ViewableItemsChange,
@@ -1515,7 +1555,20 @@ mod tests {
                 ("last", PayloadValue::Number(1.0)),
             ]),
         );
-        assert_eq!(&*errors.borrow(), &["source item failed", "source item failed"]);
+        {
+            let errors = errors.borrow();
+            assert_eq!(errors.len(), 2, "{errors:?}");
+            assert_js_exception(&errors[0], "source item failed");
+            assert_js_exception(&errors[1], "source item failed");
+        }
+        assert!(!host.has_exception());
+        host.bind_list(list, &[(0, 0)]);
+        let recovered = take_ops(&host);
+        assert!(recovered.iter().any(|op| matches!(
+            op,
+            Op::SetText { id, text } if *id == body && text == "Row 0"
+        )));
+        assert_eq!(errors.borrow().len(), 2);
         assert!(!host.has_exception());
     }
 
