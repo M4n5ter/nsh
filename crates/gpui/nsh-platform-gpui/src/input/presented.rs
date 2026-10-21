@@ -325,8 +325,6 @@ fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
             .is_some_and(|text| !text.text.links.is_empty())
         || (!press
             && [
-                EventKind::ScrollDragStart,
-                EventKind::ScrollDragEnd,
                 EventKind::ScrollEnd,
                 EventKind::MomentumStart,
                 EventKind::MomentumEnd,

@@ -80,6 +80,16 @@ fn presented_wheels_keep_the_original_scroll_across_growth_and_a_new_nested_owne
     let surface = new_surface();
     let outer = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
     outer.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(1200.0));
+    let mut events = outer.state().events;
+    events.set(EventKind::ScrollDragStart, true);
+    events.set(EventKind::ScrollDragEnd, true);
+    surface.mounter.borrow_mut().apply(
+        &surface,
+        &MountItem::Events {
+            id: outer.id(),
+            events,
+        },
+    );
     let source = InputSource::new(&surface);
     let snapshot = source.sample().unwrap();
     assert_eq!(
@@ -111,6 +121,35 @@ fn presented_wheels_keep_the_original_scroll_across_growth_and_a_new_nested_owne
     assert_eq!(
         source.dispatch(&snapshot, &wheel(3.0)),
         InputDisposition::Handled
+    );
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(0.0));
+
+    let pixels = PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+        position: gpui::point(gpui::px(20.0), gpui::px(20.0)),
+        delta: ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-3.0))),
+        ..Default::default()
+    });
+    assert_eq!(
+        source.dispatch(&snapshot, &pixels),
+        InputDisposition::ExactFallback
+    );
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(0.0));
+
+    events.set(EventKind::ScrollEnd, true);
+    surface.mounter.borrow_mut().apply(
+        &surface,
+        &MountItem::Events {
+            id: outer.id(),
+            events,
+        },
+    );
+    assert_eq!(
+        source.dispatch(&snapshot, &wheel(-3.0)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(
+        source.dispatch(&source.sample().unwrap(), &wheel(-3.0)),
+        InputDisposition::ExactFallback
     );
     assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(0.0));
 }
