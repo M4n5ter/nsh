@@ -333,7 +333,17 @@ each entry (`RunnerMessage::Build` on its stderr, one JSON line), `nsh` writes t
 `.nsh/test/build` and answers with a `Reply` on the runner's stdin, or `Reply::Root` for a Rust app's `nsh.json` (or its
 directory): the runner then makes the app's root (`app_root()`), so `open(".")` starts a Rust app. Results, file
 failures and log records come back as `RunnerMessage`s; batches of `--trace` go to the runner's stdout, which is
-`nsh`'s.
+`nsh`'s. On a real platform (`--target`) such an app's tests run in `nsh`'s process like any other's, and its apps in
+the development hosts built with its crates (`runtime::test_host`, `test_web`, `test_android`: a Rust app's too, whose
+runners have no dev server client). A Rust app's hosts know its root (the platforms' `set_root`, Android's `root!`, the
+web runtime's `rust_app!`); for its `nsh.json` the test session's server publishes no bundle but
+`DevServer::publish_root` (`ServerMessage::Root`, after the test's setup), and the host runs the root.
+
+`--trace` on a real platform is the host's: the test's setup says so (`DevServer::set_test_trace`,
+`ServerMessage::TestSetup`'s `trace`), the host's engine runs with `EngineConfig::trace` (`Model::set_up_engine`), so
+its commit and event timings come as its log lines, and the agent's `Model::apply` sends each batch's items, formatted
+as headless runs print them (`trace.rs`), as a `ClientMessage::Trace`, before the outcome of the step it came in. The
+test's side prints them under the step `Remote` took last (named as `Headless` names its steps).
 
 ### On a real platform (`--target`)
 
@@ -362,8 +372,8 @@ locale, reduced motion, safe area).
 
 Routes and storage reach the host through the dev server (`HostOptions`, `DevServer::set_test_storage` and
 `set_test_network`). Before the first bundle, the server sends the test host a `ServerMessage::TestSetup` with the
-seeded storage; the host's `Tester` hands it to `Model::set_up`, and the engine starts with `Model::engine_storage`
-(a `MemoryStorage` holding those entries) and `Model::engine_network` (`agent/forward.rs`'s `ForwardNetwork`). Each
+seeded storage; the host's `Tester` hands it to `Model::set_up`, and `Model::set_up_engine` starts the engine on a
+`MemoryStorage` holding those entries and on `agent/forward.rs`'s `ForwardNetwork`. Each
 request the app makes goes back as a `ClientMessage::Fetch` with an id (`FetchCancel` when the app drops it); the
 test's side answers it from its routes (`protocol::TestNetwork`, `run.rs`'s `HostRoutes` over the same
 `StubNetwork` headless runs use, recording every request for `app.requests()`) with `ServerMessage::Fetch` replies:

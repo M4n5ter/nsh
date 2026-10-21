@@ -56,6 +56,13 @@ pub enum ClientEvent {
     },
     /// A log line from a host.
     Log(ClientLog),
+    /// The mount items of a batch a traced test session's app applied, a
+    /// line each ([`DevServer::set_test_trace`]); before the outcome of the
+    /// step it came in.
+    Trace {
+        /// The items.
+        items: Vec<String>,
+    },
 }
 
 /// A log line received from a dev host.
@@ -104,6 +111,8 @@ struct Patch {
 
 #[derive(Clone)]
 enum Event {
+    /// The app is the host's own Rust root ([`DevServer::publish_root`]).
+    Root,
     Building,
     Failed(Arc<str>),
     Patch(Arc<Patch>),
@@ -144,6 +153,8 @@ struct Shared {
     next_connection: AtomicU64,
     /// What a test session's app starts with: its storage's entries.
     test_storage: Mutex<Vec<(String, String)>>,
+    /// Whether a test session's app is traced ([`DevServer::set_test_trace`]).
+    test_trace: AtomicBool,
     /// What answers a test session's app's requests.
     test_network: Mutex<Option<Arc<dyn TestNetwork>>>,
 }
@@ -203,6 +214,7 @@ impl DevServer {
             next_step: AtomicU64::new(1),
             next_connection: AtomicU64::new(1),
             test_storage: Mutex::default(),
+            test_trace: AtomicBool::new(false),
             test_network: Mutex::new(None),
         });
         let listener = runtime.block_on(tokio::net::TcpListener::bind(addr))?;
@@ -285,6 +297,13 @@ impl DevServer {
     /// (hosts connecting from now on).
     pub fn set_test_storage(&self, entries: Vec<(String, String)>) {
         *self.shared.test_storage.lock().expect("storage lock") = entries;
+    }
+
+    /// Traces a test session's app (`nsh test --trace`; hosts connecting
+    /// from now on): its engine logs each commit's timings, and each batch
+    /// it applies comes as a [`ClientEvent::Trace`].
+    pub fn set_test_trace(&self, trace: bool) {
+        self.shared.test_trace.store(trace, Ordering::Relaxed);
     }
 
     /// What answers a test session's app's requests: without one, the
@@ -381,6 +400,13 @@ impl DevServer {
             app_id: app.id,
             ui_sets,
         })));
+    }
+
+    /// Publishes the app as the hosts' own Rust root (`nsh.json` `"root"`,
+    /// an app of Rust only, whose hosts are built with it): they run it in
+    /// place of a bundle.
+    pub fn publish_root(&self) {
+        self.set(Event::Root);
     }
 
     /// Publishes a build error; clients keep running the last good bundle
@@ -583,7 +609,8 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
     if testing {
         // Before the first bundle: what the app starts with.
         let storage = shared.test_storage.lock().expect("storage lock").clone();
-        send(&mut socket, &ServerMessage::TestSetup { storage }).await?;
+        let trace = shared.test_trace.load(Ordering::Relaxed);
+        send(&mut socket, &ServerMessage::TestSetup { storage, trace }).await?;
     }
     // The app's requests the test answers, by id: what cancels them.
     let fetches: Arc<Mutex<Cancels>> = Arc::default();
@@ -631,6 +658,9 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
                                 fetches.lock().expect("fetches lock").insert(id, cancel);
                             }
                         }
+                    }
+                    Ok(ClientMessage::Trace { items }) => {
+                        (shared.on_event)(ClientEvent::Trace { items });
                     }
                     Ok(ClientMessage::FetchCancel { id }) => {
                         let cancel = fetches.lock().expect("fetches lock").remove(&id);
@@ -771,6 +801,7 @@ async fn send_event(
     event: &Event,
 ) -> Result<(), BoxError> {
     match event {
+        Event::Root => send(socket, &ServerMessage::Root).await,
         Event::Building => send(socket, &ServerMessage::Building).await,
         // It cannot run the last good build either: it keeps showing why.
         Event::Failed(_) if host.refused.is_some() => Ok(()),
