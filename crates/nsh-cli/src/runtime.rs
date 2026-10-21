@@ -263,9 +263,6 @@ impl WebKind {
     }
 }
 
-/// The web runtime ([`WebRuntime`]) of `kind`. In a checkout it is built
-/// first when `build` is set; without it, the build that is there, if any
-/// (`None`).
 /// The web runtime `nsh test --target web` runs apps in: the development
 /// host's, a Rust app's too ([`crate::rust_app::RustApp::test_web`]).
 pub(crate) fn test_web() -> anyhow::Result<WebRuntime> {
@@ -275,6 +272,9 @@ pub(crate) fn test_web() -> anyhow::Result<WebRuntime> {
     }
 }
 
+/// The web runtime ([`WebRuntime`]) of `kind`. In a checkout it is built
+/// first when `build` is set; without it, the build that is there, if any
+/// (`None`).
 pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntime>> {
     const WASM: &str = "wasm32-unknown-unknown";
     // An app with Rust components of its own: a runtime with its set.
@@ -352,9 +352,6 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
     Ok(None)
 }
 
-/// Path of the development host (`runner` false) or release runner for
-/// `platform` ([`Platform::binary`]): for an app with a Rust crate, its own
-/// build.
 /// The development host `nsh test --target` runs apps in on `platform`: a
 /// Rust app's too ([`crate::rust_app::RustApp::test_host`]).
 pub(crate) fn test_host(platform: Platform) -> anyhow::Result<PathBuf> {
@@ -364,6 +361,9 @@ pub(crate) fn test_host(platform: Platform) -> anyhow::Result<PathBuf> {
     }
 }
 
+/// Path of the development host (`runner` false) or release runner for
+/// `platform` ([`Platform::binary`]): for an app with a Rust crate, its own
+/// build.
 pub(crate) fn file(platform: Platform, runner: bool) -> anyhow::Result<PathBuf> {
     if let Some(app) = crate::rust_app::current() {
         return app.runtime(platform, runner);
