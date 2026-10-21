@@ -33,7 +33,7 @@ pub(super) enum Side {
 #[derive(Default)]
 pub(crate) struct TouchState {
     /// The components' listening nodes around each finger down, innermost
-    /// first.
+    /// first. Empty paths still count while a responder owns all contacts.
     paths: Vec<(u32, Vec<NodeId>)>,
     responder: Option<NodeId>,
     /// Since the first finger went down, then since the grant.
@@ -55,6 +55,21 @@ impl TouchState {
 type Pick = fn(&ResponderEl) -> Option<&Listener<ResponderEvent>>;
 
 impl<M: TextEngine> Core<M> {
+    /// Forgets a physically cancelled native contact without calling listeners.
+    /// Unknown contacts leave other gestures intact. The last contact releases
+    /// this side's responder and its native scroll block.
+    pub fn cancel_touch(&mut self, contact: u32) {
+        let state = &mut self.components.touch;
+        let before = state.paths.len();
+        state.paths.retain(|(id, _)| *id != contact);
+        if state.paths.len() == before || !state.paths.is_empty() {
+            return;
+        }
+        state.responder = None;
+        state.gesture = PanGesture::default();
+        self.block_native(Side::Rust, None);
+    }
+
     /// A touch event of the surface (`payload` is `touch`): the components'
     /// handlers on the finger's path, the negotiation, the responder's
     /// events.
@@ -76,9 +91,7 @@ impl<M: TextEngine> Core<M> {
                     .collect();
                 let paths = &mut self.components.touch.paths;
                 paths.retain(|(finger, _)| *finger != p.id);
-                if !path.is_empty() {
-                    paths.push((p.id, path));
-                }
+                paths.push((p.id, path));
             }
         }
         let down = touch

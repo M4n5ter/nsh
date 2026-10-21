@@ -330,6 +330,54 @@ impl InputSource {
         }
     }
 
+    /// Ends this surface's NSH-owned Mouse capture after a physical release,
+    /// leave, focus loss or resize, without invoking application callbacks.
+    ///
+    /// This is independent of frame admission: the embedding must own that
+    /// physical mouse. It cancels the existing owner, never a newly hit view.
+    /// Native hover is cleared until the next real move. Registered GPUI
+    /// components retain their own GPUI capture lifecycle.
+    pub fn cancel_pointer(&self) {
+        let Some(surface) = self.surface.upgrade() else {
+            return;
+        };
+        surface.input.presented_press.borrow_mut().take();
+        if let Some(mut pointer) = take(&surface, Key::Mouse) {
+            if let Some(item) = pointer.item.take() {
+                // The capturing built-ins are Input/Text, Dialog and video
+                // controls. Their Cancel only clears native drag state.
+                item.send(
+                    &surface,
+                    PointerKind::Cancel,
+                    (pointer.x, pointer.y),
+                    1,
+                    pointer.modifiers,
+                );
+            }
+            release_pressed(&surface, &mut pointer);
+            if let Mode::Thumb(view, _) | Mode::Scroll(view, _) = pointer.mode {
+                crate::scroll::cancel_pointer(&surface, &view);
+            }
+            if pointer.reporting {
+                // Surface::stop clears pointers before another load starts,
+                // so this is still the engine that owns this contact id.
+                surface.control(|control| control.cancel_touch(pointer.id));
+            }
+        }
+        surface.input_pressed.set(0);
+        let at = surface.input.last.take();
+        for view in surface.input.hovered.take() {
+            set_state(&surface, &view, HOVERED, false);
+        }
+        let hover_item = surface.input.hover_item.borrow_mut().take();
+        if let Some(item) = hover_item
+            && let Some(at) = at
+        {
+            // Leave only resets the hosted built-ins' native hover state.
+            item.send(&surface, PointerKind::Leave, at, 0, Modifiers::default());
+        }
+    }
+
     /// Whether the original focused Input still accepts native text editing.
     ///
     /// Use immediately before this AppView's existing InputHandler text or paste

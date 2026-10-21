@@ -7167,6 +7167,59 @@ mod touch {
     }
 
     #[test]
+    fn physical_contact_cleanup_preserves_other_contacts_and_never_calls_rust_listeners() {
+        let (mut c, outer, inner) = pad(false);
+        let path = [inner, outer];
+        c.component_event(
+            ROOT_ID,
+            EventKind::Touch,
+            &touch(TouchPhase::Start, &path, 20.0, 0.0),
+        );
+        let EventPayload::Touch(mut second) = touch(TouchPhase::Start, &path, 20.0, 16.0) else {
+            unreachable!();
+        };
+        let mut first = second.points[0].clone();
+        first.changed = false;
+        second.points[0].id = 8;
+        // A second contact has no Rust listeners on its own path, but the
+        // existing responder still owns its moves until every contact ends.
+        second.points[0].path.clear();
+        second.points.insert(0, first);
+        c.component_event(ROOT_ID, EventKind::Touch, &EventPayload::Touch(second));
+        assert_eq!(
+            log(&c.commit().unwrap()).unwrap(),
+            "touch Start|grant at 10,5"
+        );
+
+        c.cancel_touch(7);
+        c.cancel_touch(7);
+        c.cancel_touch(99);
+        let EventPayload::Touch(mut movement) = touch(TouchPhase::Move, &path, 40.0, 32.0) else {
+            unreachable!();
+        };
+        movement.points[0].id = 8;
+        c.component_event(ROOT_ID, EventKind::Touch, &EventPayload::Touch(movement));
+        let batch = c.commit().unwrap();
+        assert!(commands(&batch).is_empty());
+        let moved = log(&batch).unwrap();
+        assert!(moved.starts_with("touch Start|grant at 10,5|move "));
+
+        c.cancel_touch(8);
+        let batch = c.commit().unwrap();
+        assert_eq!(commands(&batch), [(ROOT_ID, Command::ClearJsResponder)]);
+        assert_eq!(log(&batch), None, "cancellation never calls a listener");
+        c.component_event(
+            ROOT_ID,
+            EventKind::Touch,
+            &touch(TouchPhase::Start, &path, 20.0, 48.0),
+        );
+        assert_eq!(
+            log(&c.commit().unwrap()).unwrap(),
+            format!("{moved}|touch Start|grant at 10,5")
+        );
+    }
+
+    #[test]
     fn js_and_component_responders_share_the_native_block() {
         let (mut c, outer, inner) = pad(false);
         apply(
@@ -7210,6 +7263,21 @@ mod touch {
         assert_eq!(
             commands(&c.commit().unwrap()),
             [(2, Command::SetJsResponder { block: true })]
+        );
+        c.component_event(
+            ROOT_ID,
+            EventKind::Touch,
+            &touch(TouchPhase::Start, &[inner, outer], 0.0, 32.0),
+        );
+        assert_eq!(
+            commands(&c.commit().unwrap()),
+            [(inner, Command::SetJsResponder { block: true })]
+        );
+        c.cancel_touch(7);
+        assert_eq!(
+            commands(&c.commit().unwrap()),
+            [(2, Command::SetJsResponder { block: true })],
+            "physical cleanup only releases the Rust side's native block"
         );
         apply(
             &mut c,

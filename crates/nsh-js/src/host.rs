@@ -643,6 +643,23 @@ impl Host {
             .with(|cx| crate::dom::input_action_event(cx.as_raw().as_ptr(), id, token).is_some())
     }
 
+    /// Forgets a physically cancelled native contact without handlers or jobs.
+    /// The last known contact releases the JS responder and native scroll block;
+    /// cancelling an unknown contact is inert, including repeated cancellation.
+    pub fn cancel_touch(&self, contact: u32) {
+        if self
+            .cx
+            .with(|cx| crate::touch::cancel_touch(cx.as_raw().as_ptr(), contact))
+        {
+            // Trusted native cleanup remains possible when the app filled its
+            // own op quota. It creates no JS values and never enters app code.
+            self.shared.ops.borrow_mut().push(Op::Command {
+                id: nsh_core::ROOT_ID,
+                command: nsh_core::Command::ClearJsResponder,
+            });
+        }
+    }
+
     /// Delivers an event to the sealed action captured by a presented input.
     /// `None` rejects a changed binding or mismatched route before app entry;
     /// `Some(false)` is an unsubscribed phase. Component event names and drops

@@ -1157,6 +1157,19 @@ pub(crate) fn thumb_end(surface: &Rc<Surface>, view: &NshView) {
     release(surface, view, 0.0, 0.0);
 }
 
+/// A physical capture was lost: stop its native phase without end callbacks.
+pub(crate) fn cancel_pointer(surface: &Rc<Surface>, view: &NshView) {
+    if !matches!(phase(view), Phase::Thumb { .. } | Phase::Drag { .. }) {
+        return;
+    }
+    set_phase(view, Phase::Idle);
+    if let Some(scroll) = view.state_mut().scroll.as_mut() {
+        scroll.live.shown = now(surface);
+    }
+    view.changed();
+    ensure_ticking(surface, view);
+}
+
 /// The indicator's rectangle `(x, y, width, height)` in its view and how
 /// far it can travel along its track, or `None` when the content fits.
 fn thumb(state: &ViewState) -> Option<((f32, f32, f32, f32), f32)> {

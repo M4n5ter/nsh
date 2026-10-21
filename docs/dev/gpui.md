@@ -217,6 +217,12 @@ pointer without callbacks when the embedding loses it. `editor_matches` only per
 retains native and window focus. Use this AppView's existing text/paste handler immediately after the check, without
 another dispatch or pump. The query does not authorize KeyDown callbacks or keymap commands.
 
+On a physical mouse release, leave, focus loss or resize, an embedding that owns that reader can call
+`cancel_pointer` to end the existing NSH native capture and hover, including an Input selection or Scroll thumb.
+It silently forgets that contact in the original engine; it does not deliver an application responder-terminate
+callback. It does not pick a replacement owner or synthesize pointer coordinates. Registered GPUI components
+retain their own GPUI capture lifecycle. Rejecting a foreign frame alone does not authorize this cancellation.
+
 ## Frame statistics: `--fps`
 
 `nsh-gpui-host --fps` (`AppOptions::fps`, `AppView::set_fps_monitor` for embedders) logs one `nsh::perf` line a

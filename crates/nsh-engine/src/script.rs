@@ -229,6 +229,10 @@ mod imp {
             self.host.input_action_matches(id, token)
         }
 
+        pub(crate) fn cancel_touch(&self, contact: u32) {
+            self.host.cancel_touch(contact);
+        }
+
         pub(crate) fn deliver_bound_now(
             &self,
             event: nsh_core::ui::JsEvent,
@@ -386,6 +390,10 @@ mod stub {
         }
 
         pub(crate) fn input_action_matches(&self, _: NodeId, _: u64) -> bool {
+            match *self {}
+        }
+
+        pub(crate) fn cancel_touch(&self, _: u32) {
             match *self {}
         }
 

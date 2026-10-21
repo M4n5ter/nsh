@@ -420,3 +420,78 @@ fn editor_text_lease_survives_its_own_edits_but_never_targets_a_different_focus_
         Some("maka🦀")
     );
 }
+
+#[test]
+fn physical_mouse_cleanup_ends_native_selection_thumb_and_hover_without_a_new_hit() {
+    let surface = new_surface();
+    let scroll = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
+    {
+        let mut state = scroll.state_mut();
+        let scroll = state.scroll.as_mut().unwrap();
+        scroll.content = (300.0, 1200.0);
+        scroll.indicator = true;
+    }
+    let editor = view(&surface, 4, 2, ViewKind::Input);
+    editor.state_mut().frame.size.width = Points(200.0);
+    track_states(&surface, &editor, PRESSED | HOVERED);
+    crate::text_input::focus_view(&surface, &editor);
+    crate::text_input::char_input(&surface, "maka");
+    let source = InputSource::new(&surface);
+    let mouse = |kind, x, y| {
+        pointer(
+            &surface,
+            PointerEvent {
+                kind,
+                x,
+                y,
+                button: 0,
+                pointer: 1,
+                touch: false,
+                pen: false,
+                time: surface.clock(),
+                modifiers: Modifiers::default(),
+                clicks: 1,
+            },
+        );
+    };
+    mouse(PointerKind::Move, 20.0, 20.0);
+    mouse(PointerKind::Down, 20.0, 20.0);
+    assert_eq!(editor.state().states, PRESSED | HOVERED);
+    assert_eq!(surface.input.pointers.borrow().len(), 1);
+    source.cancel_pointer();
+    assert!(surface.input.pointers.borrow().is_empty());
+    assert_eq!(surface.input_pressed.get(), 0);
+    assert_eq!(editor.state().states, 0);
+    assert_eq!(surface.input.last.get(), None);
+    let movement = ItemPointer {
+        kind: PointerKind::Move,
+        x: 50.0,
+        y: 20.0,
+        clicks: 1,
+        modifiers: Modifiers::default(),
+    };
+    assert!(!crate::text_input::pointer(&surface, &editor, &movement));
+    mouse(PointerKind::Down, 20.0, 20.0);
+    assert!(crate::text_input::pointer(&surface, &editor, &movement));
+    source.cancel_pointer();
+    assert_eq!(
+        crate::text_input::current_text(&editor).as_deref(),
+        Some("maka")
+    );
+
+    mouse(PointerKind::Down, 296.0, 20.0);
+    assert!(matches!(
+        &surface.input.pointers.borrow()[0].mode,
+        Mode::Thumb(view, _) if *view == scroll
+    ));
+    source.cancel_pointer();
+    assert!(surface.input.pointers.borrow().is_empty());
+    crate::scroll::thumb_move(&surface, &scroll, 0.0, 10_000.0);
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, 0.0);
+    mouse(PointerKind::Down, 296.0, 20.0);
+    mouse(PointerKind::Move, 296.0, 10_020.0);
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, 900.0);
+    source.cancel_pointer();
+    assert!(surface.input.pointers.borrow().is_empty());
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, 900.0);
+}

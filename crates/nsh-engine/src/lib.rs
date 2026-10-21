@@ -786,6 +786,7 @@ const MAX_ADVANCE_ROUNDS: usize = 100_000;
 enum Message {
     Event(NodeId, EventKind, EventPayload),
     BoundEvent(NodeId, EventKind, EventPayload, u64),
+    CancelTouch(u32),
     Scroll(NodeId, Point<Points>, u32),
     Zoom(NodeId, f32),
     ComponentSize(NodeId, Size<Points>),
@@ -842,6 +843,16 @@ pub struct EngineControl {
 }
 
 impl EngineControl {
+    /// Forgets this engine's physically cancelled native contact in FIFO order.
+    /// Its pending touch point is discarded without invoking handlers or JS jobs;
+    /// other contacts retain their queued moves and responders. The platform
+    /// separately clears its native pointer capture on the same original load.
+    /// A coalesced native activation is conservatively discarded if the
+    /// cancelled contact changed in that packet; its owner is not per-contact.
+    pub fn cancel_touch(&self, contact: u32) {
+        let _ = self.tx.send(Message::CancelTouch(contact));
+    }
+
     /// Delivers an input event (and its data) to a node.
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: EventPayload) {
         let _ = self.tx.send(Message::Event(id, event, payload));
@@ -2234,6 +2245,25 @@ fn deliver_bound_event<M: TextEngine>(
 /// Returns false on shutdown.
 fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message: Message) -> bool {
     match message {
+        Message::CancelTouch(contact) => {
+            if let Some((_, pending)) = &mut state.touch_move {
+                if pending
+                    .points
+                    .iter()
+                    .any(|point| point.id == contact && point.changed)
+                {
+                    pending.activated = None;
+                }
+                pending.points.retain(|point| point.id != contact);
+                if !pending.points.iter().any(|point| point.changed) {
+                    state.touch_move = None;
+                }
+            }
+            state.core.cancel_touch(contact);
+            if let Some(script) = script {
+                script.cancel_touch(contact);
+            }
+        }
         Message::BoundEvent(id, event, payload, binding) => {
             state.dispatch_hover_moves(script);
             let _ = deliver_bound_event(script, &mut state.core, id, event, &payload, binding);
@@ -2997,6 +3027,142 @@ mount(() => <View>
             frame(),
             "button,timer",
             "the final input precedes due timers too"
+        );
+    }
+
+    #[cfg(feature = "js")]
+    #[test]
+    fn cancelling_one_native_contact_keeps_the_other_move_without_responder_callbacks() {
+        use nsh_core::{
+            ApproxTextEngine, Command, EventKind, EventPayload, MountItem, Points, ROOT_ID,
+            TouchEvent, TouchPhase, TouchPoint,
+        };
+
+        use super::{Bundle, EngineConfig, LocalEngine, MountSink};
+
+        struct Sink(crossbeam_channel::Sender<nsh_core::MountBatch>);
+        impl MountSink for Sink {
+            fn submit(&self, batch: nsh_core::MountBatch) {
+                self.0.send(batch).unwrap();
+            }
+        }
+        let source = nsh_bundler::compile_module(
+            "cancel-contact.tsx",
+            r#"import { mount, signal, Text, View } from "nsh";
+const log = signal("");
+const record = value => log.set(`${log()}${value}|`);
+mount(() => <View>
+  <View testID="pad"
+    onStartShouldSetResponder={() => true}
+    onResponderGrant={() => { record("grant"); return true; }}
+    onTouchMove={event => record(`move:${event.changedTouches.map(p => p.identifier).join(",")}`)}
+    onResponderMove={() => record("responder-move")}
+    onResponderTerminate={() => record("terminate")}
+    onResponderRelease={() => record("release")} />
+  <View testID="probe" onPress={() => record("probe")} />
+  <Text>{`log ${log()}`}</Text>
+</View>);"#,
+            &[],
+        )
+        .unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut engine = LocalEngine::start(
+            EngineConfig::new(Bundle::source(source)),
+            ApproxTextEngine,
+            Sink(tx),
+        )
+        .unwrap();
+        let first = rx.try_recv().unwrap();
+        let node = |name| {
+            first
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    MountItem::ViewProps { id, props }
+                        if props.test_id.as_deref() == Some(name) =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        let (pad, probe) = (node("pad"), node("probe"));
+        let control = engine.control();
+        let touch = |phase, contacts: &[(u32, bool)]| {
+            control.dispatch_event(
+                ROOT_ID,
+                EventKind::Touch,
+                EventPayload::Touch(Box::new(TouchEvent {
+                    phase,
+                    timestamp: 0.0,
+                    activated: None,
+                    points: contacts
+                        .iter()
+                        .map(|&(id, changed)| TouchPoint {
+                            id,
+                            target: pad,
+                            path: if phase == TouchPhase::Start {
+                                vec![pad]
+                            } else {
+                                Vec::new()
+                            },
+                            page: nsh_core::geometry::point(Points(20.0), Points(20.0)),
+                            location: nsh_core::geometry::point(Points(20.0), Points(20.0)),
+                            changed,
+                        })
+                        .collect(),
+                })),
+            );
+        };
+        let frame = || {
+            let items = rx
+                .try_iter()
+                .flat_map(|batch| batch.items)
+                .collect::<Vec<_>>();
+            let log = items
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    MountItem::Text { text, .. } if text.text.starts_with("log ") => {
+                        Some(text.text.clone())
+                    }
+                    _ => None,
+                })
+                .expect("a positive output fence");
+            (log, items)
+        };
+        touch(TouchPhase::Start, &[(1, true)]);
+        touch(TouchPhase::Start, &[(1, false), (2, true)]);
+        engine.pump();
+        assert_eq!(frame().0, "log grant|");
+
+        touch(TouchPhase::Move, &[(1, true), (2, true)]);
+        control.cancel_touch(1);
+        control.cancel_touch(1);
+        control.cancel_touch(99);
+        engine.pump();
+        assert_eq!(frame().0, "log grant|move:2|responder-move|");
+
+        control.cancel_touch(2);
+        control.dispatch_event(probe, EventKind::Press, EventPayload::None);
+        engine.pump();
+        let (log, items) = frame();
+        assert_eq!(log, "log grant|move:2|responder-move|probe|");
+        assert!(items.iter().any(|item| matches!(
+            item,
+            MountItem::Command {
+                id: ROOT_ID,
+                command: Command::ClearJsResponder
+            }
+        )));
+
+        touch(TouchPhase::Start, &[(3, true)]);
+        touch(TouchPhase::End, &[(3, true)]);
+        engine.pump();
+        assert_eq!(
+            frame().0,
+            "log grant|move:2|responder-move|probe|grant|release|"
         );
     }
 

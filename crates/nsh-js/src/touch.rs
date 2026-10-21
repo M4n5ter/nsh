@@ -171,6 +171,19 @@ fn touches<'a>(cx: *mut JsContext) -> &'a Touches {
     unsafe { &(*crate::state::state(cx)).touches }
 }
 
+/// Returns whether the last known contact released a native JS scroll block.
+/// This is native bookkeeping: no handler, JS value or pending job is touched.
+pub(crate) fn cancel_touch(cx: *mut JsContext, contact: u32) -> bool {
+    let state = touches(cx);
+    let mut paths = state.paths.borrow_mut();
+    if paths.remove(&contact).is_none() || !paths.is_empty() {
+        return false;
+    }
+    state.responder.set(None);
+    state.gesture.set(PanGesture::default());
+    state.blocks.replace(false)
+}
+
 fn number(v: f64) -> JsValue {
     qjs::JS_NewFloat64(v)
 }
