@@ -58,6 +58,23 @@ fn click(down: bool) -> PlatformInput {
     }
 }
 
+fn key_event(key: &str, down: bool) -> PlatformInput {
+    let keystroke = gpui::Keystroke {
+        key: key.to_owned(),
+        key_char: None,
+        modifiers: gpui::Modifiers::default(),
+    };
+    if down {
+        PlatformInput::KeyDown(gpui::KeyDownEvent {
+            keystroke,
+            is_held: false,
+            prefer_character_input: false,
+        })
+    } else {
+        PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
+    }
+}
+
 #[test]
 fn presented_wheels_keep_the_original_scroll_across_growth_and_a_new_nested_owner() {
     let surface = new_surface();
@@ -175,6 +192,12 @@ fn sealed_press_rebinding_cancels_the_original_capture_without_releasing_into_it
         state.events.set(EventKind::Press, true);
         state.tracked = PRESSED;
     }
+    let area = view(&surface, 4, ROOT_ID, ViewKind::View);
+    area.state_mut().frame = crate::geom::rect(320.0, 0.0, 60.0, 300.0);
+    area.state_mut().props.selection_area = true;
+    crate::selection_area::down(&surface, &area, &area, (330.0, 20.0), 1, false);
+    crate::selection_area::pointer(&surface, PointerKind::Up, 330.0, 20.0);
+    assert_eq!(crate::selection_area::keyboard_owner(&surface), Some(area));
     let source = InputSource::new(&surface);
     let first = source.sample().unwrap();
     assert_eq!(
@@ -182,6 +205,7 @@ fn sealed_press_rebinding_cancels_the_original_capture_without_releasing_into_it
         InputDisposition::Handled
     );
     assert_eq!(button.state().states, PRESSED);
+    assert_eq!(crate::selection_area::keyboard_owner(&surface), None);
     button.state_mut().props.input_action = Some(8);
     assert_eq!(
         source.dispatch(&first, &click(false)),
@@ -201,6 +225,16 @@ fn sealed_press_rebinding_cancels_the_original_capture_without_releasing_into_it
         InputDisposition::Handled
     );
     assert_eq!(button.state().states, 0);
+    let keyboard = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&keyboard, &key_event("enter", true)),
+        InputDisposition::Handled
+    );
+    button.state_mut().props.input_action = Some(9);
+    assert_eq!(
+        source.dispatch(&keyboard, &key_event("enter", true)),
+        InputDisposition::Rejected
+    );
     // A foreign/default snapshot never acquires a press on this surface.
     assert_eq!(
         source.dispatch(&InputSnapshot::default(), &click(true)),
@@ -434,6 +468,56 @@ fn editor_text_lease_survives_its_own_edits_but_never_targets_a_different_focus_
             .as_deref(),
         Some("maka🦀")
     );
+}
+
+#[test]
+fn native_keys_keep_the_original_editor_through_redraws_and_release_after_tab() {
+    let surface = new_surface();
+    let editor = view(&surface, 2, ROOT_ID, ViewKind::Input);
+    let next = view(&surface, 4, ROOT_ID, ViewKind::Input);
+    crate::text_input::focus_view(&surface, &editor);
+    let source = InputSource::new(&surface);
+    let original = source.sample().unwrap();
+    crate::text_input::char_input(&surface, "ab");
+    surface.resized(500.0, 450.0, 1.0);
+    editor.state_mut().frame.size.height = Points(180.0);
+    assert_eq!(
+        source.dispatch(&original, &key_event("backspace", true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        crate::text_input::accessible_value(&editor).unwrap().text,
+        "a"
+    );
+    assert_eq!(
+        source.dispatch(&original, &key_event("tab", true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        crate::text_input::focused_view(&surface),
+        Some(next.clone())
+    );
+    assert_eq!(
+        source.dispatch(&original, &key_event("tab", false)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&original, &key_event("backspace", true)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(crate::text_input::accessible_value(&next).unwrap().text, "");
+
+    // A route without native focus may pick scrolling under the live pointer.
+    crate::text_input::blur_all(&surface);
+    let scroll = view(&surface, 6, ROOT_ID, ViewKind::Scroll);
+    scroll.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(1200.0));
+    surface.input.last.set(Some((20.0, 20.0)));
+    let unfocused = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&unfocused, &key_event("down", true)),
+        InputDisposition::ExactFallback
+    );
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, Points(0.0));
 }
 
 #[test]

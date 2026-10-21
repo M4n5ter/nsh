@@ -631,6 +631,16 @@ pub(crate) fn context_menu(surface: &Rc<Surface>, area: &NshView) {
     );
 }
 
+/// The retained area owner, independent of its changing selection range.
+pub(crate) fn keyboard_owner(surface: &Surface) -> Option<NshView> {
+    ACTIVE.with_borrow(|active| {
+        active
+            .as_ref()
+            .filter(|active| active.surface == surface.key() && active.area.attached())
+            .map(|active| active.area.clone())
+    })
+}
+
 /// Keys for the active area's selection (Ctrl+C or Ctrl+Insert, Ctrl+A,
 /// Escape; Cmd on macOS); true when handled. Ctrl+A selects the area last
 /// pressed; copying and Escape need a selection.
@@ -643,13 +653,10 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         return false;
     }
     let key = surface.key();
-    let Some((area, empty)) = ACTIVE.with_borrow(|a| {
-        a.as_ref()
-            .filter(|a| a.surface == key && a.area.attached())
-            .map(|a| (a.area.clone(), a.model.is_empty()))
-    }) else {
+    let Some(area) = keyboard_owner(surface) else {
         return false;
     };
+    let empty = ACTIVE.with_borrow(|active| active.as_ref().unwrap().model.is_empty());
     let m = event.modifiers;
     let command = if cfg!(target_os = "macos") {
         m.meta && !m.ctrl

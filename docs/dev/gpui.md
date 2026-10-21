@@ -208,8 +208,16 @@ draw's pixels. The output writer publishes the pair after its successful present
 bounded frame-token table until queued input releases each snapshot; unknown and retired tokens are rejected.
 Snapshots stay on the GPUI thread and retain native view identities and immutable hit geometry.
 
-`InputSource::dispatch` routes an ordinary sealed press or discrete wheel to its original native owner. A wheel
-remains on that Scroll as its offset or content changes, including a zero-distance edge clamp. `ExactFallback`
+`InputSource::dispatch` routes an ordinary sealed press, discrete wheel or native key to its original owner. A wheel
+remains on that Scroll as its offset or content changes, including a zero-distance edge clamp. Keys retain their
+original native focus, ancestry, modal scope and keymap registration while unrelated pixels change. They use the
+existing native key route in order: typing then Return submits the Input's current text. A focused button's
+Return/Space retains its original `inputAction`; replacing the owner or winning binding rejects the old key.
+Selection ranges can change within the same text or SelectionArea owner. KeyUp releases the same surface/load's
+held key even when its KeyDown moved focus. Hosted controls, opaque window overrides and routes without a native
+focus owner or matching binding still require exact pixels. Stable keymap registrations keep their ordinary live
+handler semantics; an app that must retain a specific business target should capture it in an `inputAction` and
+rebind when it changes. `ExactFallback`
 requires the embedding's exact-frame GPUI path; `Rejected` never falls back. `cancel_capture` clears a leased
 pointer without callbacks when the embedding loses it. `editor_matches` only permits the original Input while it
 retains native and window focus. Use this AppView's existing text/paste handler immediately after the check, without

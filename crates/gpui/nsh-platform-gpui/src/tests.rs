@@ -134,6 +134,50 @@ function App() {
 mount(App);
 "#;
 
+const PRESENTED_KEYBOARD: &str = r#"
+import { effect, Input, mount, signal, Text, View } from "nsh";
+import { keymap } from "nsh/keymap";
+
+function App() {
+  const owner = signal(0), thinking = signal(0), focused = signal("");
+  const submitted = signal(""), escapes = signal(0), moves = signal(0);
+  const revision = signal(0), hit = signal("");
+  let editor, next;
+  keymap.bind("f7", () => thinking.set(thinking() + 1), { when: "always" });
+  keymap.bind("f8", () => owner.set(owner() + 1), { when: "always" });
+  keymap.bind("f10", () => revision.set(revision() + 1), { when: "always" });
+  keymap.bind("f9", () => {
+    moves.set(moves() + 1);
+    (focused() === "next" ? editor : next).focus();
+  }, { when: "always" });
+  return <View style={{ flex: 1 }}>
+    <Input testID="report" readonly focusable={false}
+      value={`${owner()}|${thinking()}|${focused()}|${submitted()}|${escapes()}|${moves()}|${revision()}|${hit()}`}
+      style={{ height: 30 }} />
+    <Text>Thinking {thinking()}</Text>
+    <Each of={[owner()]} key={(id) => id}>{(row) => {
+      const id = row();
+      return <View ref={(node) => {
+        keymap.bind("escape", () => escapes.set(escapes() + 1), { when: "always", within: node });
+        effect(() => {
+          const version = revision();
+          return keymap.bind("f6", () => hit.set(`${id}:${version}`), { when: "always", within: node });
+        });
+      }}>
+        <Input testID="editor" ref={(node) => editor = node} autoFocus multiline
+          submitBehavior="submit" defaultValue=""
+          onFocus={() => focused.set(`editor:${id}`)}
+          onSubmit={(event) => submitted.set(`${id}:${event.text}`)}
+          style={{ height: 40 }} />
+      </View>;
+    }}</Each>
+    <Input testID="next" ref={(node) => next = node} defaultValue="next"
+      onFocus={() => focused.set("next")} style={{ height: 30 }} />
+  </View>;
+}
+mount(App);
+"#;
+
 struct FocusSquare {
     focus: Option<FocusHandle>,
 }
@@ -307,6 +351,7 @@ fn windows(cx: &mut TestAppContext) {
     compositions_are_reported_and_hold_values_until_they_end(cx);
     configured_assets_stay_with_their_original_load(cx);
     buttons_keep_native_focus_and_live_key_scopes(cx);
+    presented_keys_keep_their_native_owner_across_redraws(cx);
 }
 
 fn find_test_view(view: &crate::view::NshView, id: &str) -> Option<crate::view::NshView> {
@@ -457,6 +502,90 @@ fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
     wait_for(&view, cx, "@dark");
     cx.simulate_keystrokes("tab f6");
     wait_for_report(&view, cx, "scope:true:true:false@dark");
+    view.update(cx, |view, _| view.stop());
+}
+
+fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext) {
+    use crate::InputDisposition::{Handled, Rejected};
+
+    let code = nsh_bundler::compile_module("App.tsx", PRESENTED_KEYBOARD, &[]).unwrap();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    wait_for_report(&view, cx, "0|0|editor:0||0|0|0|");
+
+    let source = view.read_with(cx, |view, _| view.input_source());
+    let key = |name: &str, down: bool| {
+        let keystroke = gpui::Keystroke::parse(name).unwrap();
+        if down {
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke,
+                is_held: false,
+                prefer_character_input: false,
+            })
+        } else {
+            gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
+        }
+    };
+    let original = source.sample().unwrap();
+    ime(&view, cx, |surface| {
+        assert!(source.editor_matches(&original));
+        // This is the native editor path used by AppView's InputHandler. The
+        // following Return must submit its current text through the same lease.
+        crate::text_input::ime::replace_text_in_range(surface, None, "a");
+        assert_eq!(source.dispatch(&original, &key("enter", true)), Handled);
+        source.dispatch(&original, &key("enter", false));
+    });
+    wait_for_report(&view, cx, "0|0|editor:0|0:a|0|0|0|");
+
+    cx.simulate_keystrokes("f7");
+    wait_for_report(&view, cx, "0|1|editor:0|0:a|0|0|0|");
+    assert!(source.editor_matches(&original));
+    assert_eq!(source.dispatch(&original, &key("escape", true)), Handled);
+    source.dispatch(&original, &key("escape", false));
+    wait_for_report(&view, cx, "0|1|editor:0|0:a|1|0|0|");
+    assert_eq!(source.dispatch(&original, &key("tab", true)), Handled);
+    wait_for_report(&view, cx, "0|1|next|0:a|1|0|0|");
+    source.dispatch(&source.sample().unwrap(), &key("tab", false));
+
+    // A shortcut may transfer focus before its release arrives. The original
+    // release still has to end its held-key state, so the next press can fire.
+    let before_move = source.sample().unwrap();
+    assert_eq!(source.dispatch(&before_move, &key("f9", true)), Handled);
+    wait_for_report(&view, cx, "0|1|editor:0|0:a|1|1|0|");
+    source.dispatch(&before_move, &key("f9", false));
+    let after_move = source.sample().unwrap();
+    assert_eq!(source.dispatch(&after_move, &key("f9", true)), Handled);
+    wait_for_report(&view, cx, "0|1|next|0:a|1|2|0|");
+    source.dispatch(&source.sample().unwrap(), &key("f9", false));
+
+    cx.simulate_keystrokes("shift-tab");
+    wait_for_report(&view, cx, "0|1|editor:0|0:a|1|2|0|");
+    let before_rebind = source.sample().unwrap();
+    cx.simulate_keystrokes("f10");
+    wait_for_report(&view, cx, "0|1|editor:0|0:a|1|2|1|");
+    assert!(source.editor_matches(&before_rebind));
+    assert_eq!(source.dispatch(&before_rebind, &key("f6", true)), Rejected);
+    cx.simulate_keystrokes("f7");
+    wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|1|");
+    let rebound = source.sample().unwrap();
+    assert_eq!(source.dispatch(&rebound, &key("f6", true)), Handled);
+    source.dispatch(&rebound, &key("f6", false));
+    wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|1|0:1");
+
+    let before_scope = source.sample().unwrap();
+    cx.simulate_keystrokes("f8");
+    wait_for_report(&view, cx, "1|2|editor:1|0:a|1|2|1|0:1");
+    assert!(!source.editor_matches(&before_scope));
+    assert_eq!(source.dispatch(&before_scope, &key("f6", true)), Rejected);
+    // A later engine callback makes a rejected callback's absence observable.
+    cx.simulate_keystrokes("f7");
+    wait_for_report(&view, cx, "1|3|editor:1|0:a|1|2|1|0:1");
+    let current = source.sample().unwrap();
+    assert_eq!(source.dispatch(&current, &key("f6", true)), Handled);
+    source.dispatch(&current, &key("f6", false));
+    wait_for_report(&view, cx, "1|3|editor:1|0:a|1|2|1|1:1");
     view.update(cx, |view, _| view.stop());
 }
 

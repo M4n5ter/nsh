@@ -943,7 +943,8 @@ pub(crate) fn key(surface: &Rc<Surface>, event: KeyEvent) -> bool {
     }
     // The window's shortcuts (full screen, the dev host's reload) work
     // wherever the focus is.
-    let shortcut = surface.shortcuts.borrow().iter().any(|f| f(&event));
+    let shortcut = crate::chrome::window_key(surface, &event)
+        || surface.shortcuts.borrow().iter().any(|f| f(&event));
     let handled = shortcut
         || crate::system::key(surface, &event)
         || crate::keymap::key(surface, &event)

@@ -63,11 +63,35 @@ pub(crate) fn clear(surface: &Surface) {
     surface.keymap.table.borrow_mut().take();
 }
 
+/// The immutable native bindings paired with an externally presented focus owner.
+pub(super) fn snapshot(surface: &Surface) -> Option<Arc<Keymap>> {
+    surface.keymap.table.borrow().clone()
+}
+
+/// Resolves the original registration and rejects a newly intercepted key. Repeats are
+/// recorded only by `key`, immediately after the original route has been admitted.
+pub(super) fn presented_match(
+    surface: &Surface,
+    original: Option<&Keymap>,
+    event: &KeyEvent,
+    editing: bool,
+    path: &[nsh_core::NodeId],
+) -> Option<KeyMatch> {
+    let key = keystroke(event)?;
+    let find = |table: Option<&Keymap>| {
+        table.map_or(KeyMatch::None, |table| {
+            table.find_with(key, editing, false, |id| path.contains(&id))
+        })
+    };
+    let original = find(original);
+    (find(surface.keymap.table.borrow().as_deref()) == original).then_some(original)
+}
+
 /// A key down: whether it fired (or, held, repeats) one of the bindings;
 /// then it is consumed.
 pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     let repeat = repeats(&surface.keymap, event);
-    let Some(table) = surface.keymap.table.borrow().clone() else {
+    let Some(table) = snapshot(surface) else {
         return false;
     };
     let Some(keystroke) = keystroke(event) else {

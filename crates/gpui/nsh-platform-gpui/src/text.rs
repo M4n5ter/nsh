@@ -2748,6 +2748,16 @@ fn select_all(surface: u64, view: &NshView) {
     select(surface, view, Some((0, len)));
 }
 
+/// The retained text selection owner, independent of its changing range.
+pub(crate) fn keyboard_owner(surface: &crate::surface::Surface) -> Option<NshView> {
+    SELECTED.with_borrow(|selected| {
+        selected
+            .as_ref()
+            .filter(|(key, view)| *key == surface.key() && view.attached())
+            .map(|(_, view)| view.clone())
+    })
+}
+
 /// Keys for the text selection (Ctrl+C or Ctrl+Insert, Ctrl+A, Escape;
 /// Cmd on macOS); true when handled.
 pub(crate) fn key(surface: &Rc<crate::surface::Surface>, event: &crate::input::KeyEvent) -> bool {
@@ -2758,11 +2768,7 @@ pub(crate) fn key(surface: &Rc<crate::surface::Surface>, event: &crate::input::K
     if !event.down {
         return false;
     }
-    let Some(view) = SELECTED.with_borrow(|s| {
-        s.as_ref()
-            .filter(|(key, v)| *key == surface.key() && v.attached())
-            .map(|(_, v)| v.clone())
-    }) else {
+    let Some(view) = keyboard_owner(surface) else {
         return false;
     };
     let m = event.modifiers;

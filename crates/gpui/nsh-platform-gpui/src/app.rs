@@ -231,12 +231,6 @@ impl AppView {
         *surface.text_system.borrow_mut() = Some(cx.text_system().clone());
         surface.native.set_components(options.components.clone());
         crate::system::watch_environment(&surface, window, cx);
-        // The open menu's keys come before anything focused sees them.
-        let weak = Rc::downgrade(&surface);
-        surface.shortcuts.borrow_mut().push(Box::new(move |event| {
-            weak.upgrade()
-                .is_some_and(|s| crate::chrome::window_key(&s, event))
-        }));
         // The chrome follows the window: full screen, maximized, active.
         cx.observe_window_bounds(window, |_, _, cx| cx.notify())
             .detach();

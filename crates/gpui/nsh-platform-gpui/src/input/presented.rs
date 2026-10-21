@@ -11,6 +11,8 @@ use nsh_core::{Bounds, EdgeInsets, ScrollBehavior, input::laid_out};
 
 use super::*;
 
+mod keyboard;
+
 /// A main-thread input source that does not keep its app alive.
 #[derive(Clone, Default)]
 #[non_exhaustive]
@@ -18,7 +20,7 @@ pub struct InputSource {
     surface: Weak<Surface>,
 }
 
-/// Immutable native hit geometry and original view identities from one draw.
+/// Immutable native hit geometry, focus and original view identities from one draw.
 ///
 /// Keep this on the GPUI thread. Input readers carry the embedding's published
 /// frame token; they never resolve coordinates against the live scene.
@@ -48,12 +50,29 @@ struct Frame {
     scope: NshView,
     blocked: bool,
     root: HitNode,
-    editor: Option<EditorLease>,
+    editor: Option<NativeOwner>,
+    keyboard: Option<keyboard::Lease>,
 }
 
-struct EditorLease {
+#[derive(Clone, PartialEq)]
+struct NativeOwner {
     owner: NshView,
     ancestry: Vec<NshView>,
+}
+
+impl NativeOwner {
+    fn sample(owner: NshView) -> Self {
+        Self {
+            ancestry: chain(&owner),
+            owner,
+        }
+    }
+
+    fn matches(&self, surface: &Surface) -> bool {
+        surface.view(self.owner.id()).as_ref() == Some(&self.owner)
+            && chain(&self.owner) == self.ancestry
+            && self.owner.attached()
+    }
 }
 
 /// Shared by live and sampled hit testing, so clipping and pointer policy
@@ -313,10 +332,8 @@ impl InputSource {
                             && crate::text_input::wants_text(&surface)
                             && crate::text_input::window_active(&surface)
                     })
-                    .map(|owner| EditorLease {
-                        ancestry: chain(&owner),
-                        owner,
-                    }),
+                    .map(NativeOwner::sample),
+                keyboard: keyboard::Lease::sample(&surface),
             })),
         })
     }
@@ -400,8 +417,7 @@ impl InputSource {
             && surface.load_generation() == frame.load
             && crate::navigation::focus_scope(&surface) == frame.scope
             && crate::text_input::focused_view(&surface).as_ref() == Some(&editor.owner)
-            && surface.view(editor.owner.id()).as_ref() == Some(&editor.owner)
-            && chain(&editor.owner) == editor.ancestry
+            && editor.matches(&surface)
             && focusable(&surface, &editor.owner)
             && crate::text_input::wants_text(&surface)
             && crate::text_input::window_active(&surface)
@@ -413,7 +429,9 @@ impl InputSource {
     /// unknown or retired tokens. `ExactFallback` alone permits GPUI dispatch,
     /// after the embedding's additional exact-frame check. A rejected lease
     /// never reinterprets its coordinates. Discrete wheels remain on their
-    /// original enabled Scroll even at an edge or after content grows.
+    /// original enabled Scroll even at an edge or after content grows. Native
+    /// keys stay with their original focus owner and keymap registration,
+    /// using its current editor text without requiring unchanged pixels.
     pub fn dispatch(&self, snapshot: &InputSnapshot, event: &PlatformInput) -> InputDisposition {
         let Some(surface) = self.surface.upgrade() else {
             return InputDisposition::Rejected;
@@ -423,6 +441,9 @@ impl InputSource {
         };
         if !Weak::ptr_eq(&self.surface, &frame.source) {
             return InputDisposition::Rejected;
+        }
+        if matches!(event, PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_)) {
+            return keyboard::dispatch(&surface, frame, event);
         }
         if surface.load_generation() != frame.load
             || surface.size() != frame.viewport
@@ -588,6 +609,7 @@ impl InputSource {
             PointerKind::Down => {
                 cancel(surface);
                 crate::text::window_pressed(surface, x, y);
+                crate::selection_area::window_pressed(surface, x, y);
                 *surface.input.presented_press.borrow_mut() = Some(lease);
                 down(
                     surface,
