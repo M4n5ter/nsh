@@ -659,7 +659,7 @@ pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
     focused_view(surface).filter(|view| input_of(view).is_some())
 }
 
-fn window_active(surface: &Surface) -> bool {
+pub(crate) fn window_active(surface: &Surface) -> bool {
     FOCUS.with(|f| f.borrow().get(&surface.key()).is_none_or(|f| !f.inactive))
 }
 

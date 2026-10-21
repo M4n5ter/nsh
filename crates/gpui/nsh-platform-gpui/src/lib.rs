@@ -77,5 +77,6 @@ pub use nsh_engine::{LoadedPackage, accept_package, load_package, package, verif
 pub use crate::{
     app::{AppOptions, AppSource, AppView, open_app_window, run_app, set_ui_sets},
     image::AssetBase,
+    input::presented::{InputDisposition, InputSnapshot, InputSource},
     native::{ComponentContext, ComponentFactory, Components, NativeComponent},
 };

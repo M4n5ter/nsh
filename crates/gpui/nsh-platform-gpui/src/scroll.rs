@@ -1035,23 +1035,44 @@ pub(crate) fn drag_end(surface: &Rc<Surface>, view: &NshView, vx: f32, vy: f32) 
 /// Whether a mouse press at `(x, y)` (view coordinates) grabs `view`'s
 /// indicator, faded out or not: on the desktop it is a scroll bar.
 pub(crate) fn grabs_thumb(view: &NshView, x: f32, y: f32) -> bool {
-    let state = view.state();
-    let Some(s) = &state.scroll else {
-        return false;
-    };
-    if !s.indicator || !s.behavior.enabled {
-        return false;
+    thumb_hit(view).is_some_and(|hit| hit.contains(x, y))
+}
+
+/// The immutable native thumb hit shape, also sampled by external frames.
+#[derive(Clone, Copy)]
+pub(crate) struct ThumbHit {
+    horizontal: bool,
+    start: f32,
+    len: f32,
+    edge: f32,
+}
+
+impl ThumbHit {
+    pub(crate) fn contains(self, x: f32, y: f32) -> bool {
+        let (along, across) = if self.horizontal { (x, y) } else { (y, x) };
+        (self.edge - THUMB_GRAB..=self.edge).contains(&across)
+            && (self.start - THUMB_SLOP..=self.start + self.len + THUMB_SLOP).contains(&along)
     }
-    let Some(((tx, ty, tw, th), _)) = thumb(&state) else {
-        return false;
-    };
-    let (along, across, start, len, edge) = if s.horizontal {
-        (x, y, tx, tw, state.frame.size.height.0)
+}
+
+pub(crate) fn thumb_hit(view: &NshView) -> Option<ThumbHit> {
+    let state = view.state();
+    let s = state.scroll.as_ref()?;
+    if !s.indicator || !s.behavior.enabled {
+        return None;
+    }
+    let ((tx, ty, tw, th), _) = thumb(&state)?;
+    let (start, len, edge) = if s.horizontal {
+        (tx, tw, state.frame.size.height.0)
     } else {
-        (y, x, ty, th, state.frame.size.width.0)
+        (ty, th, state.frame.size.width.0)
     };
-    (edge - THUMB_GRAB..=edge).contains(&across)
-        && (start - THUMB_SLOP..=start + len + THUMB_SLOP).contains(&along)
+    Some(ThumbHit {
+        horizontal: s.horizontal,
+        start,
+        len,
+        edge,
+    })
 }
 
 /// The mouse moved over `view`: its indicator shows (and fades again

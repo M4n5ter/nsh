@@ -103,6 +103,8 @@ const VELOCITY_WINDOW: f64 = 100.0;
 
 use crate::keys::{VK_MENU, VK_TAB};
 
+pub(crate) mod presented;
+
 /// What a pointer did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PointerKind {
@@ -233,6 +235,7 @@ enum Key {
 /// The pointer input state of a surface.
 #[derive(Default)]
 pub(crate) struct Input {
+    presented_press: RefCell<Option<presented::PressLease>>,
     /// The pointers that are down.
     pointers: RefCell<Vec<Pointer>>,
     /// Two fingers pinching / rotating on the touchscreen.
@@ -388,6 +391,7 @@ struct Press {
     /// The node that gets the events.
     node: NodeId,
     events: EventMask,
+    binding: Option<u64>,
     /// Milliseconds before a long press.
     long_delay: f32,
     /// `onPressDown` was reported.
@@ -570,6 +574,7 @@ fn after_ms(ms: u64, f: impl FnOnce() + 'static) {
 pub(crate) fn reset(surface: &Surface) {
     let input = &surface.input;
     input.pointers.borrow_mut().clear();
+    input.presented_press.borrow_mut().take();
     input.two.borrow_mut().take();
     input.zoom.borrow_mut().take();
     input.pinch.borrow_mut().take();
@@ -1240,36 +1245,12 @@ fn pick(root: &NshView, x: f32, y: f32, items: bool) -> Option<Hit> {
 
 fn pick_in(view: &NshView, x: f32, y: f32, items: bool) -> Option<Hit> {
     let s = view.state();
-    // Views animating out after their removal are gone for the pointer.
-    if s.style.hidden
-        || s.concealed
-        || s.props.pointer_events == PointerEvents::None
-        || s.live.as_ref().is_some_and(|l| l.dying())
-    {
-        return None;
-    }
-    let pe = s.props.pointer_events;
-    let clip = s.clips();
-    let (w, h) = (s.frame.size.width.0, s.frame.size.height.0);
-    let inside = x >= 0.0 && y >= 0.0 && x < w && y < h;
-    let slop = s.props.hit_slop;
-    let in_slop =
-        x >= -slop.left.0 && y >= -slop.top.0 && x < w + slop.right.0 && y < h + slop.bottom.0;
-    let children = if clip {
-        inside
-    } else if laid_out(s.kind, s.id) {
-        in_slop
-            || s.overflow.is_some_and(|e| {
-                x >= e.origin.x.0
-                    && y >= e.origin.y.0
-                    && x < e.origin.x.0 + e.size.width.0
-                    && y < e.origin.y.0 + e.size.height.0
-            })
-    } else {
-        // The platform places these views' children (screens, header
-        // items) and the core knows no area for them.
-        true
-    };
+    let shape = presented::PickGeometry::sample(&s)?;
+    let pe = shape.pointer_events;
+    let clip = shape.clips;
+    let inside = shape.inside(x, y);
+    let in_slop = shape.owns(x, y);
+    let children = shape.children(x, y);
     // Hosted items are drawn above the children, clipped with them.
     if items && !s.natives.is_empty() && (!clip || inside) {
         let natives = s.natives.clone();
@@ -1598,7 +1579,7 @@ fn down(
                 let Some(press) = &mut p.press else { return };
                 press_in(surface, press);
                 press.long = true;
-                press_event(surface, press.node, EventKind::LongPress);
+                press_event(surface, press.node, EventKind::LongPress, press.binding);
             });
         }
     }
@@ -1893,6 +1874,7 @@ fn find_press(
                     view: target.clone(),
                     node: link.node,
                     events: link.events,
+                    binding: None,
                     long_delay: s.props.long_press_delay.unwrap_or(LONG_PRESS),
                     pressed: false,
                     long: false,
@@ -1907,6 +1889,12 @@ fn find_press(
             view: v.clone(),
             node: s.id,
             events: s.events,
+            binding: surface
+                .input
+                .presented_press
+                .borrow()
+                .as_ref()
+                .and_then(|lease| lease.binding_for(v)),
             long_delay: s.props.long_press_delay.unwrap_or(LONG_PRESS),
             pressed: false,
             long: false,
@@ -1921,7 +1909,7 @@ fn press_in(surface: &Rc<Surface>, press: &mut Press) {
     }
     press.pressed = true;
     if press.events.contains(EventKind::PressDown) {
-        press_event(surface, press.node, EventKind::PressDown);
+        press_event(surface, press.node, EventKind::PressDown, press.binding);
     }
 }
 
@@ -1933,16 +1921,19 @@ fn press_out(surface: &Rc<Surface>, press: &mut Press, fire: bool) {
     }
     press.pressed = false;
     if press.events.contains(EventKind::PressUp) {
-        press_event(surface, press.node, EventKind::PressUp);
+        press_event(surface, press.node, EventKind::PressUp, press.binding);
     }
     if fire && !press.long && press.events.contains(EventKind::Press) {
-        press_event(surface, press.node, EventKind::Press);
+        press_event(surface, press.node, EventKind::Press, press.binding);
     }
 }
 
-fn press_event(surface: &Surface, node: NodeId, kind: EventKind) {
+fn press_event(surface: &Surface, node: NodeId, kind: EventKind, binding: Option<u64>) {
     log::debug!(target: "nsh::input", "{} on {node}", kind.prop_name());
-    surface.event(node, kind, EventPayload::None);
+    match binding {
+        Some(binding) => surface.event_bound(node, kind, EventPayload::None, binding),
+        None => surface.event(node, kind, EventPayload::None),
+    }
 }
 
 fn cancel_press(surface: &Rc<Surface>, p: &mut Pointer) {

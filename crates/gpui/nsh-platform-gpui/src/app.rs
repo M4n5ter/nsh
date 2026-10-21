@@ -212,6 +212,12 @@ pub struct AppView {
 }
 
 impl AppView {
+    /// Samples and routes native input for an externally presented GPUI frame.
+    /// The returned main-thread handle does not keep this app alive.
+    pub fn input_source(&self) -> crate::InputSource {
+        crate::InputSource::new(&self.surface)
+    }
+
     /// A view with no app yet (in `cx.new(|cx| AppView::new(...))`).
     pub fn new(options: AppOptions, window: &mut Window, cx: &mut Context<Self>) -> AppView {
         crate::rt::init(cx);

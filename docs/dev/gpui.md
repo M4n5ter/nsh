@@ -202,6 +202,21 @@ import -window root -display :170 whole.png        # the display, if the window'
 | Networking | `net.rs` | ureq, as on Windows and Linux |
 | Dev | `dev.rs` | `AppView::connect_dev_server` (also what `AppSource::DevServer` runs): the dev client on its own thread (reconnecting with a backoff); its events, runtime errors and the reload key drained by a foreground task of the view, which ends when the view connects again; the status line and the error overlay are GPUI elements over the surface; the surface reports errors to the overlay and to the embedding app's `on_error` alike |
 
+## Externally presented frames
+
+An embedding that presents GPUI pixels through a slower output obtains an `InputSource` from
+`AppView::input_source`. Sample it inside the actual draw callback and pair that `InputSnapshot` with the same
+draw's pixels. The output writer publishes the pair after its successful presentation. The embedding keeps a
+bounded frame-token table until queued input releases each snapshot; unknown and retired tokens are rejected.
+Snapshots stay on the GPUI thread and retain native view identities and immutable hit geometry.
+
+`InputSource::dispatch` routes an ordinary sealed press or discrete wheel to its original native owner. A wheel
+remains on that Scroll as its offset or content changes, including a zero-distance edge clamp. `ExactFallback`
+requires the embedding's exact-frame GPUI path; `Rejected` never falls back. `cancel_capture` clears a leased
+pointer without callbacks when the embedding loses it. `editor_matches` only permits the original Input while it
+retains native and window focus. Use this AppView's existing text/paste handler immediately after the check, without
+another dispatch or pump. The query does not authorize KeyDown callbacks or keymap commands.
+
 ## Frame statistics: `--fps`
 
 `nsh-gpui-host --fps` (`AppOptions::fps`, `AppView::set_fps_monitor` for embedders) logs one `nsh::perf` line a

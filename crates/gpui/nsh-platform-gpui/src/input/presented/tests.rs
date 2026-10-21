@@ -1,0 +1,422 @@
+use nsh_core::{MountItem, Points, ViewProps};
+
+use super::*;
+
+#[cfg(target_os = "macos")]
+const STEP: f32 = 30.0;
+#[cfg(not(target_os = "macos"))]
+const STEP: f32 = 48.0;
+
+fn new_surface() -> Rc<Surface> {
+    let surface = Surface::new(nsh_engine::Environment::default());
+    surface.root.state_mut().frame = crate::geom::rect(0.0, 0.0, 400.0, 400.0);
+    surface
+}
+
+fn view(surface: &Rc<Surface>, id: NodeId, parent: NodeId, kind: ViewKind) -> NshView {
+    for item in [
+        MountItem::Create { id, kind },
+        MountItem::Frame {
+            id,
+            frame: crate::geom::rect(0.0, 0.0, 300.0, 300.0),
+        },
+        MountItem::Insert {
+            parent,
+            child: id,
+            before: None,
+        },
+    ] {
+        surface.mounter.borrow_mut().apply(surface, &item);
+    }
+    surface.view(id).unwrap()
+}
+
+fn wheel(dy: f32) -> PlatformInput {
+    PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+        position: gpui::point(gpui::px(20.0), gpui::px(20.0)),
+        delta: ScrollDelta::Lines(gpui::point(0.0, dy)),
+        ..Default::default()
+    })
+}
+
+fn click(down: bool) -> PlatformInput {
+    let position = gpui::point(gpui::px(20.0), gpui::px(20.0));
+    if down {
+        PlatformInput::MouseDown(gpui::MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            click_count: 1,
+            ..Default::default()
+        })
+    } else {
+        PlatformInput::MouseUp(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            click_count: 1,
+            ..Default::default()
+        })
+    }
+}
+
+#[test]
+fn presented_wheels_keep_the_original_scroll_across_growth_and_a_new_nested_owner() {
+    let surface = new_surface();
+    let outer = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
+    outer.state_mut().scroll.as_mut().unwrap().content = (300.0, 1200.0);
+    let source = InputSource::new(&surface);
+    let snapshot = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&snapshot, &wheel(-3.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, STEP);
+    assert_eq!(
+        source.dispatch(&snapshot, &wheel(3.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, 0.0);
+
+    outer.state_mut().scroll.as_mut().unwrap().content = (300.0, 1800.0);
+    let nested = view(&surface, 4, 2, ViewKind::Scroll);
+    nested.state_mut().scroll.as_mut().unwrap().content = (300.0, 900.0);
+    assert_eq!(
+        source.dispatch(&snapshot, &wheel(-3.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, STEP);
+    assert_eq!(nested.state().scroll.as_ref().unwrap().y, 0.0);
+    assert_eq!(
+        source.dispatch(&snapshot, &wheel(3.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, 0.0);
+    // The edge is consumed by the same owner, rather than handed to a new hit.
+    assert_eq!(
+        source.dispatch(&snapshot, &wheel(3.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, 0.0);
+}
+
+#[test]
+fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
+    let surface = new_surface();
+    let original = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
+    original.state_mut().scroll.as_mut().unwrap().content = (300.0, 1200.0);
+    let source = InputSource::new(&surface);
+    let old = source.sample().unwrap();
+    surface
+        .mounter
+        .borrow_mut()
+        .apply(&surface, &MountItem::Remove { id: 2 });
+    let replacement = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
+    replacement.state_mut().scroll.as_mut().unwrap().content = (300.0, 1200.0);
+    assert_eq!(
+        source.dispatch(&old, &wheel(-3.0)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, 0.0);
+    let fresh = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&fresh, &wheel(-3.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, STEP);
+
+    replacement.state_mut().frame.size.width = Points(250.0);
+    assert_eq!(
+        source.dispatch(&fresh, &wheel(-3.0)),
+        InputDisposition::Rejected
+    );
+    replacement.state_mut().frame.size.width = Points(300.0);
+    replacement
+        .state_mut()
+        .events
+        .set(EventKind::MomentumScrollEnd, true);
+    assert_eq!(
+        source.dispatch(&fresh, &wheel(-3.0)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(
+        source.dispatch(&source.sample().unwrap(), &wheel(-3.0)),
+        InputDisposition::ExactFallback
+    );
+    replacement
+        .state_mut()
+        .events
+        .set(EventKind::MomentumScrollEnd, false);
+
+    surface.resized(500.0, 400.0, 1.0);
+    assert_eq!(
+        source.dispatch(&fresh, &wheel(-3.0)),
+        InputDisposition::Rejected
+    );
+    let current = source.sample().unwrap();
+    let modal = view(&surface, 6, ROOT_ID, ViewKind::Modal);
+    modal.state_mut().frame = crate::geom::rect(350.0, 350.0, 25.0, 25.0);
+    assert_eq!(pick(&surface.root, 20.0, 20.0, true).unwrap().view.id(), 2);
+    assert_eq!(
+        source.dispatch(&current, &wheel(-3.0)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, STEP);
+}
+
+#[test]
+fn sealed_press_rebinding_cancels_the_original_capture_without_releasing_into_its_replacement() {
+    let surface = new_surface();
+    let button = view(&surface, 2, ROOT_ID, ViewKind::View);
+    {
+        let mut state = button.state_mut();
+        let mut props = ViewProps::default();
+        props.input_action = Some(7);
+        state.props = Box::new(props);
+        state.events.set(EventKind::Press, true);
+        state.tracked = PRESSED;
+    }
+    let source = InputSource::new(&surface);
+    let first = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&first, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(button.state().states, PRESSED);
+    button.state_mut().props.input_action = Some(8);
+    assert_eq!(
+        source.dispatch(&first, &click(false)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(button.state().states, 0);
+    assert!(surface.input.pointers.borrow().is_empty());
+
+    let rebound = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&rebound, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(button.state().states, PRESSED);
+    assert_eq!(
+        source.dispatch(&rebound, &click(false)),
+        InputDisposition::Handled
+    );
+    assert_eq!(button.state().states, 0);
+    // A foreign/default snapshot never acquires a press on this surface.
+    assert_eq!(
+        source.dispatch(&InputSnapshot::default(), &click(true)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(button.state().states, 0);
+}
+
+#[test]
+fn resize_and_modal_changes_cancel_only_the_original_surfaces_native_capture() {
+    let surface = new_surface();
+    let button = view(&surface, 2, ROOT_ID, ViewKind::View);
+    button.state_mut().props.input_action = Some(7);
+    button.state_mut().events.set(EventKind::Press, true);
+    button.state_mut().tracked = PRESSED;
+    let source = InputSource::new(&surface);
+    let first = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&first, &click(true)),
+        InputDisposition::Handled
+    );
+
+    let other = new_surface();
+    let foreign = InputSource::new(&other).sample().unwrap();
+    assert_eq!(
+        source.dispatch(&foreign, &click(false)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(button.state().states, PRESSED);
+    surface.resized(500.0, 400.0, 1.0);
+    assert_eq!(
+        source.dispatch(&first, &click(false)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(button.state().states, 0);
+    assert_eq!(surface.input_pressed.get(), 0);
+    assert!(surface.input.pointers.borrow().is_empty());
+
+    let resized = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&resized, &click(true)),
+        InputDisposition::Handled
+    );
+    let modal = view(&surface, 4, ROOT_ID, ViewKind::Modal);
+    modal.state_mut().frame = crate::geom::rect(350.0, 350.0, 25.0, 25.0);
+    assert_eq!(pick(&surface.root, 20.0, 20.0, true).unwrap().view.id(), 2);
+    assert_eq!(
+        source.dispatch(&resized, &click(false)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(button.state().states, 0);
+    assert_eq!(surface.input_pressed.get(), 0);
+    assert!(surface.input.pointers.borrow().is_empty());
+}
+
+#[test]
+fn native_thumb_over_a_full_width_button_never_acquires_a_button_lease() {
+    let surface = new_surface();
+    let scroll = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
+    scroll.state_mut().scroll.as_mut().unwrap().content = (300.0, 1200.0);
+    let button = view(&surface, 4, 2, ViewKind::View);
+    button.state_mut().props.input_action = Some(7);
+    button.state_mut().events.set(EventKind::Press, true);
+    button.state_mut().tracked = PRESSED;
+    let source = InputSource::new(&surface);
+    let ordinary = source.sample().unwrap();
+    let at_thumb = PlatformInput::MouseDown(gpui::MouseDownEvent {
+        button: MouseButton::Left,
+        position: gpui::point(gpui::px(296.0), gpui::px(20.0)),
+        click_count: 1,
+        ..Default::default()
+    });
+    scroll.state_mut().scroll.as_mut().unwrap().indicator = true;
+    assert_eq!(
+        source.dispatch(&ordinary, &at_thumb),
+        InputDisposition::Rejected
+    );
+    let with_thumb = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&with_thumb, &at_thumb),
+        InputDisposition::ExactFallback
+    );
+    assert!(surface.input.pointers.borrow().is_empty());
+    // The same snapshot's body remains an ordinary sealed Button.
+    assert_eq!(
+        source.dispatch(&with_thumb, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&with_thumb, &at_thumb),
+        InputDisposition::ExactFallback
+    );
+    assert!(surface.input.pointers.borrow().is_empty());
+    assert_eq!(button.state().states, 0);
+    // The exact GPUI fallback now owns a thumb, rather than the previous
+    // sealed Button. Cancelling a leased capture must leave that owner alone.
+    pointer(
+        &surface,
+        PointerEvent {
+            kind: PointerKind::Down,
+            x: 296.0,
+            y: 20.0,
+            button: 0,
+            pointer: 1,
+            touch: false,
+            pen: false,
+            time: surface.clock(),
+            modifiers: Modifiers::default(),
+            clicks: 1,
+        },
+    );
+    source.cancel_capture();
+    assert_eq!(surface.input.pointers.borrow().len(), 1);
+    assert!(
+        matches!(&surface.input.pointers.borrow()[0].mode, Mode::Thumb(view, _) if *view == scroll)
+    );
+    pointer(
+        &surface,
+        PointerEvent {
+            kind: PointerKind::Cancel,
+            x: 296.0,
+            y: 20.0,
+            button: 0,
+            pointer: 1,
+            touch: false,
+            pen: false,
+            time: surface.clock(),
+            modifiers: Modifiers::default(),
+            clicks: 1,
+        },
+    );
+    assert_eq!(
+        source.dispatch(&with_thumb, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&with_thumb, &click(false)),
+        InputDisposition::Handled
+    );
+}
+
+#[test]
+fn editor_text_lease_survives_its_own_edits_but_never_targets_a_different_focus_owner() {
+    let surface = new_surface();
+    let editor = view(&surface, 2, ROOT_ID, ViewKind::Input);
+    crate::text_input::focus_view(&surface, &editor);
+    let source = InputSource::new(&surface);
+    let first = source.sample().unwrap();
+    assert!(source.editor_matches(&first));
+    crate::text_input::char_input(&surface, "maka");
+    assert!(source.editor_matches(&first));
+    crate::text_input::char_input(&surface, "🦀");
+    assert_eq!(
+        crate::text_input::current_text(&editor).as_deref(),
+        Some("maka🦀")
+    );
+    crate::text_input::window_focus(&surface, false);
+    assert!(!source.editor_matches(&first));
+    crate::text_input::window_focus(&surface, true);
+    assert!(source.editor_matches(&first));
+    surface.resized(500.0, 400.0, 1.0);
+    editor.state_mut().frame.size.height = Points(200.0);
+    assert!(
+        source.editor_matches(&first),
+        "text has an owner rather than pixel coordinates"
+    );
+
+    let other = view(&surface, 4, ROOT_ID, ViewKind::Input);
+    crate::text_input::focus_view(&surface, &other);
+    assert!(!source.editor_matches(&first));
+    let second = source.sample().unwrap();
+    assert!(source.editor_matches(&second));
+    crate::text_input::char_input(&surface, "other");
+    assert_eq!(
+        crate::text_input::current_text(&other).as_deref(),
+        Some("other")
+    );
+    assert_eq!(
+        crate::text_input::current_text(&editor).as_deref(),
+        Some("maka🦀")
+    );
+
+    let mut read_only = nsh_core::InputConfig::default();
+    read_only.editable = false;
+    surface.mounter.borrow_mut().apply(
+        &surface,
+        &MountItem::Input {
+            id: 4,
+            config: Box::new(read_only),
+        },
+    );
+    assert!(!source.editor_matches(&second));
+    crate::text_input::char_input(&surface, "must not append");
+    assert_eq!(
+        crate::text_input::current_text(&other).as_deref(),
+        Some("other")
+    );
+
+    surface
+        .mounter
+        .borrow_mut()
+        .apply(&surface, &MountItem::Remove { id: 2 });
+    let replacement = view(&surface, 2, ROOT_ID, ViewKind::Input);
+    crate::text_input::focus_view(&surface, &replacement);
+    assert!(
+        !source.editor_matches(&first),
+        "the same node id is a new editor"
+    );
+    let current = source.sample().unwrap();
+    assert!(source.editor_matches(&current));
+    crate::text_input::char_input(&surface, "new");
+    assert_eq!(
+        crate::text_input::current_text(&replacement).as_deref(),
+        Some("new")
+    );
+    assert_eq!(
+        crate::text_input::current_text(&editor).as_deref(),
+        Some("maka🦀")
+    );
+}
