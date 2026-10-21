@@ -169,7 +169,7 @@ fn sixel_encode_impl_into<W: Write + ?Sized>(
 
     // Use configured quantization method with diffusion-based dithering
     let diffusion = opts.diffusion.clamp(0.0, 1.0);
-    let pipeline = Pipeline::new().palette_size(palette_size).quantize_method(opts.quantize_method.clone()).dedup(true);
+    let pipeline = Pipeline::new().palette_size(palette_size).quantize_method(opts.quantize_method.clone());
 
     // Apply dithering based on diffusion setting
     let indexed_image = if diffusion <= 0.0 {
