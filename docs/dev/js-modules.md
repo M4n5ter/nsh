@@ -39,7 +39,7 @@ globals.
 | `nsh/gesture` | `PanResponder` | `touch.rs` |
 | `nsh/clipboard` | `Clipboard.setString(text)`, `Clipboard.getString()` / `hasString()`, `setImage(uri)`, `getImage()` / `hasImage()`, `getFiles()` (promises the core resolves from the root's `Clipboard` event; the `has*` reads do not read the content, so iOS shows no paste notice). Images cross as base64 `data:` URIs (an image source and a `fetch` URL, so bytes stay native until JS asks for them), files as `file:` URLs one per line; the backends build both with `nsh_core::platform::clipboard`. UIPasteboard, ClipboardManager (text only), NSPasteboard, GDK, Win32, `navigator.clipboard`; the `clipboard` capability | its registry (`nsh_core::runtime`) |
 | `nsh/storage` | `Storage.getItem` / `setItem` / `removeItem` / `getAllKeys` / `clear` (async functions of the core; the entries live in memory in `nsh_core::storage`, loaded once from the platform's `StorageBackend` (`EngineConfig::storage`: `nsh_engine::FileStorage::open` in `<EngineConfig::data_dir>/<app id>` (the id travels with the app: `app.json`, the dev server, packages, `Root::app_id`), one per file in the process so a reload reads unflushed writes; a damaged file is set aside as `storage.json.corrupt`, an unreadable one leaves the changes in memory, never replacing it; `localStorage` under `nsh:<app id>:` on the web) and every change handed to it; 5 MB quota; no capability: the app's own data, kept where the host says) | its registry (`nsh_core::runtime`) |
-| `nsh/keymap` | `keymap.bind(keystroke, handler, { when, repeat, within })` / `keymap.bind({ keystroke: handler }, options)`: keyboard shortcuts. Keystrokes are parsed and checked in Rust (`nsh_core::keymap`: syntax, `mod`, reserved keystrokes, which ones text inputs keep); the whole table goes to the platform as the root's `Prop::Keymap` → `MountItem::Keymap`, which matches keys on the spot and reports the root's `KeyCommand` event (the binding's id). Terminal `within: YNode` restricts native matching to focus on that node or a descendant; `keymap.focusedWithin(node)` reads the host's latest focus snapshot nonreactively. Bindings made under an owner go with it; a module's top-level ones are undone when hot module replacement runs it again (`hot::undo_on_rerun`) | `keymap.rs` |
+| `nsh/keymap` | `keymap.bind(keystroke, handler, { when, repeat, within })` / `keymap.bind({ keystroke: handler }, options)`: keyboard shortcuts. Keystrokes are parsed and checked in Rust (`nsh_core::keymap`: syntax, `mod`, reserved keystrokes, which ones text inputs keep); the whole table goes to the platform as the root's `Prop::Keymap` → `MountItem::Keymap`, which matches keys on the spot and reports the root's `KeyCommand` event (the binding's id). Host-supported `within: YNode` restricts native matching to focus on that node or a descendant; `keymap.focusedWithin(node)` reads the host's latest focus snapshot nonreactively. Bindings made under an owner go with it; a module's top-level ones are undone when hot module replacement runs it again (`hot::undo_on_rerun`) | `keymap.rs` |
 | `nsh/webview`, `nsh/video` | `WebView`, `Video` | `platform_modules.rs` |
 | `nsh/native` | `nativeComponent(name, { props, events })`: a component for a native component the embedding app registered; `nativeModule(specifier)`: the exports of a UI set the embedding app gave its engines (`EngineConfig::ui_sets`), as one object made by the loader's code (`modules::host_module`, the same values an import of the set gets) and kept per specifier; only the host's sets, never nsh's own modules or the runtime's registries | `platform_modules.rs`, `modules.rs` |
 | `nsh/ios` | `isAvailable`, `InputAccessoryView` | `platform_modules.rs` |
@@ -103,18 +103,20 @@ and the engine's binding before entering the handler, and revoke the presentatio
 inputs on the first application callback. Other input routes retain their exact-presentation path
 ([terminal embedding](tui.md#public-embedding-api)).
 
-## Terminal keymap focus
+## Native keymap focus
 
-`KeyBindingOptions.within?: YNode` is an additional native eligibility condition. The terminal tries bindings
+`KeyBindingOptions.within?: YNode` is an additional native eligibility condition. A supporting backend tries bindings
 newest first and skips a scope unless the focused node or one of its mounted ancestors is its `within` node;
 older eligible bindings and ordinary native input keep their normal precedence. `within` must be a real node
-of that VM. Supplying it on another renderer throws `TypeError`.
+of that VM. Supplying it without native focus-scope support throws `TypeError`.
 
 `keymap.focusedWithin(node: YNode): boolean` reads the same native focus path from the latest snapshot the host
 has supplied. It returns `false` for an empty path or a node outside it, including a removed node. This read
 does not subscribe an effect to focus or cause an effect to run. An effect triggered by `windowSize()` can read
-the current snapshot during its resize work. Calling the method on another renderer throws `TypeError`.
+the current snapshot during its resize work. Calling the method without host support throws `TypeError`.
 
+`Environment.native_focus_scopes` declares backend support before the first render; the terminal also
+retains its existing implicit support. This capability is not a reactive JS environment part.
 The host supplies focus before delivering input or environment changes that can enter JS. `AppView` maintains
 this ordering; hosts wiring their own `Surface` and engine use the
 [focus-path embedding APIs](tui.md#public-embedding-api).

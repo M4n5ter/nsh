@@ -1079,7 +1079,7 @@ impl Host {
         out.ops.append(&mut self.shared.net.borrow_mut().ops);
     }
 
-    /// Replaces the terminal's native focus path without running JS jobs,
+    /// Replaces the host's native focus path without running JS jobs,
     /// reactive effects, event handlers or timers. Hosts report it before
     /// delivering input or an environment change that may read the snapshot.
     pub fn set_focus_path(&self, path: &[NodeId]) {
@@ -1883,10 +1883,44 @@ const report = (v) => text(String(v));
             [
                 "TypeError: keymap.focusedWithin: expected a YNode",
                 "TypeError: keymap.bind within: expected a YNode",
-                "TypeError: keymap.focusedWithin: requires the terminal renderer",
-                "TypeError: keymap.bind within: requires the terminal renderer",
+                "TypeError: keymap.focusedWithin: requires native focus scopes",
+                "TypeError: keymap.bind within: requires native focus scopes",
             ],
         );
+    }
+
+    #[test]
+    fn native_focus_support_is_available_before_the_first_render() {
+        let host = Host::new().unwrap();
+        host.set_environment(&Environment {
+            native_focus_scopes: true,
+            ..Environment::default()
+        });
+        host.eval_source(
+            r#"import { mount } from "nsh";
+            import { element } from "nsh:rt";
+            import { keymap } from "nsh/keymap";
+            globalThis.scope = element("view");
+            globalThis.keymap = keymap;
+            mount(() => scope);
+            keymap.bind("ctrl+j", () => {}, { within: scope });
+            if (keymap.focusedWithin(scope)) throw new Error("unexpected focus");"#,
+        )
+        .unwrap();
+        let node = host.cx.with(|cx| {
+            let value: Value = cx.globals().get("scope").unwrap();
+            crate::dom::node_id(cx.as_raw().as_ptr(), value.as_raw()).unwrap()
+        });
+        host.set_focus_path(&[node, nsh_core::ROOT_ID]);
+        host.set_environment(&Environment {
+            native_focus_scopes: true,
+            color_scheme: nsh_core::platform::ColorScheme::Dark,
+            ..Environment::default()
+        });
+        host.eval_source(
+            "if (!keymap.focusedWithin(scope)) throw new Error('native focus was lost');",
+        )
+        .unwrap();
     }
 
     #[test]

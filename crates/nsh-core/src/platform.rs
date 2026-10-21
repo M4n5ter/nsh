@@ -174,6 +174,9 @@ pub struct Environment {
     pub os: Os,
     /// How this surface presents its UI (`Platform.renderer`).
     pub renderer: Renderer,
+    /// The backend supplies native keyboard-focus paths and matches scoped
+    /// key bindings against them. This is a host capability, not a JS signal.
+    pub native_focus_scopes: bool,
     /// The OS version: major and minor (iOS, desktops), Android's API level
     /// and 0.
     pub os_version: (u16, u16),
@@ -213,6 +216,7 @@ impl Default for Environment {
             screen_reader: false,
             os: Os::default(),
             renderer: Renderer::Native,
+            native_focus_scopes: false,
             os_version: (0, 0),
             idiom: Idiom::Phone,
             apple_keyboard: false,

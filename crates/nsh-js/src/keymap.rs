@@ -67,11 +67,12 @@ pub(crate) fn set_focus_path(cx: Ctx, path: &[NodeId]) {
     current.extend_from_slice(path);
 }
 
-fn terminal_node(cx: Ctx, value: Raw, operation: &str) -> R<NodeId> {
-    if crate::env::current(cx).renderer != Renderer::Terminal {
+fn scoped_node(cx: Ctx, value: Raw, operation: &str) -> R<NodeId> {
+    let environment = crate::env::current(cx);
+    if !environment.native_focus_scopes && environment.renderer != Renderer::Terminal {
         return Err(type_error(
             cx,
-            &format!("{operation}: requires the terminal renderer"),
+            &format!("{operation}: requires native focus scopes"),
         ));
     }
     crate::dom::node_id(cx, value)
@@ -106,7 +107,7 @@ fn make(cx: Ctx) -> Raw {
 }
 
 /// The options: `when` (`undefined`, `"always"` or `"notEditing"`) and
-/// `repeat`, plus a terminal native focus scope.
+/// `repeat`, plus a host-supported native focus scope.
 fn parse_options(cx: Ctx, options: Raw) -> R<(When, bool, Option<NodeId>)> {
     if js::is_nullish(options) {
         return Ok((When::Auto, false, None));
@@ -117,7 +118,7 @@ fn parse_options(cx: Ctx, options: Raw) -> R<(When, bool, Option<NodeId>)> {
     let repeat = js::to_bool(cx, js::get(cx, options, "repeat")?.raw());
     let node = js::get(cx, options, "within")?;
     let within = (!node.is_undefined())
-        .then(|| terminal_node(cx, node.raw(), "keymap.bind within"))
+        .then(|| scoped_node(cx, node.raw(), "keymap.bind within"))
         .transpose()?;
     let value = js::get(cx, options, "when")?;
     if value.is_undefined() {
@@ -139,7 +140,7 @@ fn parse_options(cx: Ctx, options: Raw) -> R<(When, bool, Option<NodeId>)> {
 native! {
     /// Reads the last native focus path without tracking a dependency.
     fn focused_within(cx, _this, args) {
-        let node = terminal_node(cx, args.get(0), "keymap.focusedWithin")?;
+        let node = scoped_node(cx, args.get(0), "keymap.focusedWithin")?;
         Ok(V::bool(keymap(cx).focus_path.borrow().contains(&node)))
     }
 }
@@ -334,9 +335,9 @@ pub(crate) const TYPES: &str = r#"export interface KeyBindingOptions {
   /** Fire again on the auto-repeats of a held key (default false: once until
    * the key is released). */
   repeat?: boolean;
-  /** Terminal only: fires while native keyboard focus is on this node or
-   * a descendant. A nonmatching scope leaves older bindings and native
-   * defaults eligible. Throws outside the terminal renderer. */
+  /** Fires while native keyboard focus is on this node or a descendant.
+   * A nonmatching scope leaves older bindings and native defaults eligible.
+   * Throws when the host does not support native focus scopes. */
   within?: YNode;
 }
 
@@ -369,10 +370,10 @@ export interface Keymap {
    * Apple platforms (and in a browser on one), `"Ctrl+Shift+L"` elsewhere,
    * for `"mod+shift+l"`. Throws on an invalid keystroke. */
   label(keystroke: string): string;
-  /** Terminal only: reads the latest host-reported native focus path.
+  /** Reads the latest host-reported native focus path.
    * Includes the node itself and its descendants; false with no focus.
    * This read is not reactive and does not subscribe to focus changes.
-   * Throws outside the terminal renderer or for a value other than YNode. */
+   * Throws without host support or for a value other than YNode. */
   focusedWithin(node: YNode): boolean;
 }
 "#;

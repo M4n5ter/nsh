@@ -223,6 +223,7 @@ impl RootView {
             screen_reader: objc2_ui_kit::UIAccessibilityIsVoiceOverRunning(),
             os: nsh_engine::Os::Ios,
             renderer: nsh_engine::Renderer::Native,
+            native_focus_scopes: false,
             os_version: os_version(self.mtm()),
             idiom: match UIDevice::currentDevice(self.mtm()).userInterfaceIdiom() {
                 UIUserInterfaceIdiom::Pad => Idiom::Pad,
