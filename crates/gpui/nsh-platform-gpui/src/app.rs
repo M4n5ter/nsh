@@ -487,8 +487,8 @@ impl AppView {
         }
         // The host's Tab lands on the view, or (by GPUI's tab order, which
         // does not follow the surface's tree) on one of its components.
-        let on_view =
-            self.focus.is_focused(window) && crate::text_input::focused(&self.surface).is_none();
+        let on_view = self.focus.is_focused(window)
+            && crate::text_input::focused_view(&self.surface).is_none();
         if !on_view && !crate::native::focused(&self.surface, window) {
             return;
         }

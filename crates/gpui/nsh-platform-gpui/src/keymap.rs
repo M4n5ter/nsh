@@ -78,7 +78,8 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         return false;
     }
     let editing = crate::text_input::focused(surface).is_some();
-    let found = table.find(keystroke, editing, repeat);
+    let path = surface.focus_path();
+    let found = table.find_with(keystroke, editing, repeat, |id| path.contains(&id));
     if let KeyMatch::Fire(id) = found {
         surface.event(
             ROOT_ID,

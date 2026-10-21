@@ -787,7 +787,7 @@ pub(crate) fn focus_changed(surface: &Rc<Surface>, _view: &NshView) {
 
 /// The element with the accessibility focus.
 pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
-    if let Some(field) = crate::text_input::focused(surface) {
+    if let Some(field) = crate::text_input::focused_view(surface) {
         return Some(field);
     }
     let id = STATES.with_borrow(|s| s.get(&surface.key()).and_then(|s| s.focus))?;

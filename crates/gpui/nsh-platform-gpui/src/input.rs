@@ -1039,6 +1039,7 @@ pub(crate) fn key(surface: &Rc<Surface>, event: KeyEvent) -> bool {
         || crate::chrome::shortcut(surface, &event)
         || crate::text_input::key(surface, &event)
         || crate::text::key(surface, &event)
+        || activate_focused(surface, &event)
         || crate::navigation::key_pressed(surface, &event)
         || {
             let (x, y) = input.last.get().unwrap_or((-1.0, -1.0));
@@ -1051,34 +1052,41 @@ pub(crate) fn key(surface: &Rc<Surface>, event: KeyEvent) -> bool {
     handled
 }
 
-/// Tab and Shift + Tab move the keyboard focus between the text fields (and
-/// the native components that take the keyboard), in tree order (GTK's focus chain does this on Linux), within the newest
-/// modal: the views under it never get the focus. The field reached has
-/// its text selected, as in Windows' dialogs. Past the last field (the
-/// first with Shift) the key is not taken: the window's focus moves on to
-/// the embedding app's next tab stop, or wraps around when there is none
-/// ([`crate::app`], [`tab_to_edge`]).
+/// Tab and Shift + Tab follow enabled controls in tree order. The newest
+/// modal traps focus and wraps; at the surface root, passing either edge
+/// lets the embedding app reach its own next stop (or wrap back here).
+/// Text fields reached by Tab select their text, as desktop dialogs do.
 fn tab(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     let m = event.modifiers;
     if event.vk != VK_TAB || m.ctrl || m.alt || m.meta {
         return false;
     }
     let mut stops = Vec::new();
-    collect_stops(
-        surface,
-        &crate::navigation::focus_scope(surface),
-        &mut stops,
-    );
+    let scope = crate::navigation::focus_scope(surface);
+    let trapped = scope != surface.root;
+    collect_stops(surface, &scope, &mut stops);
     if stops.is_empty() {
         return false;
     }
     let n = stops.len();
-    let focused = crate::text_input::focused(surface)
+    let focused = crate::text_input::focused_view(surface)
         .or_else(|| crate::native::focused_component(surface).and_then(|id| surface.view(id)));
     let current = focused.and_then(|f| stops.iter().position(|v| *v == f));
     let next = match (current, m.shift) {
-        (Some(i), false) if i + 1 == n => return false,
-        (Some(0), true) => return false,
+        (Some(i), false) if i + 1 == n => {
+            if trapped {
+                0
+            } else {
+                return false;
+            }
+        }
+        (Some(0), true) => {
+            if trapped {
+                n - 1
+            } else {
+                return false;
+            }
+        }
         (Some(i), false) => i + 1,
         (Some(i), true) => i - 1,
         (None, false) => 0,
@@ -1115,24 +1123,95 @@ fn focus_stop(surface: &Rc<Surface>, view: &NshView) {
     if view.kind() == ViewKind::Native {
         crate::native::tab_to(surface, view.id());
     } else {
-        crate::text_input::tab_to(view);
+        crate::text_input::tab_to_view(surface, view);
     }
 }
 
-/// The Tab stops shown under `view`, in tree order: enabled text fields and
-/// the native components that take the keyboard.
+/// Whether this view takes native keyboard focus. Eligibility is checked
+/// against its actual ancestry, including concealed screens and modals.
+pub(crate) fn focusable(surface: &Surface, view: &NshView) -> bool {
+    if !view.attached() {
+        return false;
+    }
+    let mut current = Some(view.clone());
+    while let Some(node) = current {
+        let s = node.state();
+        if s.style.hidden || s.concealed || s.props.pointer_events == PointerEvents::None {
+            return false;
+        }
+        current = node.parent_view();
+    }
+    let s = view.state();
+    !s.props.accessibility.state.disabled
+        && (s.kind == ViewKind::Input
+            || crate::text::selectable(&s)
+            || s.scroll.as_ref().is_some_and(|s| s.behavior.enabled)
+            || (s.kind == ViewKind::Native && crate::native::focusable(surface, s.id))
+            || has_press(s.events))
+}
+
+/// Gives an eligible view focus within the current native modal scope.
+/// A real component receives GPUI focus; NSH controls share one owner.
+pub(crate) fn focus_view(surface: &Rc<Surface>, view: &NshView) -> bool {
+    if !focusable(surface, view) {
+        return false;
+    }
+    let scope = crate::navigation::focus_scope(surface);
+    if !chain(view).contains(&scope) {
+        return false;
+    }
+    if view.kind() == ViewKind::Native {
+        crate::text_input::blur_all(surface);
+        crate::native::tab_to(surface, view.id());
+    } else {
+        crate::text_input::focus_view(surface, view);
+    }
+    true
+}
+
+/// Activates the actual focused press target, preserving native Enter and
+/// Space behavior outside text fields and suppressing held-key repeats.
+fn activate_focused(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
+    let m = event.modifiers;
+    if m.ctrl
+        || m.alt
+        || m.meta
+        || !matches!(event.vk, crate::keys::VK_RETURN | crate::keys::VK_SPACE)
+    {
+        return false;
+    }
+    let Some(view) = crate::text_input::focused_view(surface) else {
+        return false;
+    };
+    let (id, events, binding) = {
+        let s = view.state();
+        if s.kind == ViewKind::Input || !has_press(s.events) || !focusable(surface, &view) {
+            return false;
+        }
+        (s.id, s.events, s.props.input_action)
+    };
+    if !event.repeat {
+        for kind in [EventKind::PressDown, EventKind::PressUp, EventKind::Press] {
+            if events.contains(kind) {
+                match binding {
+                    Some(binding) => surface.event_bound(id, kind, EventPayload::None, binding),
+                    None => surface.event(id, kind, EventPayload::None),
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Enabled native controls in tree order. `focusable=false` excludes a
+/// press target from Tab while keeping explicit and pointer focus valid.
 fn collect_stops(surface: &Surface, view: &NshView, out: &mut Vec<NshView>) {
     {
         let s = view.state();
         if s.style.hidden || s.concealed || s.props.pointer_events == PointerEvents::None {
             return;
         }
-        let stop = match s.kind {
-            ViewKind::Input => !s.props.accessibility.state.disabled,
-            ViewKind::Native => crate::native::focusable(surface, s.id),
-            _ => false,
-        };
-        if stop {
+        if s.props.focusable != Some(false) && focusable(surface, view) {
             out.push(view.clone());
         }
     }
@@ -1390,6 +1469,9 @@ fn down(
     }
     let native = matches!(item, Some(Item::Hosted(..) | Item::Input(_)));
     let selects = matches!(item, Some(Item::Text(_)));
+    if !native && let Some(target) = chain(&hit.view).into_iter().find(|v| focusable(surface, v)) {
+        focus_view(surface, &target);
+    }
     let input = &surface.input;
     if input.pointers.borrow().is_empty() {
         input.js_block.set(false);

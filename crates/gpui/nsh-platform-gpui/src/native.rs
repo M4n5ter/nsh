@@ -265,8 +265,15 @@ pub(crate) struct NativeState {
     /// The focus handles inside components that the last prepaint found
     /// focused, with their nodes: keys go to them, not to nsh.
     focused: RefCell<Vec<(NodeId, FocusHandle)>>,
-    /// The component Tab moved to, focused by [`apply_focus`].
-    tab_to: std::cell::Cell<Option<NodeId>>,
+    /// An explicit focus transfer, resolved by [`apply_focus`].
+    tab_to: std::cell::Cell<Option<FocusTarget>>,
+}
+
+/// One explicit native focus transfer, consumed with the real window.
+#[derive(Clone, Copy)]
+enum FocusTarget {
+    Component(NodeId),
+    Surface,
 }
 
 impl NativeState {
@@ -498,7 +505,20 @@ pub(crate) fn prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &mut App)
             HostRef::Video(_) => {}
         }
     }
+    let changed = {
+        let old = surface.native.focused.borrow();
+        !old.iter()
+            .map(|(id, _)| id)
+            .eq(focused.iter().map(|(id, _)| id))
+    };
+    let has_native = !focused.is_empty();
     *surface.native.focused.borrow_mut() = focused;
+    if changed {
+        if has_native && !matches!(surface.native.tab_to.get(), Some(FocusTarget::Surface)) {
+            crate::text_input::blur_all(surface);
+        }
+        surface.sync_focus();
+    }
 }
 
 /// True when focus is inside one of the surface's components: keys go
@@ -541,45 +561,57 @@ pub(crate) fn focusable(surface: &Surface, id: NodeId) -> bool {
     })
 }
 
-/// The node of the component focus was inside at the last frame.
+/// The component focus was inside at the last frame, unless an explicit
+/// transfer to the surface has already revoked that native owner.
 pub(crate) fn focused_component(surface: &Surface) -> Option<NodeId> {
+    if matches!(surface.native.tab_to.get(), Some(FocusTarget::Surface)) {
+        return None;
+    }
     surface.native.focused.borrow().first().map(|(id, _)| *id)
 }
 
 /// Tab moved to the component in node `id`: [`apply_focus`] focuses it.
 pub(crate) fn tab_to(surface: &Surface, id: NodeId) {
-    surface.native.tab_to.set(Some(id));
+    surface.native.tab_to.set(Some(FocusTarget::Component(id)));
 }
 
-/// After nsh handled Tab (with the window, which focusing needs): focuses
-/// the component Tab moved to, if any; otherwise, when Tab moved from a
-/// component to one of nsh's text fields, gives the window's focus back to
-/// the surface (`own`).
+/// An explicit NSH focus request returns the window's focus to its surface.
+/// Retained focus alone never steals focus from a native component.
+pub(crate) fn focus_surface(surface: &Surface) {
+    surface.native.focused.borrow_mut().clear();
+    surface.native.tab_to.set(Some(FocusTarget::Surface));
+}
+
+/// Resolves the existing one-shot native focus intent with the window.
+/// Without an intent, a real component focus clears the NSH control owner.
 pub(crate) fn apply_focus(
     surface: &Rc<Surface>,
     own: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let handle = surface
-        .native
-        .tab_to
-        .take()
-        .and_then(|id| component_item(surface, id))
-        .and_then(|item| {
-            let c = item.component.try_borrow().ok()?;
-            c.as_ref()?.focus_handle()
-        });
-    match handle {
-        Some(handle) => {
-            crate::text_input::blur_all(surface);
-            window.focus(&handle, cx);
-            surface.invalidate();
+    match surface.native.tab_to.take() {
+        Some(FocusTarget::Component(id)) => {
+            let handle = component_item(surface, id).and_then(|item| {
+                let c = item.component.try_borrow().ok()?;
+                c.as_ref()?.focus_handle()
+            });
+            if let Some(handle) = handle {
+                surface.native.focused.borrow_mut().clear();
+                crate::text_input::blur_all(surface);
+                window.focus(&handle, cx);
+                surface.native.focused.borrow_mut().push((id, handle));
+                surface.sync_focus();
+                surface.invalidate();
+            }
         }
-        None if focused(surface, window) && crate::text_input::focused(surface).is_some() => {
+        Some(FocusTarget::Surface) => {
+            surface.native.focused.borrow_mut().clear();
             window.focus(own, cx);
+            surface.sync_focus();
             surface.invalidate();
         }
+        None if focused(surface, window) => crate::text_input::blur_all(surface),
         None => {}
     }
 }

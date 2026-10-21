@@ -1507,7 +1507,11 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, x: f32, y: f32) -> bo
         KeyMove::Start => -1.0,
         KeyMove::End => 1.0,
     };
-    let Some(view) = pick(root, x, y).and_then(|v| key_scroll_view(&v, horizontal, sign)) else {
+    let focused = crate::text_input::focused_view(surface);
+    let Some(view) = focused
+        .or_else(|| pick(root, x, y))
+        .and_then(|v| key_scroll_view(&v, horizontal, sign))
+    else {
         return false;
     };
     let (base, viewport, min, max, flip) = {

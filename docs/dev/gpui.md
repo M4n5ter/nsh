@@ -138,6 +138,16 @@ import -window root -display :170 whole.png        # the display, if the window'
   orders each line's clusters by their bidi levels (`unicode-bidi`). Line heights follow Pango's model, as on Linux
   and Windows. The final layout is plain data (lines, cluster boxes, positioned glyphs); the main thread paints the
   glyphs (`paint_glyph`, `paint_emoji`) and reads colors and decorations from the spans, as the Linux backend does.
+- **Keyboard focus** uses one surface owner for text inputs, pressable views, selectable text and enabled scroll
+  views. Tab follows visible enabled controls inside the newest modal; `focusable={false}` removes a stop. Enter
+  and Space activate the focused press target. Input methods and caret timers remain input-only. Native GPUI
+  components and NSH controls transfer the window focus through one explicit pending intent, so retained input
+  focus cannot steal focus from a component. The native ancestor path scopes `nsh/keymap` bindings and is sent
+  through the engine FIFO before events or environment changes; it is a nonreactive snapshot for
+  `keymap.focusedWithin`. GPUI advertises this support in its initial and refreshed native environment.
+  This ordering covers NSH controls and their ordinary or sealed events. Foreign `NativeComponent` callbacks
+  retain their original cross-thread `ComponentContext::emit` channel: their snapshot follows the actual GPUI
+  component focus projection at prepaint, without a same-callback freshness guarantee.
 - **Frames**: native animations, JS frame requests, transitions, scroll glides and navigation transitions tick on the
   window's frames (`Surface::tick`, called while drawing; `window.request_animation_frame()` while something
   animates), and nothing is drawn otherwise.

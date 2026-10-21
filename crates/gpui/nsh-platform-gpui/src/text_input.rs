@@ -670,8 +670,14 @@ fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
     if view.is_some_and(|view| !view.attached()) {
         return;
     }
+    if view.is_some() {
+        crate::native::focus_surface(surface);
+    }
     let old = focused_view(surface);
     if old.as_ref() == view {
+        if view.is_some() {
+            surface.sync_focus();
+        }
         return;
     }
     if let Some(old) = &old {
@@ -704,6 +710,7 @@ fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
         crate::access::focus_changed(surface, view);
         view.changed();
     }
+    surface.sync_focus();
     blink::update();
     // The input handler is registered (or not) by the next frame.
     surface.invalidate();
@@ -1407,15 +1414,6 @@ pub(crate) fn blur_view(surface: &Rc<Surface>, view: &NshView) {
 /// Blurs whatever view has the focus.
 pub(crate) fn blur_all(surface: &Rc<Surface>) {
     set_focus(surface, None);
-}
-
-/// Focuses `view`, reached with Tab: as in desktop dialogs, its text is
-/// selected.
-pub(crate) fn tab_to(view: &NshView) {
-    let Some(surface) = surface_of(view) else {
-        return;
-    };
-    tab_to_view(&surface, view);
 }
 
 /// Focuses a caller-eligible Tab stop, selecting text only for an input.

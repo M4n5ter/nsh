@@ -379,6 +379,7 @@ pub(super) fn open(
             highlight,
         }],
     });
+    surface.sync_focus();
     surface.invalidate();
 }
 
@@ -386,6 +387,7 @@ pub(super) fn open(
 pub(super) fn close(surface: &Surface) {
     let open = surface.chrome.open.borrow_mut().take();
     if let Some(open) = open {
+        surface.sync_focus();
         if matches!(open.kind, Kind::App) {
             closed_event(surface);
         }
@@ -544,6 +546,7 @@ fn activate(surface: &Rc<Surface>, level: usize, row: usize, keyboard: bool) {
             let Some(open) = surface.chrome.open.borrow_mut().take() else {
                 return;
             };
+            surface.sync_focus();
             surface.invalidate();
             match open.kind {
                 Kind::Local(actions) => {

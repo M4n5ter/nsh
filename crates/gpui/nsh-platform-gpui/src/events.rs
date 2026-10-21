@@ -115,6 +115,7 @@ pub(crate) fn install(
     window: &mut Window,
     cx: &mut App,
 ) {
+    crate::native::apply_focus(surface, focus, window, cx);
     // The focused field's caret shows while the surface has the window's
     // focus; text and input methods come through the input handler.
     let has_focus = window.is_window_active() && focus.is_focused(window);

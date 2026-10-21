@@ -201,7 +201,8 @@ pub(crate) struct Surface {
 
 impl Surface {
     /// A surface with no app and no window yet.
-    pub(crate) fn new(environment: Environment) -> Rc<Surface> {
+    pub(crate) fn new(mut environment: Environment) -> Rc<Surface> {
+        environment.native_focus_scopes = true;
         let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
         let root = NshView::new(ROOT_ID, nsh_core::ViewKind::View);
         let mounter = Mounter::new(root.clone());
@@ -363,9 +364,57 @@ impl Surface {
         }
     }
 
-    /// Sends an event to JS.
+    /// The actual native keyboard owner and its ancestors. Reading focus
+    /// does not run JS, and is safe while navigation applies a mount item.
+    pub(crate) fn focus_path(&self) -> Vec<NodeId> {
+        if crate::system::has_dialog(self) || crate::chrome::menu_open(self) {
+            return Vec::new();
+        }
+        let mut view = crate::text_input::focused_view(self)
+            .or_else(|| crate::native::focused_component(self).and_then(|id| self.view(id)));
+        let mut path = Vec::new();
+        while let Some(node) = view {
+            let s = node.state();
+            if !node.attached()
+                || s.style.hidden
+                || s.concealed
+                || s.props.pointer_events == nsh_core::PointerEvents::None
+            {
+                return Vec::new();
+            }
+            path.push(s.id);
+            view = node.parent_view();
+        }
+        path
+    }
+
+    /// Publishes native focus without running JS or subscribing effects.
+    pub(crate) fn sync_focus(&self) {
+        self.control(|c| c.set_focus_path(self.focus_path()));
+    }
+
+    /// Sends an event after the matching native focus snapshot, through
+    /// the same engine FIFO.
     pub(crate) fn event(&self, id: NodeId, kind: EventKind, payload: EventPayload) {
-        self.control(|c| c.dispatch_event(id, kind, payload));
+        self.control(|c| {
+            c.set_focus_path(self.focus_path());
+            c.dispatch_event(id, kind, payload);
+        });
+    }
+
+    /// Sends a sealed event through the original binding after publishing
+    /// the same native focus fact as ordinary events.
+    pub(crate) fn event_bound(
+        &self,
+        id: NodeId,
+        kind: EventKind,
+        payload: EventPayload,
+        binding: u64,
+    ) {
+        self.control(|c| {
+            c.set_focus_path(self.focus_path());
+            c.dispatch_bound_event(id, kind, payload, binding);
+        });
     }
 
     /// The view of node `id`.
@@ -395,8 +444,12 @@ impl Surface {
     /// app's settings over the system's.
     pub(crate) fn set_environment(&self, mut environment: Environment) {
         self.host_environment.get().apply(&mut environment);
+        environment.native_focus_scopes = true;
         if self.environment.replace(environment) != environment {
-            self.control(|c| c.set_environment(environment));
+            self.control(|c| {
+                c.set_focus_path(self.focus_path());
+                c.set_environment(environment);
+            });
             crate::system::environment_applied(self);
         }
     }
@@ -418,6 +471,7 @@ impl Surface {
         env.pixel_ratio = scale;
         self.environment.set(env);
         self.control(|c| {
+            c.set_focus_path(self.focus_path());
             c.resize(Size::new(Points(width), Points(height)));
             c.set_environment(env);
         });
@@ -536,6 +590,14 @@ impl Surface {
             }
         }
         self.mounter.borrow_mut().end_batch(self);
+        if let Some(view) = crate::text_input::focused_view(self)
+            && !crate::input::focusable(self, &view)
+        {
+            crate::text_input::blur_view(self, &view);
+        }
+        // Removed owners are cleared quietly by focused_view; publish that
+        // fact even when there is no remaining node to receive Blur.
+        self.sync_focus();
         #[cfg(feature = "dev")]
         if let Some(model) = &*self.test_model.borrow() {
             model.apply(batch);

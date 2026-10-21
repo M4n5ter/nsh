@@ -377,9 +377,13 @@ impl Mounter {
         let view = self.views.get(id);
         let view = view.as_ref();
         match command {
-            Command::Focus => view.map_or((), crate::text_input::focus),
+            Command::Focus => {
+                if let Some(view) = view {
+                    crate::input::focus_view(surface, view);
+                }
+            }
             Command::Blur => match view {
-                Some(view) if view.kind() == ViewKind::Input => crate::text_input::blur(view),
+                Some(view) => crate::text_input::blur_view(surface, view),
                 _ => crate::text_input::blur_all(surface),
             },
             Command::SetSelection { start, end } => {
