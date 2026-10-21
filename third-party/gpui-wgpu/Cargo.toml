@@ -45,6 +45,7 @@ bench-support = [
 ]
 default = []
 font-kit = ["dep:font-kit"]
+offscreen = ["dep:image"]
 test-support = [
     "gpui/test-support",
     "dep:image",
@@ -167,6 +168,10 @@ features = ["HtmlCanvasElement"]
 version = "=30.0.1"
 features = ["webgl"]
 default-features = false
+
+[dev-dependencies.naga]
+version = "=30.0.1"
+features = ["wgsl-in"]
 
 [lints.rust.unexpected_cfgs]
 level = "allow"

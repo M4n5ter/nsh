@@ -51,8 +51,8 @@ futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # GPUI Fast (Zed's GPUI with retained rendering), the renderer; the published
 # crates under GPUI's library names, as GPUI Kit apps use them.
-gpui = { package = "gpui-fast", version = "0.1.9", default-features = false, features = ["font-kit", "wayland", "x11"] }
-gpui_platform = { package = "gpui-fast-platform", version = "0.1.9", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "gpui-fast", version = "0.1.10", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { package = "gpui-fast-platform", version = "0.1.10", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gpui_wgpu = { package = "gpui-fast-wgpu", version = "0.1.10", default-features = false, features = ["font-kit", "offscreen"] }
 # Script shots on Linux: the window read from the X server.
 raw-window-handle = "0.6"
@@ -90,3 +90,7 @@ codegen-units = 1
 opt-level = 3
 [profile.dev.package.taffy]
 opt-level = 3
+
+# The terminal renderer exposes its own production API, without a core fork.
+[patch.crates-io]
+gpui-fast-wgpu = { path = "../../third-party/gpui-wgpu" }

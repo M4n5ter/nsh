@@ -41,7 +41,12 @@ impl Clip {
 
 #[cfg(all(
     not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
+    any(
+        test,
+        feature = "bench-support",
+        feature = "test-support",
+        feature = "offscreen"
+    )
 ))]
 pub(crate) fn headless_instance() -> wgpu::Instance {
     if cfg!(target_os = "macos") {

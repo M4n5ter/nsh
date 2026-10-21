@@ -3,10 +3,12 @@
 This Linux transport embeds the existing NSH GPUI `AppView`, using the host's
 original `EngineConfig`. It renders the same scene with the production WGPU
 offscreen API. It supplies neither a second application runtime nor terminal IO.
-The first receiver uses Maka's existing GPUI Fast 0.1.10 package identity and
-its explicit `offscreen` feature; `test-support` is not a production dependency.
+The transport uses the official GPUI Fast 0.1.10 core. Only the WGPU renderer
+is received under `third-party/gpui-wgpu`, where its own `offscreen` feature
+exposes production pixel readback. It requires no core patch or application
+repository, and `test-support` is not a production dependency.
 
-The host creates `TerminalPlatform`, uses `Application::with_platform` and
+The host constructs `gpui_wgpu::WgpuHeadlessRenderer` and creates `TerminalPlatform`, uses `Application::with_platform` and
 `run_embedded`, and pumps foreground work when woken or a timer is due. One
 native window is supported. The platform keeps two background executor workers
 and at most 64 foreground jobs per pump. Frames are requested when dirty; there
@@ -46,3 +48,9 @@ lease cannot fall through to a new hit target. `dispatch_input_exact` is only
 the conservative path for opaque input; it is not the ordinary wheel model.
 Native window handles, webview portals and OS path pickers are unsupported.
 Clipboard writes are returned to the host for its unique output owner.
+
+The GPUI workspace patches only `gpui-fast-wgpu` to that relative source
+directory; the main workspace excludes this renderer package. Build the GPUI workspace directly; no Maka
+checkout or absolute dependency path is needed. Renderer tests use
+`--features offscreen,test-support`; the production terminal dependency uses
+only `offscreen` and `font-kit`.

@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "examples/gallery-rs/native", "examples/rust-exports/native", "examples/embed-gpui/run"]
 # The GPUI backend is a workspace of its own (`crates/gpui/Cargo.toml`).
-exclude = ["crates/gpui"]
+exclude = ["crates/gpui", "third-party/gpui-wgpu"]
 # `cargo run` runs the gallery (`crates/xtask/src/run.rs`).
 default-members = ["crates/xtask"]
 

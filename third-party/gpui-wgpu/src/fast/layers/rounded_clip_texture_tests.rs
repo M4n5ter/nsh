@@ -4,7 +4,7 @@
 
 use super::{assert_same_pixels, pixel};
 
-#[path = "../../../../gpui/src/fast/rounded_clip_fixtures.rs"]
+#[path = "../../../test-assets/rounded_clip_fixtures.rs"]
 mod fixtures;
 
 fn texture_renderer() -> crate::wgpu_renderer::WgpuHeadlessRenderer {

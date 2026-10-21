@@ -2281,7 +2281,12 @@ impl WgpuRenderer {
 
 #[cfg(all(
     not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
+    any(
+        test,
+        feature = "bench-support",
+        feature = "test-support",
+        feature = "offscreen"
+    )
 ))]
 struct HeadlessRenderTarget {
     texture: wgpu::Texture,
@@ -2290,7 +2295,12 @@ struct HeadlessRenderTarget {
 
 #[cfg(all(
     not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
+    any(
+        test,
+        feature = "bench-support",
+        feature = "test-support",
+        feature = "offscreen"
+    )
 ))]
 impl HeadlessRenderTarget {
     fn size(&self) -> Size<DevicePixels> {
@@ -2303,18 +2313,44 @@ impl HeadlessRenderTarget {
 
 #[cfg(all(
     not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
+    any(
+        test,
+        feature = "bench-support",
+        feature = "test-support",
+        feature = "offscreen"
+    )
+))]
+struct HeadlessReadback {
+    buffer: wgpu::Buffer,
+    size: Size<DevicePixels>,
+    padded_bytes_per_row: u32,
+}
+
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(
+        test,
+        feature = "bench-support",
+        feature = "test-support",
+        feature = "offscreen"
+    )
 ))]
 pub struct WgpuHeadlessRenderer {
     context: WgpuContext,
     pub(crate) core: WgpuRendererCore,
     render_target: Option<HeadlessRenderTarget>,
+    readback: Option<HeadlessReadback>,
     observed_error_generation: u64,
 }
 
 #[cfg(all(
     not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
+    any(
+        test,
+        feature = "bench-support",
+        feature = "test-support",
+        feature = "offscreen"
+    )
 ))]
 impl WgpuHeadlessRenderer {
     pub fn new() -> anyhow::Result<Self> {
@@ -2334,11 +2370,12 @@ impl WgpuHeadlessRenderer {
             context,
             core,
             render_target: None,
+            readback: None,
             observed_error_generation,
         })
     }
 
-    fn ensure_render_target(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {
+    fn validate_size(&self, size: Size<DevicePixels>) -> anyhow::Result<()> {
         anyhow::ensure!(
             size.width.0 > 0 && size.height.0 > 0,
             "invalid headless render target size: {size:?}"
@@ -2349,6 +2386,11 @@ impl WgpuHeadlessRenderer {
             "headless render target size {size:?} exceeds maximum texture dimension {}",
             self.core.max_texture_size
         );
+        Ok(())
+    }
+
+    fn ensure_render_target(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {
+        self.validate_size(size)?;
         if self
             .render_target
             .as_ref()
@@ -2409,115 +2451,199 @@ impl WgpuHeadlessRenderer {
         Ok(())
     }
 
-    /// Copies the current render target back to the CPU. Dimensions come from the
-    /// target texture itself, so the copy can never disagree with what was rendered.
-    fn read_image(&mut self) -> anyhow::Result<image::RgbaImage> {
-        let target = self
-            .render_target
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
-        let width = target.texture.width();
-        let height = target.texture.height();
-        let bytes_per_row = width
+    fn readback_layout(&self, size: Size<DevicePixels>) -> anyhow::Result<(u32, u64, usize)> {
+        self.validate_size(size)?;
+        let bytes_per_row = (size.width.0 as u32)
             .checked_mul(4)
             .ok_or_else(|| anyhow::anyhow!("Headless render target row size overflowed"))?;
         let padded_bytes_per_row = bytes_per_row
             .checked_next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             .ok_or_else(|| anyhow::anyhow!("Headless padded row size overflowed"))?;
         let buffer_size = u64::from(padded_bytes_per_row)
-            .checked_mul(u64::from(height))
+            .checked_mul(size.height.0 as u64)
             .ok_or_else(|| anyhow::anyhow!("Headless readback buffer size overflowed"))?;
         anyhow::ensure!(
             buffer_size <= self.core.resources.device.limits().max_buffer_size,
             "Headless readback buffer size {buffer_size} exceeds maximum buffer size {}",
             self.core.resources.device.limits().max_buffer_size
         );
-        let readback_buffer = self
-            .core
-            .resources
-            .device
-            .create_buffer(&wgpu::BufferDescriptor {
-                label: Some("headless_readback_buffer"),
-                size: buffer_size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-        let mut encoder =
+        usize::try_from(buffer_size)
+            .context("Headless readback buffer size exceeds addressable memory")?;
+        let pixel_length = usize::try_from(u64::from(bytes_per_row) * size.height.0 as u64)
+            .map_err(|_| anyhow::anyhow!("Headless image size exceeds addressable memory"))?;
+        Ok((padded_bytes_per_row, buffer_size, pixel_length))
+    }
+
+    /// Reads the actual target into caller-owned storage, reusing only unmapped
+    /// buffers. A pending or failed mapping is cancelled and never cached again.
+    fn read_pixels(&mut self, pixels: &mut [u8]) -> anyhow::Result<()> {
+        let target = self
+            .render_target
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
+        let texture = target.texture.clone();
+        let size = target.size();
+        let (padded_bytes_per_row, buffer_size, pixel_length) = self.readback_layout(size)?;
+        anyhow::ensure!(
+            pixels.len() == pixel_length,
+            "Headless destination length must be {pixel_length}, got {}",
+            pixels.len()
+        );
+        let readback = match self.readback.take() {
+            Some(readback) if readback.size == size => readback,
+            _ => HeadlessReadback {
+                buffer: self
+                    .core
+                    .resources
+                    .device
+                    .create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("headless_readback_buffer"),
+                        size: buffer_size,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    }),
+                size,
+                padded_bytes_per_row,
+            },
+        };
+        let result = (|| {
+            let mut encoder = self.core.resources.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor {
+                    label: Some("headless_readback_encoder"),
+                },
+            );
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback.buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(readback.padded_bytes_per_row),
+                        rows_per_image: Some(size.height.0 as u32),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size.width.0 as u32,
+                    height: size.height.0 as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let submission = self
+                .core
+                .resources
+                .queue
+                .submit(std::iter::once(encoder.finish()));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            readback
+                .buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    // Cancellation can outlive a timed-out readback request.
+                    let _ = sender.send(result);
+                });
             self.core
                 .resources
                 .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("headless_readback_encoder"),
-                });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let submission = self
-            .core
-            .resources
-            .queue
-            .submit(std::iter::once(encoder.finish()));
-        let (sender, receiver) = std::sync::mpsc::channel();
-        readback_buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                if sender.send(result).is_err() {
-                    log::error!("Headless readback receiver was dropped before mapping completed");
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(deadline.saturating_duration_since(std::time::Instant::now())),
+                })
+                .context("Failed to wait for headless rendering")?;
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .context("Failed to receive headless mapping result")?
+                .context("Failed to map headless readback buffer")?;
+            self.check_gpu_errors()?;
+
+            let mapped_data = readback.buffer.slice(..).get_mapped_range()?;
+            anyhow::ensure!(
+                mapped_data.len() == buffer_size as usize,
+                "Headless mapped buffer length does not match its allocation"
+            );
+            let bytes_per_row = pixel_length / size.height.0 as usize;
+            for (output, row) in pixels
+                .chunks_exact_mut(bytes_per_row)
+                .zip(mapped_data.chunks_exact(readback.padded_bytes_per_row as usize))
+            {
+                output.copy_from_slice(&row[..bytes_per_row]);
+                if self.core.target_format == wgpu::TextureFormat::Bgra8Unorm {
+                    for pixel in output.chunks_exact_mut(4) {
+                        pixel.swap(0, 2);
+                    }
                 }
-            });
-        self.core
-            .resources
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(std::time::Duration::from_secs(30)),
-            })
-            .map_err(|error| anyhow::anyhow!("Failed to wait for headless rendering: {error}"))?;
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .map_err(|error| anyhow::anyhow!("Failed to receive headless mapping result: {error}"))?
-            .map_err(|error| anyhow::anyhow!("Failed to map headless readback buffer: {error}"))?;
-        self.check_gpu_errors()?;
-
-        let mapped_data = readback_buffer.slice(..).get_mapped_range()?;
-        let pixel_capacity = usize::try_from(u64::from(bytes_per_row) * u64::from(height))
-            .map_err(|_| anyhow::anyhow!("Headless image size exceeds addressable memory"))?;
-        let mut pixels = Vec::with_capacity(pixel_capacity);
-        for row in mapped_data
-            .chunks_exact(padded_bytes_per_row as usize)
-            .take(height as usize)
-        {
-            pixels.extend_from_slice(&row[..bytes_per_row as usize]);
-        }
-        drop(mapped_data);
-        readback_buffer.unmap();
-
-        if self.core.target_format == wgpu::TextureFormat::Bgra8Unorm {
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
             }
+            Ok(())
+        })();
+        // Every exit, including poll timeout, mapping failure and a device
+        // error, cancels mapping before dropping or reusing this GPU buffer.
+        readback.buffer.unmap();
+        if result.is_ok() {
+            self.readback = Some(readback);
         }
+        result
+    }
 
-        image::RgbaImage::from_raw(width, height, pixels)
+    /// Render a scene and return its GPU readback as an RGBA image.
+    pub fn render_scene_to_image(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<image::RgbaImage> {
+        let (_, _, length) = self.readback_layout(size)?;
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(length)?;
+        pixels.resize(length, 0);
+        self.render_scene_to_pixels(scene, size, &mut pixels)?;
+        image::RgbaImage::from_raw(size.width.0 as u32, size.height.0 as u32, pixels)
             .ok_or_else(|| anyhow::anyhow!("Failed to create image from headless pixel data"))
+    }
+
+    /// Render into caller-owned, tightly packed top-down RGBA8 pixels.
+    ///
+    /// The destination must contain exactly four bytes per requested pixel.
+    /// This waits for GPU readback, without presenting a frame to a display.
+    /// Treat the destination as a completed frame only when this succeeds.
+    pub fn render_scene_to_pixels(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        pixels: &mut [u8],
+    ) -> anyhow::Result<()> {
+        let (_, _, length) = self.readback_layout(size)?;
+        anyhow::ensure!(
+            pixels.len() == length,
+            "Headless destination length must be {length}, got {}",
+            pixels.len()
+        );
+        self.render(scene, size)?;
+        self.read_pixels(pixels)
+    }
+
+    /// Render to an offscreen target without waiting for pixel readback.
+    pub fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
+        self.render(scene, size)
+    }
+
+    /// Report the actual graphics device, including software emulation.
+    pub fn gpu_specs(&self) -> Option<GpuSpecs> {
+        let adapter_info = &self.core.adapter_info;
+        Some(GpuSpecs {
+            is_software_emulated: adapter_info.device_type == wgpu::DeviceType::Cpu,
+            device_name: adapter_info.name.clone(),
+            driver_name: adapter_info.driver.clone(),
+            driver_info: adapter_info.driver_info.clone(),
+        })
+    }
+
+    /// Return the sprite atlas used to render the scene.
+    pub fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
+        self.core.atlas.clone()
     }
 }
 
@@ -2531,16 +2657,15 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
         scene: &Scene,
         size: Size<DevicePixels>,
     ) -> anyhow::Result<image::RgbaImage> {
-        self.render(scene, size)?;
-        self.read_image()
+        WgpuHeadlessRenderer::render_scene_to_image(self, scene, size)
     }
 
     fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
-        self.render(scene, size)
+        WgpuHeadlessRenderer::render_scene(self, scene, size)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
-        self.core.atlas.clone()
+        WgpuHeadlessRenderer::sprite_atlas(self)
     }
 }
 
@@ -2618,7 +2743,7 @@ mod tests {
         linear_gradient,
     };
     #[cfg(target_os = "linux")]
-    use gpui::{DevicePixels, PlatformHeadlessRenderer, Scene};
+    use gpui::{DevicePixels, Scene};
 
     #[cfg(target_os = "linux")]
     fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
@@ -2719,6 +2844,86 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn headless_pixels_reuse_readback_and_recover_after_invalid_destinations() -> anyhow::Result<()>
+    {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let mut scene = Scene::default();
+        scene.insert_primitive(solid_quad(1.0, 1.0, 3.0, 2.0, gpui::red()));
+        scene.insert_primitive(solid_quad(8.0, 4.0, 3.0, 2.0, gpui::blue()));
+        scene.finish();
+        let assert_rgba = |pixels: &[u8], width: usize, x: usize, y: usize, expected: [u8; 4]| {
+            let actual = &pixels[(y * width + x) * 4..][..4];
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| actual.abs_diff(expected) <= 3),
+                "pixel ({x}, {y}) was {actual:?}, expected {expected:?}"
+            );
+        };
+        let mut tested_formats = 0;
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ] {
+            let usages = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+            if !renderer
+                .context
+                .adapter
+                .get_texture_format_features(format)
+                .allowed_usages
+                .contains(usages)
+            {
+                continue;
+            }
+            tested_formats += 1;
+            renderer.core = WgpuRendererCore::new(
+                &renderer.context,
+                renderer.core.atlas.clone(),
+                format,
+                wgpu::CompositeAlphaMode::Opaque,
+            );
+            renderer.render_target = None;
+            renderer.readback = None;
+            // 52-byte rows must be unpacked from the GPU's 256-byte copy pitch.
+            let mut pixels = vec![0xa5; 13 * 7 * 4];
+            renderer.render_scene_to_pixels(&scene, device_size(13, 7), &mut pixels)?;
+            assert_rgba(&pixels, 13, 1, 1, RED);
+            assert_rgba(&pixels, 13, 8, 4, BLUE);
+            assert_rgba(&pixels, 13, 1, 5, BLACK);
+            assert_rgba(&pixels, 13, 12, 6, BLACK);
+            let first = renderer.readback.as_ref().unwrap().buffer.clone();
+
+            for length in [0, pixels.len() - 1, pixels.len() + 1] {
+                let mut invalid = vec![0xa5; length];
+                assert!(
+                    renderer
+                        .render_scene_to_pixels(&scene, device_size(13, 7), &mut invalid)
+                        .is_err()
+                );
+                assert!(invalid.iter().all(|byte| *byte == 0xa5));
+            }
+            renderer.render_scene_to_pixels(&Scene::default(), device_size(13, 7), &mut pixels)?;
+            assert!(pixels.chunks_exact(4).all(|pixel| pixel == BLACK));
+            assert_eq!(
+                renderer.readback.as_ref().unwrap().buffer,
+                first,
+                "same-size readback must reuse an unmapped GPU buffer"
+            );
+
+            pixels.resize(17 * 9 * 4, 0xa5);
+            renderer.render_scene_to_pixels(&scene, device_size(17, 9), &mut pixels)?;
+            assert_rgba(&pixels, 17, 1, 1, RED);
+            assert_rgba(&pixels, 17, 8, 4, BLUE);
+            assert_rgba(&pixels, 17, 16, 8, BLACK);
+            assert_ne!(renderer.readback.as_ref().unwrap().buffer, first);
+        }
+        assert!(tested_formats > 0);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn headless_renderer_reuses_target_for_same_size() -> anyhow::Result<()> {
         let mut renderer = WgpuHeadlessRenderer::new()?;
         let target_texture = |renderer: &WgpuHeadlessRenderer| {
@@ -2762,6 +2967,13 @@ mod tests {
                     .is_err(),
                 "{size:?} should be rejected"
             );
+            let mut pixels = [0xa5; 64];
+            assert!(
+                renderer
+                    .render_scene_to_pixels(&Scene::default(), size, &mut pixels)
+                    .is_err()
+            );
+            assert_eq!(pixels, [0xa5; 64]);
         }
 
         // Rejection must leave the renderer usable.

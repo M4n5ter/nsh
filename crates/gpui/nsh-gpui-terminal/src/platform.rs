@@ -12,9 +12,9 @@ use futures_channel::oneshot;
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
     DevicePixels, DispatchEventResult, DummyKeyboardMapper, ForegroundExecutor, Keymap, Menu,
-    MenuItem, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformHeadlessRenderer,
-    PlatformInput, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Size, Task, ThermalState, WindowAppearance, WindowParams, WindowVisibility,
+    MenuItem, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformInput,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Size, Task,
+    ThermalState, WindowAppearance, WindowParams, WindowVisibility,
 };
 
 use crate::{
@@ -52,7 +52,7 @@ pub struct TerminalPlatform {
     background: BackgroundExecutor,
     foreground: ForegroundExecutor,
     text: Arc<dyn PlatformTextSystem>,
-    resources: RefCell<Option<(Box<dyn PlatformHeadlessRenderer>, PixelSink)>>,
+    resources: RefCell<Option<(Box<gpui_wgpu::WgpuHeadlessRenderer>, PixelSink)>>,
     window: RefCell<Option<WindowRef>>,
     callbacks: RefCell<Callbacks>,
     started: Cell<bool>,
@@ -71,7 +71,7 @@ impl TerminalPlatform {
     /// Creates a real text/scene platform. `wake` schedules the external loop;
     /// it must not enter GPUI synchronously from a callback or worker thread.
     pub fn new(
-        renderer: Box<dyn PlatformHeadlessRenderer>,
+        renderer: Box<gpui_wgpu::WgpuHeadlessRenderer>,
         sink: Box<dyn FnMut(CandidateFrame)>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Rc<Self>> {

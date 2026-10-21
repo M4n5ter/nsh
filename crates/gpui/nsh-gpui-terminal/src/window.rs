@@ -8,10 +8,10 @@ use anyhow::{Result, anyhow, ensure};
 use futures_channel::oneshot;
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, DevicePixels, DispatchEventResult, FrameRequestSource,
-    GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
-    RequestFrameOptions, Scene, Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowParams, WindowVisibility,
+    GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    Scene, Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowParams, WindowVisibility,
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -59,7 +59,7 @@ pub(crate) struct WindowState {
     viewport_generation: u64,
     published: Option<FrameToken>,
     error: Option<String>,
-    renderer: Box<dyn PlatformHeadlessRenderer>,
+    renderer: Box<gpui_wgpu::WgpuHeadlessRenderer>,
     atlas: Arc<dyn PlatformAtlas>,
     sink: Option<PixelSink>,
     wake: Wake,
@@ -107,7 +107,7 @@ impl TerminalWindow {
     pub(crate) fn new(
         handle: AnyWindowHandle,
         params: WindowParams,
-        renderer: Box<dyn PlatformHeadlessRenderer>,
+        renderer: Box<gpui_wgpu::WgpuHeadlessRenderer>,
         sink: PixelSink,
         wake: Wake,
     ) -> Result<(Self, WindowRef)> {
