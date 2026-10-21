@@ -134,7 +134,7 @@ Selectable text supports mouse selection and Ctrl+A/C, and inline text links act
 Native alert and action-sheet overlays use Tab or the arrows to choose a button and Enter to activate it.
 
 [`nsh/desktop`](../modules/nsh-desktop.md) is available on terminal surfaces for titles and menus.
-`Platform.isTerminal` identifies this presentation while `Platform.isDesktop` identifies graphical desktop surfaces.
+`platform.isTerminal` identifies this presentation while `platform.idiom === "desktop" && !platform.isTerminal` identifies graphical desktop surfaces.
 F10 opens the application menu; arrows navigate, Enter or Space selects, and Escape closes it. Application and
 popup menus include submenus, checkmarks, disabled items and shortcuts. Window titles update through sanitized
 OSC 2 output in the standalone host.

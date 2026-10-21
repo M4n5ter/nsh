@@ -327,7 +327,7 @@ fn wheel_leases_require_a_hit_and_keep_immediate_callbacks_on_the_exact_path() {
         EventKind::HoverIn,
         EventKind::HoverOut,
         EventKind::ScrollEnd,
-        EventKind::MomentumScrollEnd,
+        EventKind::MomentumEnd,
     ] {
         surface.apply(MountBatch {
             items: vec![events(2, &[kind])],

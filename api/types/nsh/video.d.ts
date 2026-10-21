@@ -3,7 +3,7 @@
 import type { VideoHostProps, ViewProps, YNode } from "./types";
 
 export interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  source: string | { uri: string };
+  src: string;
 }
 
 /**

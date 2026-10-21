@@ -307,3 +307,162 @@ tailwind tint-progress_bar -- removed by the maintainer's decision before the fi
 tailwind tint-progress_bar-background -- removed by the maintainer's decision before the first compatible release (v0.1.2): gpui-kit's second spelling of a theme key; see #207
 tailwind tint-slider-bar -- removed by the maintainer's decision before the first compatible release (v0.1.2): gpui-kit's second spelling of a theme key; see #207
 tailwind tint-slider-bar-background -- removed by the maintainer's decision before the first compatible release (v0.1.2): gpui-kit's second spelling of a theme key; see #207
+#
+# The entries below record renames made before the first compatible
+# release (v0.1.2), decided by the maintainer: docs/dev/api-naming.md's
+# "Renames before the first compatible release" (rule 7). The fixtures
+# that used the old names are closed with them; their sources run, with
+# the new names, as the fixtures each entry names.
+nsh/base.d.ts: export type { Insets } -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/base.d.ts: safeArea -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/base.d.ts: safeAreaInsets -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/base.d.ts: TextViewProps.caret -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/base.d.ts: TextViewProps.codeBlockScrollIndicator -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/base.d.ts: TextViewProps.onLinkPress -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/base.d.ts: TextViewProps.tableScrollIndicator -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/desktop.d.ts: MenuItem -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/desktop.d.ts: MenuModule.popup -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/desktop.d.ts: WindowFrame -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/device.d.ts: windowSize -- typed with the shapes `nsh` exports (`Point`, `Size`; the same fields) by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/image.d.ts: ImageSize -- typed with the shapes `nsh` exports (`Point`, `Size`; the same fields) by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/list.d.ts: ListItemsProps -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/list.d.ts: ListProps.onEndReachedThreshold -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/list.d.ts: ListProps.onViewableItemsChanged -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ContextMenuEvent.altKey -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ContextMenuEvent.ctrlKey -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ContextMenuEvent.locationX -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ContextMenuEvent.locationY -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ContextMenuEvent.metaKey -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ContextMenuEvent.pageX -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ContextMenuEvent.pageY -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ContextMenuEvent.shiftKey -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HostProps.hitSlop -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HostProps.onLayout -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HostProps.onMouseMove -- typed with the shapes `nsh` exports (`Point`, `Size`; the same fields) by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HoverEvent.altKey -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HoverEvent.ctrlKey -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HoverEvent.locationX -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HoverEvent.locationY -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HoverEvent.metaKey -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HoverEvent.pageX -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HoverEvent.pageY -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: HoverEvent.shiftKey -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ImageHostProps.onLoad -- typed with the shapes `nsh` exports (`Point`, `Size`; the same fields) by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: InputHostProps.caretHidden -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: InputHostProps.onContentSizeChange -- typed with the shapes `nsh` exports (`Point`, `Size`; the same fields) by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: Insets -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: LayoutEvent -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ListHostProps.onEndReached -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ListHostProps.onScrollEnd -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ListHostProps.showsIndicator -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: NavPageHostProps.headerShown -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: OverlayHostProps.anchor -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: OverlayHostProps.onPressOutside -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: OverlayPosition.availableHeight -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: OverlayPosition.availableWidth -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: OverlayPosition.height -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: OverlayPosition.width -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: OverlayPosition.x -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: OverlayPosition.y -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollEvent.contentHeight -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollEvent.contentWidth -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollEvent.height -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollEvent.width -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollEvent.x -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollEvent.y -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollHostProps.onScrollEnd -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollHostProps.pinchGestureEnabled -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollHostProps.showsIndicator -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollingHostProps.contentInset -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollingHostProps.contentOffset -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollingHostProps.onMomentumScrollBegin -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollingHostProps.onMomentumScrollEnd -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollingHostProps.onScrollBeginDrag -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollingHostProps.onScrollEndDrag -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: ScrollingHostProps.scrollEnabled -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: TextLayoutLine.height -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: TextLayoutLine.width -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: TextLayoutLine.x -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: TextLayoutLine.y -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: WebViewHostProps.scrollEnabled -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+nsh/types.d.ts: YNode.measure -- renamed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"
+apps/base-0.1.1 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/base-0.1.1.7
+apps/base-0.1.1.2 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/base-0.1.1.7
+apps/base-0.1.1.3 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/base-0.1.1.7
+apps/base-0.1.1.4 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/base-0.1.1.7
+apps/base-0.1.1.5 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/base-0.1.1.7
+apps/base-0.1.1.6 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/base-0.1.1.7
+apps/core-0.1.1 -- uses payloads reshaped before the first compatible release (v0.1.2); its sources run with the new shapes as apps/core-0.1.1.4
+apps/core-0.1.1.2 -- uses payloads reshaped before the first compatible release (v0.1.2); its sources run with the new shapes as apps/core-0.1.1.4
+apps/core-0.1.1.3 -- uses payloads reshaped before the first compatible release (v0.1.2); its sources run with the new shapes as apps/core-0.1.1.4
+apps/desktop -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/desktop-0.1.1
+apps/events-0.1.1 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/events-0.1.1.4
+apps/events-0.1.1.2 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/events-0.1.1.4
+apps/events-0.1.1.3 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/events-0.1.1.4
+apps/gallery -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/gallery-0.1.1
+apps/modules-0.1.1 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/modules-0.1.1.2
+apps/props-0.1.1 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/props-0.1.1.4
+apps/props-0.1.1.2 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/props-0.1.1.4
+apps/props-0.1.1.3 -- uses names renamed before the first compatible release (v0.1.2); its sources run with the new names as apps/props-0.1.1.4
+
+apps/core-0.1.1.2-upstream -- duplicate pre-release core fixture uses retired API names and payloads; current core cases preserve its coverage
+apps/browser-0.1.1.2 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/browser-0.1.1.3
+apps/core-0.1.1.4 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/core-0.1.1.5
+apps/events-0.1.1.4 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/events-0.1.1.5
+apps/desktop-0.1.1 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/desktop-0.1.1.2
+apps/gallery-0.1.1 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/gallery-0.1.1.2
+apps/modules-0.1.1.2 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/modules-0.1.1.3
+apps/paint-0.1.1.3 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/paint-0.1.1.4
+apps/props-0.1.1.4 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/props-0.1.1.5
+apps/browser-0.1.1 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/browser-0.1.1.3
+apps/paint-0.1.1 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/paint-0.1.1.4
+apps/paint-0.1.1.2 -- uses environment or media APIs renamed before v0.1.2; updated sources and assertions run as apps/paint-0.1.1.4
+
+[nsh/accessibility] AccessibilityInfo -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/android] BackHandler.addEventListener -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/clipboard] Clipboard.getFiles -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/clipboard] Clipboard.getImage -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/clipboard] Clipboard.getString -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/clipboard] Clipboard.hasString -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/clipboard] Clipboard.setImage -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/clipboard] Clipboard.setString -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/device] I18nManager -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/device] PixelRatio -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/device] Platform -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+[nsh/storage] Storage.getAllKeys -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/accessibility.d.ts: AccessibilityChangeEvent -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/accessibility.d.ts: AccessibilitySettings -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/accessibility.d.ts: AccessibilityInfoModule -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/accessibility.d.ts: AccessibilityInfo -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/android.d.ts: BackListeners.addEventListener -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardImage.uri -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardImage.width -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardImage.height -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardModule.getFiles -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardModule.getImage -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardModule.getString -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardModule.hasString -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardModule.setImage -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/clipboard.d.ts: ClipboardModule.setString -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/device.d.ts: PlatformStatic -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/device.d.ts: PixelRatioStatic -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/device.d.ts: I18nManagerStatic -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/device.d.ts: Platform -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/device.d.ts: PixelRatio -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/device.d.ts: I18nManager -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/storage.d.ts: StorageModule.getAllKeys -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/types.d.ts: ViewStyle.experimental_backgroundImage -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #274
+nsh/canvas.d.ts: CanvasRenderingContext2D.drawImage -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/image.d.ts: ImageModule.getSize -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/image.d.ts: ImageModule.prefetch -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/types.d.ts: ImageAsset.uri -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/types.d.ts: ImageAsset.width -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/types.d.ts: ImageAsset.height -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/types.d.ts: ImageHostProps.src -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/types.d.ts: ImageHostProps.defaultSource -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/types.d.ts: WebViewHostProps.source -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/types.d.ts: VideoHostProps.source -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/types.d.ts: VideoHostProps.onLoad -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/video.d.ts: VideoProps.source -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283
+nsh/video.d.ts: VideoProps.src -- required replacement for VideoProps.source before the first compatible release (v0.1.2); see #283 and docs/dev/api-naming.md
+nsh/webview.d.ts: WebViewProps.source -- removed or reshaped by the maintainer's decision before the first compatible release (v0.1.2): docs/dev/api-naming.md's "Renames before the first compatible release"; see #283

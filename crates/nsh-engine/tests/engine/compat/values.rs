@@ -95,10 +95,10 @@ impl Mounted {
             } => self.image = Some((source.clone(), *resize_mode, options.clone())),
             MountItem::ScrollConfig {
                 horizontal,
-                shows_indicator,
+                scrollbar_visible,
                 keyboard_dismiss,
                 ..
-            } => self.scroll = Some((*horizontal, *shows_indicator, *keyboard_dismiss)),
+            } => self.scroll = Some((*horizontal, *scrollbar_visible, *keyboard_dismiss)),
             MountItem::ScrollBehavior { behavior, .. } => self.behavior = Some(behavior.clone()),
             MountItem::Refreshing { refreshing, .. } => self.refreshing = *refreshing,
             MountItem::Input { config, .. } => self.input = Some(config.clone()),
@@ -261,6 +261,7 @@ impl Mounted {
                 out.put("resizeMode", resize.js_name().into());
                 if let Some(s) = options.placeholder {
                     out.put("defaultSource", s.uri.to_string());
+                    out.put("placeholder", s.uri.to_string());
                 }
                 out.put("blurRadius", num(options.blur_radius));
                 if let Some(v) = options.fade_ms {
@@ -272,7 +273,7 @@ impl Mounted {
                     self.scroll
                         .unwrap_or((false, true, KeyboardDismissMode::default()));
                 out.put("horizontal", horizontal.to_string());
-                out.put("showsIndicator", indicator.to_string());
+                out.put("scrollbar", indicator.to_string());
                 out.put("keyboardDismissMode", dismiss.js_name().into());
                 let b = self.behavior.as_deref().cloned().unwrap_or_default();
                 out.put("pagingEnabled", b.paging.to_string());
@@ -283,7 +284,7 @@ impl Mounted {
                 );
                 out.put("snapToAlignment", b.snap_alignment.js_name().into());
                 out.put("decelerationRate", num(b.deceleration));
-                out.put("scrollEnabled", b.enabled.to_string());
+                out.put("scrollable", b.enabled.to_string());
                 out.put("bounces", b.bounces.to_string());
                 out.put("contentInset", insets(&b.content_inset));
                 out.put(
@@ -299,7 +300,7 @@ impl Mounted {
                 out.put("minimumZoomScale", num(b.min_zoom));
                 out.put("maximumZoomScale", num(b.max_zoom));
                 out.put("bouncesZoom", b.bounces_zoom.to_string());
-                out.put("pinchGestureEnabled", b.pinch.to_string());
+                out.put("zoomable", b.pinch.to_string());
                 out.put("centerContent", b.center_content.to_string());
                 out.put("refreshing", self.refreshing.to_string());
             }
@@ -325,7 +326,7 @@ impl Mounted {
                 }
                 out.put("autoFocus", c.auto_focus.to_string());
                 out.put("autoComplete", auto_fill(c.auto_fill).into());
-                out.put("caretHidden", c.caret_hidden.to_string());
+                out.put("caret", (!c.caret_hidden).to_string());
                 if let Some(v) = &c.accessory_id {
                     out.put("inputAccessoryViewID", v.to_string());
                 }
@@ -340,7 +341,7 @@ impl Mounted {
                 if let Some(v) = &c.title {
                     out.put("title", v.to_string());
                 }
-                out.put("headerShown", c.header_shown.to_string());
+                out.put("headerVisible", c.header_visible.to_string());
                 out.put("headerLargeTitle", c.large_title.to_string());
                 out.put("headerTransparent", c.header_transparent.to_string());
                 let mut o = Object::default();
@@ -390,6 +391,15 @@ impl Mounted {
                 if let Some(v) = web_source(&w.source) {
                     out.put("source", v);
                 }
+                if let Some(v) = &w.src {
+                    out.put("src", v.to_string());
+                }
+                if let WebSource::Html { html, .. } = &w.source {
+                    out.put("html", html.to_string());
+                }
+                if let Some(v) = &w.base_url {
+                    out.put("baseUrl", v.to_string());
+                }
                 if let Some(v) = &w.injected_js {
                     out.put("injectedJavaScript", v.to_string());
                 }
@@ -399,7 +409,7 @@ impl Mounted {
                 if let Some(v) = &w.user_agent {
                     out.put("userAgent", v.to_string());
                 }
-                out.put("scrollEnabled", w.scroll_enabled.to_string());
+                out.put("scrollable", w.scrollable.to_string());
                 out.put("javaScriptEnabled", w.javascript_enabled.to_string());
                 out.put(
                     "allowsBackForwardNavigationGestures",
@@ -413,6 +423,7 @@ impl Mounted {
                 };
                 if let Some(s) = &v.source {
                     out.put("source", s.to_string());
+                    out.put("src", s.to_string());
                 }
                 out.put("paused", v.paused.to_string());
                 out.put("muted", v.muted.to_string());
@@ -1063,6 +1074,74 @@ fn values_are_written_as_apps_write_them() {
     assert_eq!(styles["shadowOffset"], "width=0 height=-3");
     assert_eq!(styles["transformOrigin"], "50% 50% 0");
     assert_eq!(view.props()["accessibilityState"], "{}");
+}
+
+/// New media keys coexist with the frozen fixture vocabulary.
+#[test]
+fn media_props_keep_frozen_keys() {
+    let image = Mounted {
+        kind: Some(ViewKind::Image),
+        image: Some((
+            None,
+            ResizeMode::default(),
+            ImageOptions {
+                placeholder: Some(ImageSource {
+                    uri: "asset:/placeholder.png".into(),
+                    size: None,
+                    scales: Default::default(),
+                }),
+                ..Default::default()
+            },
+        )),
+        ..Default::default()
+    };
+    let props = image.props();
+    assert_eq!(props["placeholder"], "asset:/placeholder.png");
+    assert_eq!(props["defaultSource"], props["placeholder"]);
+
+    let video = Mounted {
+        kind: Some(ViewKind::Video),
+        native: Some(NativeProps::Video(Box::new(VideoProps {
+            source: Some("asset:/video.mp4".into()),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let props = video.props();
+    assert_eq!(props["src"], "asset:/video.mp4");
+    assert_eq!(props["source"], props["src"]);
+
+    let mut web = Mounted {
+        kind: Some(ViewKind::WebView),
+        native: Some(NativeProps::WebView(Box::new(WebProps {
+            source: WebSource::Html {
+                html: "<p>page</p>".into(),
+                base_url: Some("https://example.com/".into()),
+            },
+            src: Some("https://example.com/fallback".into()),
+            base_url: Some("https://example.com/".into()),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let props = web.props();
+    assert_eq!(props["html"], "<p>page</p>");
+    assert_eq!(props["baseUrl"], "https://example.com/");
+    assert_eq!(props["src"], "https://example.com/fallback");
+    assert_eq!(
+        props["source"],
+        "html=<p>page</p> baseUrl=https://example.com/"
+    );
+    web.native = Some(NativeProps::WebView(Box::new(WebProps {
+        source: WebSource::Uri("https://example.com/fallback".into()),
+        src: Some("https://example.com/fallback".into()),
+        base_url: Some("https://example.com/".into()),
+        ..Default::default()
+    })));
+    let props = web.props();
+    assert_eq!(props["source"], props["src"]);
+    assert!(!props.contains_key("html"));
+    assert_eq!(props["baseUrl"], "https://example.com/");
 }
 
 /// Keys added after the ones above, read from what the platform is told

@@ -814,14 +814,14 @@ impl Surface {
                 MountItem::ScrollConfig {
                     id,
                     horizontal,
-                    shows_indicator,
+                    scrollbar_visible,
                     scroll_value,
                     mirrored,
                     keyboard_dismiss,
                 } => {
                     if let Some(node) = self.node_mut(id) {
                         node.scroll.horizontal = horizontal;
-                        node.scroll.shows_indicator = shows_indicator;
+                        node.scroll.shows_indicator = scrollbar_visible;
                         node.scroll.scroll_value = scroll_value;
                         node.scroll.mirrored = mirrored;
                     }

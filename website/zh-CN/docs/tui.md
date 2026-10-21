@@ -118,7 +118,7 @@ Ctrl+Y 撤销和重做。安全输入框隐藏内容并保护复制与剪切。�
 选择按钮，Enter 激活按钮。
 
 终端界面可使用 [`nsh/desktop`](../modules/nsh-desktop.md) 提供的标题与菜单。
-`Platform.isTerminal` 标识这种呈现方式，`Platform.isDesktop` 则标识图形桌面界面。
+`platform.isTerminal` 标识这种呈现方式，`platform.idiom === "desktop" && !platform.isTerminal` 则标识图形桌面界面。
 F10 打开应用菜单；方向键导航，Enter 或 Space 选择，Escape 关闭。应用菜单和弹出菜单支持子菜单、勾选标记、
 禁用项及快捷键。独立宿主通过清理后的 OSC 2 输出更新窗口标题。
 

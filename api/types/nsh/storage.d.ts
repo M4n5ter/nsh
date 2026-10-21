@@ -9,7 +9,7 @@ export interface StorageModule {
   /** Removes `key`. */
   removeItem(key: string): Promise<void>;
   /** Every key, in order. */
-  getAllKeys(): Promise<(string)[]>;
+  keys(): Promise<(string)[]>;
   /** Removes every key. */
   clear(): Promise<void>;
 }

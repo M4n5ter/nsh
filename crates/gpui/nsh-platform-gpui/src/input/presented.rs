@@ -285,11 +285,11 @@ fn opaque(surface: &Surface, view: &NshView, press: bool) -> bool {
             .is_some_and(|text| !text.text.links.is_empty())
         || (!press
             && [
-                EventKind::ScrollBeginDrag,
-                EventKind::ScrollEndDrag,
+                EventKind::ScrollDragStart,
+                EventKind::ScrollDragEnd,
                 EventKind::ScrollEnd,
-                EventKind::MomentumScrollBegin,
-                EventKind::MomentumScrollEnd,
+                EventKind::MomentumStart,
+                EventKind::MomentumEnd,
             ]
             .into_iter()
             .any(|event| state.events.contains(event)))

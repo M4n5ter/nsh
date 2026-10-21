@@ -191,7 +191,7 @@ export declare class CanvasRenderingContext2D {
    * `(image, sx, sy, sw, sh, dx, dy, dw, dh)` for part of it (source in
    * image pixels). The canvas draws again once it has loaded.
    */
-  drawImage(image: string | ImageAsset | { uri: string }, ...args: CanvasNumber[]): void;
+  drawImage(image: string | ImageAsset, ...args: CanvasNumber[]): void;
 }
 export interface CanvasRenderingContext2D extends CanvasPath, CanvasContextMethods, CanvasProperties {}
 

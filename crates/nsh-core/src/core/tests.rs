@@ -2723,7 +2723,7 @@ fn screens_fill_their_stack_below_the_header() {
         &mut c,
         vec![Op::SetProp {
             id: 3,
-            prop: Prop::Screen(crate::ScreenProp::HeaderShown(false)),
+            prop: Prop::Screen(crate::ScreenProp::HeaderVisible(false)),
         }],
     );
     let batch = c.commit().unwrap();
@@ -4242,12 +4242,12 @@ fn views_inside_text_are_attachments() {
             crate::TextAttachment {
                 index: 2,
                 width: Points(20.0),
-                height: Points(10.0)
+                height: Points(10.0),
             },
             crate::TextAttachment {
                 index: 5,
                 width: Points(12.0),
-                height: Points(12.0)
+                height: Points(12.0),
             },
         ]
     );
@@ -4293,6 +4293,39 @@ fn views_inside_text_are_attachments() {
         .unwrap();
     assert_eq!(text.attachments[0].width, Points(30.0));
     assert_eq!(frame_of(&batch, 4).map(|f| f.size.width.0), Some(30.0));
+
+    // `verticalAlign` builds the text again: the engine places it.
+    let align_of = |c: &mut Core<FakeEngine>, align: &str| {
+        apply(
+            c,
+            vec![style_op(4, &[("verticalAlign", StyleValue::Str(align))])],
+        );
+        let batch = c.commit()?;
+        if !batch
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::Text { id: 2, .. }))
+        {
+            return None;
+        }
+        let layout = c.nodes[c.key(2).unwrap() as usize].layout.unwrap();
+        let cx = c.text_cx(layout);
+        Some(cx.alignments.get(cx.text.attachments[0].index))
+    };
+    assert_eq!(
+        align_of(&mut c, "text-top"),
+        Some(crate::VerticalAlign::TextTop)
+    );
+    assert_eq!(
+        align_of(&mut c, "middle"),
+        Some(crate::VerticalAlign::Middle)
+    );
+    // Unchanged: nothing to build.
+    assert_eq!(align_of(&mut c, "middle"), None);
+    assert_eq!(
+        align_of(&mut c, "baseline"),
+        Some(crate::VerticalAlign::Baseline)
+    );
 
     // Taken out of the text: its view leaves the text view.
     apply(
@@ -7164,7 +7197,7 @@ mod components {
                     let has = has.await;
                     let image = image
                         .await
-                        .map(|i| format!("{}x{} {}", i.width.0, i.height.0, i.uri));
+                        .map(|i| format!("{}x{} {}", i.size.width.0, i.size.height.0, i.url));
                     let files = files.await.join(",");
                     pasted.set(format!("{has} {image:?} {files}"));
                 });
@@ -11173,7 +11206,11 @@ fn hover_moves_reach_rust_listeners_with_their_positions_and_modifiers() {
             .on_hover_move(move |e: &HoverEvent| {
                 at.set(format!(
                     "{} {} {} {} {}",
-                    e.location.x.0, e.location.y.0, e.page.x.0, e.page.y.0, e.modifiers.shift
+                    e.position.x.0,
+                    e.position.y.0,
+                    e.page_position.x.0,
+                    e.page_position.y.0,
+                    e.modifiers.shift
                 ))
             })
             .child(text(move || at.get()))
@@ -11190,8 +11227,8 @@ fn hover_moves_reach_rust_listeners_with_their_positions_and_modifiers() {
         })
         .expect("the listening view mounts HoverMove in its event mask");
     let event = crate::HoverEvent {
-        location: point(px(4.0), px(5.0)),
-        page: point(px(14.0), px(25.0)),
+        position: point(px(4.0), px(5.0)),
+        page_position: point(px(14.0), px(25.0)),
         modifiers: crate::keymap::Modifiers {
             shift: true,
             ..Default::default()
@@ -11219,7 +11256,7 @@ fn context_menus_reach_rust_listeners_with_their_positions() {
             .on_context_menu(move |e: &ContextMenuEvent| {
                 at.set(format!(
                     "{} {} {} {}",
-                    e.location.x.0, e.location.y.0, e.page.x.0, e.page.y.0
+                    e.position.x.0, e.position.y.0, e.page_position.x.0, e.page_position.y.0
                 ))
             })
             .child(text(move || at.get()))
@@ -11238,8 +11275,8 @@ fn context_menus_reach_rust_listeners_with_their_positions() {
         })
         .expect("the listening view mounts ContextMenu in its event mask");
     let event = crate::ContextMenuEvent {
-        location: point(px(4.0), px(5.0)),
-        page: point(px(14.0), px(25.0)),
+        position: point(px(4.0), px(5.0)),
+        page_position: point(px(14.0), px(25.0)),
         ..Default::default()
     };
     assert!(c.component_event(
@@ -12861,7 +12898,7 @@ fn image_ops(id: NodeId, source: ImageSource, placeholder: Option<ImageSource>) 
     if placeholder.is_some() {
         ops.push(Op::SetProp {
             id,
-            prop: Prop::Image(ImageProp::DefaultSource(placeholder)),
+            prop: Prop::Image(ImageProp::Placeholder(placeholder)),
         });
     }
     ops.push(Op::Insert {
@@ -13073,12 +13110,13 @@ fn image_scales_decode_from_js() {
     let decode = |v: serde_json::Value| ImageSource::decode(&J(v), &mut HostCx::default());
 
     let source = decode(serde_json::json!({
-        "uri": "asset:/a.png", "width": 40, "height": 30, "scales": [1, 2, "3", -1, 2.5, 3]
+        "url": "asset:/a.png", "size": { "width": 40, "height": 30 }, "scales": [1, 2, "3", -1, 2.5, 3]
     }))
     .unwrap();
     assert_eq!(source.size, Some(crate::geometry::size_pt(40.0, 30.0)));
     assert_eq!(source.scales.iter().collect::<Vec<_>>(), [1.0, 2.0, 3.0]);
-    let plain = decode(serde_json::json!({ "uri": "asset:/a.png", "width": 40, "height": 30 }));
+    let plain =
+        decode(serde_json::json!({ "url": "asset:/a.png", "size": { "width": 40, "height": 30 } }));
     assert_eq!(plain.unwrap().scales, ImageScales::NONE);
     assert_eq!(
         decode(serde_json::json!("https://x.org/a.png"))
@@ -13086,11 +13124,11 @@ fn image_scales_decode_from_js() {
             .scales,
         ImageScales::NONE
     );
-    let odd = decode(serde_json::json!({ "uri": "asset:/a.png", "scales": "2" })).unwrap();
+    let odd = decode(serde_json::json!({ "url": "asset:/a.png", "scales": "2" })).unwrap();
     assert!(odd.scales.is_empty());
     // Only the first entries are read.
     let long = decode(serde_json::json!({
-        "uri": "asset:/a.png", "scales": [1, 1, 1, 1, 1, 1, 1, 1, 2]
+        "url": "asset:/a.png", "scales": [1, 1, 1, 1, 1, 1, 1, 1, 2]
     }));
     assert_eq!(long.unwrap().scales.iter().collect::<Vec<_>>(), [1.0]);
 }
@@ -13167,12 +13205,12 @@ mod asset_variants {
     use crate::ui::{ImageAsset, prelude::*};
 
     const FLAG: ImageAsset = ImageAsset {
-        uri: "asset:/@demo/flag.png",
+        url: "asset:/@demo/flag.png",
         size: crate::geometry::size_pt(17.0, 12.0),
         scales: &[1.0, 2.0, 3.0],
     };
     const PLAIN: ImageAsset = ImageAsset {
-        uri: "asset:/@demo/plain.png",
+        url: "asset:/@demo/plain.png",
         size: crate::geometry::size_pt(10.0, 10.0),
         scales: &[],
     };

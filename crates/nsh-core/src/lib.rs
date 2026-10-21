@@ -90,12 +90,12 @@ pub use crate::{
         BorderStyle, Borders, Color, CornerRadii, DecorationStyle, EllipsizeMode, FontFamily,
         FontVariant, PatchValue, Shadow, Style, StyleDecl, StyleError, StyleKey, StylePatch,
         StyleValue, TextAlign, TextDecoration, TextShadow, TextStyle, TextTransform,
-        TransformOrigin, ViewStyle,
+        TransformOrigin, VerticalAlign, ViewStyle,
     },
     text::{
-        ATTACHMENT_CHAR, ApproxTextEngine, AttributedText, BackgroundBox, LinePiece,
-        ResolvedTextStyle, TextAttachment, TextBackground, TextEngine, TextLayout, TextLine,
-        TextLink, TextSpan,
+        ATTACHMENT_CHAR, ApproxTextEngine, AttachmentAlignments, AttributedText, BackgroundBox,
+        FontExtent, LinePiece, ResolvedTextStyle, TextAttachment, TextBackground, TextEngine,
+        TextLayout, TextLine, TextLink, TextSpan,
     },
     transform::{Decomposed, MAX_TRANSFORMS, Matrix, Transform, TransformKind, TransformOp},
 };

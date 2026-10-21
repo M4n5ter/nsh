@@ -209,7 +209,7 @@ fn items(runtime: &str, types: &[(String, String)]) -> (BTreeSet<String>, HashSe
 /// Host props interfaces no component inherits, whose names components
 /// declare as their own (`Overlay`'s `offset`, `margin` and `onCancel`
 /// are `KeyboardAvoidingView.offset`'s and `Dialog.onCancel`'s too).
-const OWN_NAMES: &[&str] = &["OverlayHostProps"];
+const OWN_NAMES: &[&str] = &["OverlayHostProps", "WebViewHostProps"];
 
 /// A member named by an identifier (not a call or index signature).
 fn is_name(member: &str) -> bool {
@@ -900,4 +900,23 @@ fn usage_is_read() {
             "[styles] color",
         ]
     );
+}
+
+/// WebView HTML and a component's HTML are separate coverage obligations.
+#[test]
+fn webview_html_does_not_hide_component_html() {
+    let types = [
+        (
+            "nsh/types.d.ts".to_owned(),
+            "export interface WebViewHostProps {\n  html?: string;\n}\n".to_owned(),
+        ),
+        (
+            "nsh/text-view.d.ts".to_owned(),
+            "export interface TextViewProps {\n  html: string;\n}\n".to_owned(),
+        ),
+    ];
+    let (items, required) = items("[nsh/text-view]\nTextView function\n", &types);
+    assert!(items.contains("[props] html"));
+    assert!(items.contains("[props] TextView.html"));
+    assert!(required.contains("[props] TextView.html"));
 }

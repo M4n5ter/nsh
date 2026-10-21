@@ -52,12 +52,12 @@ function App() {
       ))}
       <Image
         testID="tinted"
-        src={{ uri: "https://example.com/compat.png" }}
+        src="https://example.com/compat.png"
         style={{ width: 16, height: 16, tintColor: "#ff9500" }}
       />
       <Image
         testID="tinted-hsl"
-        src={{ uri: "https://example.com/compat.png" }}
+        src="https://example.com/compat.png"
         style={{ width: 16, height: 16, tintColor: "hsl(210, 100%, 50%)" }}
       />
       <View testID="origin-center" style={{ height: 4, transformOrigin: "center" }} />

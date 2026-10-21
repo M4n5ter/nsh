@@ -168,7 +168,7 @@ export declare function Overlay(props: OverlayProps): YNode;
 
 /**
  * An image (a URL or `import logo from "./logo.png"`), decoded and cached
- * natively; `Image.getSize(uri)` and `Image.prefetch(uri)` ask about one
+ * natively; `Image.getSize(src)` and `Image.prefetch(src)` ask about one
  * without showing it.
  */
 export declare const Image: ((props: ImageProps) => YNode) & ImageModule;

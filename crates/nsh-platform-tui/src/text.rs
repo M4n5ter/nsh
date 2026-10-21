@@ -8,8 +8,8 @@
 use std::{borrow::Cow, sync::Arc};
 
 use nsh_core::{
-    AttributedText, Bounds, EllipsizeMode, Point, Points, ResolvedTextStyle, Size, TextAlign,
-    TextEngine, TextLayout, TextLine, TextShadow, geometry::px,
+    AttachmentAlignments, AttributedText, Bounds, EllipsizeMode, FontExtent, Point, Points,
+    ResolvedTextStyle, Size, TextAlign, TextEngine, TextLayout, TextLine, TextShadow, geometry::px,
 };
 use ratatui::{
     buffer::Buffer,
@@ -58,7 +58,8 @@ struct Cluster {
     whitespace: bool,
     newline: bool,
     tab: bool,
-    attachment: Option<(usize, Points, Points)>,
+    // Original slot, width, height and distance above the baseline.
+    attachment: Option<(usize, Points, Points, Points)>,
 }
 
 impl Cluster {
@@ -162,20 +163,25 @@ fn line_geometry(
     fallback: ResolvedTextStyle,
     metrics: CellMetrics,
 ) -> (Points, Points) {
-    let attachment_height = clusters
+    let (above, below) = clusters
         .iter()
-        .filter_map(|c| c.attachment.map(|(_, _, h)| h))
-        .fold(Points::ZERO, Points::max);
+        .fold((Points::ZERO, Points::ZERO), |(above, below), c| {
+            match c.attachment {
+                Some((_, _, height, ascent)) => (above.max(ascent), below.max(height - ascent)),
+                None => (above, below),
+            }
+        });
     let requested = clusters
         .iter()
         .fold(fallback.line_height, |h, c| h.max(c.style.line_height));
-    let height = (requested.max(attachment_height).max(metrics.height()) / metrics.height()).ceil()
+    let height = (requested.max(above + below).max(metrics.height()) / metrics.height()).ceil()
         * metrics.height();
-    // A cell's bottom is its baseline. Inline views share that baseline, so
-    // a one-row attachment fits on a one-row text line without phantom leading.
+    // Text uses whole terminal rows, with a cell's bottom as its baseline.
+    // Reserve both sides of that baseline for aligned inline views.
     let centered =
         ((height / metrics.height() - 1.0) / 2.0).floor() * metrics.height() + metrics.height();
-    let baseline = centered.max((attachment_height / metrics.height()).ceil() * metrics.height());
+    let baseline = centered.max((above / metrics.height()).ceil() * metrics.height());
+    let height = height.max(baseline + (below / metrics.height()).ceil() * metrics.height());
     (height, baseline)
 }
 
@@ -282,6 +288,14 @@ impl TextEngine for TerminalTextEngine {
     type Prepared = PreparedText;
 
     fn prepare(&self, text: &AttributedText) -> PreparedText {
+        self.prepare_aligned(text, &AttachmentAlignments::default())
+    }
+
+    fn prepare_aligned(
+        &self,
+        text: &AttributedText,
+        alignments: &AttachmentAlignments,
+    ) -> PreparedText {
         let direction = text
             .writing_direction
             .map(|rtl| if rtl { Level::rtl() } else { Level::ltr() });
@@ -331,6 +345,14 @@ impl TextEngine for TerminalTextEngine {
                         attachment_index,
                         a.width.max(Points::ZERO),
                         a.height.max(Points::ZERO),
+                        a.ascent(
+                            FontExtent::new(
+                                self.metrics.height(),
+                                Points::ZERO,
+                                self.metrics.height() / 2.0,
+                            ),
+                            alignments.get(a.index),
+                        ),
                     )
                 });
             let tab = grapheme == "\t";
@@ -356,7 +378,7 @@ impl TextEngine for TerminalTextEngine {
                         width.saturating_add(spacing)
                     }
                 },
-                |(_, width, _)| (width / self.metrics.width()).ceil() as usize,
+                |(_, width, _, _)| (width / self.metrics.width()).ceil() as usize,
             );
             clusters.push(Cluster {
                 text: printable,
@@ -492,9 +514,9 @@ impl TextEngine for TerminalTextEngine {
                     gaps_left -= 1;
                     width_columns += extra;
                 }
-                if let Some((slot, _, attachment_height)) = piece.attachment {
+                if let Some((slot, _, _, attachment_ascent)) = piece.attachment {
                     result.attachments[slot] =
-                        Some(Point::new(x, y + baseline - attachment_height));
+                        Some(Point::new(x, y + baseline - attachment_ascent));
                 } else if !piece.text.is_empty() || piece.whitespace {
                     result.runs.push(TerminalRun {
                         x,
@@ -1491,6 +1513,41 @@ mod tests {
         assert_eq!(result.attachments, [Some(Point::new(px(8.0), px(0.0)))]);
         assert_eq!(result.runs[0].y, px(16.0));
         assert_eq!(result.lines[0].height, px(32.0));
+    }
+
+    #[test]
+    fn aligned_attachments_reserve_both_sides_of_the_terminal_baseline() {
+        use nsh_core::VerticalAlign;
+
+        let engine = TerminalTextEngine::default();
+        for (align, attachment_height, expected_y, expected_height) in [
+            (VerticalAlign::Baseline, 8.0, 8.0, 16.0),
+            (VerticalAlign::TextTop, 8.0, 0.0, 16.0),
+            (VerticalAlign::TextBottom, 8.0, 8.0, 16.0),
+            (VerticalAlign::Middle, 16.0, 4.0, 32.0),
+            (VerticalAlign::Baseline, 32.0, 0.0, 32.0),
+            (VerticalAlign::TextTop, 32.0, 0.0, 32.0),
+            (VerticalAlign::Middle, 32.0, 12.0, 48.0),
+        ] {
+            let mut value = text("a");
+            let mut alignments = AttachmentAlignments::default();
+            alignments.push(
+                &mut value,
+                Size::new(px(16.0), px(attachment_height)),
+                align,
+                ResolvedTextStyle::default(),
+            );
+            let prepared = engine.prepare_aligned(&value, &alignments);
+            let measured = engine.measure(&prepared, None);
+            assert_eq!(measured.height, px(expected_height), "{align:?}");
+            let result = engine.layout(&prepared, measured);
+            assert_eq!(
+                engine.attachments(&result),
+                [Some(Point::new(px(8.0), px(expected_y)))],
+                "{align:?}",
+            );
+            assert!(px(expected_y + attachment_height) <= measured.height);
+        }
     }
 
     #[test]
