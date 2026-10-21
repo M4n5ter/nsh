@@ -8,7 +8,7 @@ use image::{
     codecs::png::{CompressionType, FilterType, PngEncoder},
 };
 
-use crate::{CandidateFrame, MAX_WIRE_BYTES};
+use crate::CandidateFrame;
 
 pub(crate) fn dimensions(frame: &CandidateFrame) -> Result<(u32, u32)> {
     let bytes = crate::window::rgba_len(frame.size)?;
@@ -23,24 +23,20 @@ pub(crate) fn dimensions(frame: &CandidateFrame) -> Result<(u32, u32)> {
 }
 
 pub(crate) fn png(frame: &CandidateFrame, width: u32, height: u32) -> Result<Vec<u8>> {
-    let mut output = FrameBytes::new(MAX_WIRE_BYTES);
+    let mut output = FrameBytes::new();
     PngEncoder::new_with_quality(&mut output, CompressionType::Fast, FilterType::Adaptive)
         .write_image(&frame.pixels, width, height, ExtendedColorType::Rgba8)?;
     Ok(output.into_vec())
 }
 
-/// The encoder itself must fail before allocating an oversized wire string.
+/// Propagates actual allocation failures through each encoder's writer.
 pub(crate) struct FrameBytes {
     bytes: Vec<u8>,
-    limit: usize,
 }
 
 impl FrameBytes {
-    pub(crate) fn new(limit: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            limit,
-        }
+    pub(crate) fn new() -> Self {
+        Self { bytes: Vec::new() }
     }
 
     pub(crate) fn into_vec(self) -> Vec<u8> {
@@ -50,15 +46,15 @@ impl FrameBytes {
     pub(crate) fn len(&self) -> usize {
         self.bytes.len()
     }
+
+    pub(crate) fn try_reserve(&mut self, additional: usize) -> io::Result<()> {
+        self.bytes.try_reserve(additional).map_err(io::Error::other)
+    }
 }
 
 impl Write for FrameBytes {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
-            return Err(io::Error::other(
-                "terminal image exceeds its pending budget",
-            ));
-        }
+        self.try_reserve(bytes.len())?;
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }

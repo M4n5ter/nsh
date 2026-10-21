@@ -24,12 +24,6 @@ use std::{
 
 pub use platform::TerminalPlatform;
 
-/// The maximum tightly packed RGBA allocation for one offscreen scene.
-pub const MAX_PIXEL_BYTES: usize = 64 * 1024 * 1024;
-
-/// The maximum complete per-frame wire transaction, including ANSI controls.
-pub const MAX_WIRE_BYTES: usize = 8 * 1024 * 1024;
-
 /// An authentic draw's identity in one terminal viewport generation.
 ///
 /// The default token is inert. A token is issued only after a complete GPU

@@ -17,7 +17,7 @@ use std::io::Write;
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use crate::{CandidateFrame, FrameToken, MAX_WIRE_BYTES, wire};
+use crate::{CandidateFrame, FrameToken, wire};
 
 /// A negotiated image transport for the same complete native GPUI scene.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,7 +30,7 @@ pub enum InlineProtocol {
     Iterm2,
 }
 
-/// A complete bounded transaction awaiting the sole terminal writer's receipt.
+/// A complete transaction awaiting the sole terminal writer's receipt.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct InlineFrame {
@@ -44,7 +44,7 @@ impl InlineFrame {
     ///
     /// Run on the existing graphics worker, outside the output owner's IO lock.
     /// `synchronized` is an independently negotiated synchronized-update
-    /// capability. All its controls count towards the complete 8 MiB wire limit.
+    /// capability. The transaction includes all of its matching controls.
     pub fn encode(
         frame: &CandidateFrame,
         protocol: InlineProtocol,
@@ -52,23 +52,12 @@ impl InlineFrame {
         rows: u16,
         synchronized: bool,
     ) -> Result<Self> {
-        Self::with_limit(frame, protocol, columns, rows, synchronized, MAX_WIRE_BYTES)
-    }
-
-    fn with_limit(
-        frame: &CandidateFrame,
-        protocol: InlineProtocol,
-        columns: u16,
-        rows: u16,
-        synchronized: bool,
-        limit: usize,
-    ) -> Result<Self> {
         ensure!(
             columns > 0 && rows > 0,
             "terminal cell dimensions must be nonzero"
         );
         let (width, height) = wire::dimensions(frame)?;
-        let mut output = wire::FrameBytes::new(limit);
+        let mut output = wire::FrameBytes::new();
         if synchronized {
             output.write_all(b"\x1b[?2026h")?;
         }
@@ -102,10 +91,7 @@ impl InlineFrame {
                     .and_then(|n| n.checked_add(1 + suffix.len()))
                     .and_then(|n| n.checked_add(output.len()))
                     .ok_or_else(|| anyhow::anyhow!("terminal image wire size overflow"))?;
-                ensure!(
-                    total <= limit,
-                    "terminal image exceeds its complete wire budget"
-                );
+                output.try_reserve(total - output.len())?;
                 output.write_all(header.as_bytes())?;
                 output.write_all(STANDARD.encode(&png).as_bytes())?;
                 output.write_all(b"\x07")?;
@@ -203,39 +189,42 @@ mod tests {
     }
 
     #[test]
-    fn whole_transaction_admission_includes_controls_and_rejects_inert_frames() {
+    fn whole_transactions_include_controls_and_reject_inert_frames() {
         let source = frame();
         for protocol in [InlineProtocol::Sixel, InlineProtocol::Iterm2] {
             let encoded = InlineFrame::encode(&source, protocol, 1, 1, true).unwrap();
             assert!(encoded.bytes().starts_with(b"\x1b[?2026h\x1b[H\x1b[2J"));
             assert!(encoded.bytes().ends_with(b"\x1b[H\x1b[?2026l"));
-            assert!(InlineFrame::with_limit(&source, protocol, 1, 1, true, 24).is_err());
             assert!(
                 InlineFrame::encode(&CandidateFrame::default(), protocol, 1, 1, false).is_err()
             );
             assert!(InlineFrame::encode(&source, protocol, 0, 1, false).is_err());
 
             let without_sync = InlineFrame::encode(&source, protocol, 1, 1, false).unwrap();
-            let exact = without_sync.bytes().len() + 16;
-            assert!(InlineFrame::with_limit(&source, protocol, 1, 1, true, exact - 1).is_err());
-            let admitted = InlineFrame::with_limit(&source, protocol, 1, 1, true, exact).unwrap();
-            assert_eq!(admitted.bytes().len(), exact);
+            assert_eq!(encoded.bytes().len(), without_sync.bytes().len() + 16);
         }
     }
 
     #[test]
     fn iterm_file_streaming_roundtrips_a_scene_larger_than_generic_osc_limits() {
         let mut source = frame();
-        source.size = gpui::size(gpui::DevicePixels(512), gpui::DevicePixels(512));
+        source.size = gpui::size(gpui::DevicePixels(1920), gpui::DevicePixels(1200));
         let mut seed = 177u32;
-        source.pixels = (0..512 * 512 * 4)
-            .map(|_| {
+        source.pixels = (0..1920 * 1200 * 4)
+            .map(|index| {
+                if index % 4 == 3 {
+                    return 255;
+                }
                 seed ^= seed << 13;
                 seed ^= seed >> 17;
                 seed ^= seed << 5;
                 seed as u8
             })
             .collect();
+        // Keep explicit alpha coverage in an otherwise opaque desktop image.
+        source.pixels[3] = 127;
+        let last_alpha = source.pixels.len() - 1;
+        source.pixels[last_alpha] = 0;
         let encoded = InlineFrame::encode(&source, InlineProtocol::Iterm2, 120, 40, true).unwrap();
         let payload = encoded
             .bytes()
@@ -244,7 +233,7 @@ mod tests {
             .strip_suffix(b"\x1b[H\x1b[?2026l")
             .unwrap();
         assert!(payload.len() > 1_048_576);
-        assert!(encoded.bytes().len() <= 8 * 1024 * 1024);
+        assert!(encoded.bytes().len() > 8 * 1024 * 1024);
         let payload = std::str::from_utf8(payload).unwrap();
         let (header, png) = payload
             .strip_suffix('\x07')
@@ -261,7 +250,7 @@ mod tests {
         let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
             .unwrap()
             .into_rgba8();
-        assert_eq!(decoded.dimensions(), (512, 512));
+        assert_eq!(decoded.dimensions(), (1920, 1200));
         assert_eq!(decoded.as_raw(), source.pixels());
     }
 }

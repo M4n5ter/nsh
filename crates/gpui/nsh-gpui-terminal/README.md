@@ -32,8 +32,13 @@ pair that token with the existing AppView's immutable native input snapshot.
 Retain one output transaction in flight and one replaceable pending candidate.
 Once any upload byte is written, complete its entire APC sequence.
 
-`KittyFrame::encode` performs bounded PNG compression and admits the complete
-transaction under 8 MiB. Upload into the non-displayed owned image slot, accept
+The renderer checks actual texture dimensions and readback-buffer limits before
+allocating pixels. Encoder output writers use fallible allocations without an
+additional per-frame byte quota.
+
+`KittyFrame::encode` compresses the complete GPU frame into PNG and chunks its
+base64 payload at the protocol's 4096-byte boundary. Upload into the
+non-displayed owned image slot, accept
 only the sole reader's successful matching `(image id, placement 1)` reply,
 then flush `retire_previous` before `mark_presented`. An ACK timeout or error
 ends this graphics session; reusing its slots could misattribute a late reply.

@@ -1,4 +1,4 @@
-//! Bounded Kitty image transactions; terminal IO belongs to the embedding host.
+//! Complete Kitty image transactions; terminal IO belongs to the embedding host.
 //!
 //! Upload the back image, wait for its matching successful `(image, placement)`
 //! reply, then flush [`KittyFrame::retire_previous`]. Only that last receipt may
@@ -10,7 +10,6 @@
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-pub use crate::MAX_WIRE_BYTES;
 use crate::{CandidateFrame, FrameToken, wire};
 const CHUNK_BYTES: usize = 4096;
 
@@ -71,12 +70,9 @@ impl KittyFrame {
             })
             .and_then(|n| n.checked_add(retire.len()))
             .ok_or_else(|| anyhow::anyhow!("terminal image wire size overflow"))?;
-        ensure!(
-            wire_bytes <= MAX_WIRE_BYTES,
-            "terminal image exceeds its complete 8 MiB wire budget"
-        );
         let payload = STANDARD.encode(&png);
-        let mut upload = Vec::with_capacity(wire_bytes - retire.len());
+        let mut upload = Vec::new();
+        upload.try_reserve_exact(wire_bytes - retire.len())?;
         for (index, chunk) in payload.as_bytes().chunks(CHUNK_BYTES).enumerate() {
             if index == 0 {
                 upload.extend_from_slice(first.as_bytes());
@@ -219,14 +215,28 @@ mod tests {
     }
 
     #[test]
-    fn complete_wire_admission_rejects_oversize_pixels_and_displayed_slot_reuse() {
+    fn complete_frames_preserve_large_scenes_and_reject_displayed_slot_reuse() {
         let small = frame(1, 1);
         assert!(KittyFrame::encode(&small, 41, Some(41), 120, 40).is_err());
         let first = KittyFrame::encode(&small, 41, None, 120, 40).unwrap();
         assert!(first.retire_previous().is_empty());
         assert!(first.upload().ends_with(b"\x1b\\"));
-        let oversized = frame(1800, 1200);
-        assert!(KittyFrame::encode(&oversized, 41, None, 120, 40).is_err());
+        let large = frame(1800, 1200);
+        let encoded = KittyFrame::encode(&large, 41, None, 120, 40).unwrap();
+        assert!(encoded.upload().len() > 8 * 1024 * 1024);
+        let payload: String = std::str::from_utf8(encoded.upload())
+            .unwrap()
+            .split("\x1b\\")
+            .filter(|packet| !packet.is_empty())
+            .map(|packet| packet.split_once(';').unwrap().1)
+            .collect();
+        let png = STANDARD.decode(payload).unwrap();
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(decoded.dimensions(), (1800, 1200));
+        assert_eq!(decoded.as_raw(), large.pixels());
+        assert_eq!(encoded.token(), large.token());
         assert_eq!(
             capability_query(99).unwrap(),
             b"\x1b_Ga=q,t=d,f=32,s=1,v=1,i=99;AAAAAA==\x1b\\"

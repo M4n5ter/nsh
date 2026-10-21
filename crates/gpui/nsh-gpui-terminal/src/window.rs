@@ -15,7 +15,7 @@ use gpui::{
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-use crate::{CandidateFrame, FrameToken, MAX_PIXEL_BYTES};
+use crate::{CandidateFrame, FrameToken};
 type PixelSink = Box<dyn FnMut(CandidateFrame)>;
 type Wake = Arc<dyn Fn() + Send + Sync>;
 type Resize = Box<dyn FnMut(Size<Pixels>, f32)>;
@@ -79,15 +79,10 @@ pub(crate) fn rgba_len(size: Size<DevicePixels>) -> Result<usize> {
         width > 0 && height > 0,
         "terminal viewport must have positive dimensions"
     );
-    let bytes = width
+    width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| anyhow!("terminal pixel dimensions overflow"))?;
-    ensure!(
-        bytes <= MAX_PIXEL_BYTES,
-        "terminal frame exceeds the 64 MiB RGBA limit"
-    );
-    Ok(bytes)
+        .ok_or_else(|| anyhow!("terminal pixel dimensions overflow"))
 }
 
 fn device_size(size: Size<Pixels>) -> Result<Size<DevicePixels>> {
@@ -599,15 +594,10 @@ impl PlatformWindow for TerminalWindow {
         let candidate = (|| -> Result<CandidateFrame> {
             let mut state = self.0.borrow_mut();
             let size = state.size;
-            let length = rgba_len(size)?;
-            let mut pixels = Vec::new();
-            pixels
-                .try_reserve_exact(length)
-                .map_err(|error| anyhow!("cannot allocate terminal frame: {error}"))?;
-            pixels.resize(length, 0);
-            state
+            let pixels = state
                 .renderer
-                .render_scene_to_pixels(scene, size, &mut pixels)?;
+                .render_scene_to_image(scene, size)?
+                .into_raw();
             state.sequence = state
                 .sequence
                 .checked_add(1)
