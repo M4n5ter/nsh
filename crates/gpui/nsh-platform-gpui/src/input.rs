@@ -125,6 +125,9 @@ struct Transform {
     rotation: bool,
     scale: f32,
     degrees: f32,
+    /// Native-only input from an externally presented frame keeps its
+    /// original route and binding in the existing zoom owner.
+    presented: Option<presented::PressLease>,
 }
 
 /// Two touchscreen fingers transforming a view.
@@ -562,6 +565,33 @@ pub(crate) fn gestures(surface: &Rc<Surface>, view: &NshView, values: GestureVal
         // Entries of views that were removed would keep them alive.
         gestures.retain(|_, (v, _)| v.attached());
         gestures.insert(id, (view.clone(), values));
+    }
+}
+
+/// An engine mutation of a gesture's values retires its old native
+/// baseline before the mutation is applied. Unrelated animations keep
+/// their ordinary lifetime.
+pub(crate) fn animation_changed(surface: &Rc<Surface>, op: &nsh_core::animation::AnimationOp) {
+    let cancel_pan = surface
+        .input
+        .presented_press
+        .borrow()
+        .as_ref()
+        .and_then(|lease| lease.gesture_binding())
+        .is_some_and(|binding| surface.anim.borrow().affects_gesture(op, binding));
+    if cancel_pan {
+        presented::cancel(surface);
+    }
+    let cancel_zoom = surface
+        .input
+        .zoom
+        .borrow()
+        .as_ref()
+        .and_then(|(transform, _)| transform.presented.as_ref())
+        .and_then(|lease| lease.gesture_binding())
+        .is_some_and(|binding| surface.anim.borrow().affects_gesture(op, binding));
+    if cancel_zoom {
+        surface.input.zoom.borrow_mut().take();
     }
 }
 
@@ -1913,6 +1943,7 @@ fn transform_view(surface: &Surface, view: &NshView) -> Transform {
         rotation,
         scale: 1.0,
         degrees: 0.0,
+        presented: None,
     }
 }
 
@@ -1955,6 +1986,11 @@ fn transform_move(surface: &Rc<Surface>, t: &Transform) {
 }
 
 fn transform_end(surface: &Surface, t: &Transform) {
+    // A native-only gesture never acquires callbacks installed after its
+    // presentation, including an idle wheel-pinch end.
+    if t.presented.is_some() {
+        return;
+    }
     let (id, events) = {
         let s = t.view.state();
         (s.id, s.events)
@@ -2050,10 +2086,12 @@ fn end_two_finger(surface: &Rc<Surface>) {
 /// Returns whether a view took it.
 fn wheel_zoom(surface: &Rc<Surface>, x: f32, y: f32, dy: f32) -> bool {
     let input = &surface.input;
-    let generation = input.next_gen.get();
-    input.next_gen.set(generation + 1);
-    let current = input.zoom.borrow_mut().take();
-    let mut t = match current {
+    let current = input.zoom.borrow_mut().take().filter(|(t, _)| {
+        t.presented
+            .as_ref()
+            .is_none_or(|lease| lease.native_matches(surface))
+    });
+    let t = match current {
         Some((t, _)) => t,
         None => {
             let Some(hit) = pick(&surface.root, x, y, true) else {
@@ -2070,6 +2108,14 @@ fn wheel_zoom(surface: &Rc<Surface>, x: f32, y: f32, dy: f32) -> bool {
             t
         }
     };
+    zoom_step(surface, t, dy);
+    true
+}
+
+fn zoom_step(surface: &Rc<Surface>, mut t: Transform, dy: f32) {
+    let input = &surface.input;
+    let generation = input.next_gen.get();
+    input.next_gen.set(generation + 1);
     t.scale *= zoom_factor(dy);
     transform_move(surface, &t);
     *input.zoom.borrow_mut() = Some((t, generation));
@@ -2089,7 +2135,6 @@ fn wheel_zoom(surface: &Rc<Surface>, x: f32, y: f32, dy: f32) -> bool {
             transform_end(&surface, &t);
         }
     });
-    true
 }
 
 /// The scale a Ctrl + wheel scroll of `dy` points pinches by: one notch is

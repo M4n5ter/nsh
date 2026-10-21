@@ -7,7 +7,7 @@
 use std::rc::Weak;
 
 use gpui::{MouseButton, PlatformInput, ScrollDelta};
-use nsh_core::{Bounds, EdgeInsets, ScrollBehavior, input::laid_out};
+use nsh_core::{Bounds, EdgeInsets, ScrollBehavior, animation::GestureBinding, input::laid_out};
 
 use super::*;
 
@@ -138,7 +138,9 @@ struct HitNode {
     shape: PickGeometry,
     opaque_press: bool,
     opaque_wheel: bool,
+    opaque_gesture: bool,
     target: Option<PointerTarget>,
+    gesture: Option<GestureBinding>,
     scroll: Option<(bool, bool, ScrollBehavior)>,
     thumb: Option<(Mat4, crate::scroll::ThumbHit)>,
     route: Vec<RouteNode>,
@@ -163,18 +165,44 @@ pub(super) struct PressLease {
     origin: (f32, f32),
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum PointerTarget {
     Action(u64),
     Input,
+    Pan(GestureBinding),
+    Pinch(GestureBinding),
 }
 
 impl PressLease {
     pub(super) fn binding_for(&self, view: &NshView) -> Option<u64> {
-        match self.target {
-            PointerTarget::Action(binding) if self.route[0].view == *view => Some(binding),
+        match &self.target {
+            PointerTarget::Action(binding) if self.route[0].view == *view => Some(*binding),
             _ => None,
         }
+    }
+
+    pub(super) fn gesture_binding(&self) -> Option<&GestureBinding> {
+        match &self.target {
+            PointerTarget::Pan(binding) | PointerTarget::Pinch(binding) => Some(binding),
+            _ => None,
+        }
+    }
+
+    pub(super) fn native_matches(&self, surface: &Surface) -> bool {
+        let owner = &self.route[0].view;
+        self.scope == crate::navigation::focus_scope(surface)
+            && self.load == surface.load_generation()
+            && self.viewport == surface.size()
+            && self.scale == surface.environment.get().pixel_ratio
+            && self.origin == surface.origin.get()
+            && !blocked(surface)
+            && owner.attached()
+            && surface.view(owner.id()).as_ref() == Some(owner)
+            && route(owner).as_ref() == Some(&self.route)
+            && native_gesture(surface, owner).as_ref() == self.gesture_binding()
+            && self.route.iter().skip(1).all(|node| {
+                !opaque(surface, &node.view, true) && !opaque_gesture(surface, &node.view)
+            })
     }
 }
 
@@ -184,8 +212,15 @@ impl HitNode {
         let shape = PickGeometry::sample(&state)?;
         let opaque_wheel = opaque(surface, view, false);
         let opaque_press = opaque(surface, view, true);
+        let opaque_gesture = opaque_gesture(surface, view);
+        let gesture = native_gesture(surface, view);
         let target = if native_input(surface, view) {
             Some(PointerTarget::Input)
+        } else if let Some(binding) = gesture
+            .as_ref()
+            .filter(|binding| binding.values.pan_x.is_some() || binding.values.pan_y.is_some())
+        {
+            Some(PointerTarget::Pan(binding.clone()))
         } else {
             (!opaque_press
                 && focus_safe(surface, view)
@@ -217,7 +252,7 @@ impl HitNode {
                 .collect()
         });
         drop(state);
-        let route = if target.is_some() || scroll.is_some() {
+        let route = if target.is_some() || scroll.is_some() || gesture.is_some() {
             route(view)?
         } else {
             Vec::new()
@@ -232,7 +267,9 @@ impl HitNode {
             shape,
             opaque_press,
             opaque_wheel,
+            opaque_gesture,
             target,
+            gesture,
             scroll,
             thumb,
             route,
@@ -289,6 +326,7 @@ fn mouse_callbacks(events: nsh_core::EventMask) -> bool {
     events.contains_listener(EventKind::MouseMove)
         || events.contains_listener(EventKind::HoverIn)
         || events.contains_listener(EventKind::HoverOut)
+        || events.contains_listener(EventKind::HoverMove)
 }
 
 fn opaque_native(state: &ViewState) -> bool {
@@ -307,6 +345,15 @@ fn opaque_native(state: &ViewState) -> bool {
 }
 
 fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
+    opaque_content_with_values(surface, view, press, false)
+}
+
+fn opaque_content_with_values(
+    surface: &Surface,
+    view: &NshView,
+    press: bool,
+    native_values: bool,
+) -> bool {
     let state = view.state();
     state.opacity() <= 0.0
         || opaque_native(&state)
@@ -314,9 +361,13 @@ fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
         || state.events.contains_listener(EventKind::Touch)
         || state.events.contains(EventKind::PanStart)
         || state.events.contains(EventKind::PanEnd)
+        || state.events.contains(EventKind::PinchStart)
+        || state.events.contains(EventKind::PinchEnd)
+        || state.events.contains(EventKind::RotationStart)
+        || state.events.contains(EventKind::RotationEnd)
         || (press && state.events.contains(EventKind::LongPress))
         || (press && state.events.contains(EventKind::Focus))
-        || !gesture_values(surface, view, state.id).is_empty()
+        || (!native_values && !gesture_values(surface, view, state.id).is_empty())
         || state.props.pan_activation.is_some()
         || (press && (state.props.selection_area || crate::text::selectable(&state)))
         || state
@@ -331,6 +382,28 @@ fn opaque_content(surface: &Surface, view: &NshView, press: bool) -> bool {
             ]
             .into_iter()
             .any(|event| state.events.contains(event)))
+}
+
+fn opaque_gesture(surface: &Surface, view: &NshView) -> bool {
+    let state = view.state();
+    view.kind() == ViewKind::Input
+        || state.props.accessibility.state.disabled
+        || has_press(state.events)
+        || state.events.contains(EventKind::Blur)
+        || state.events.contains(EventKind::ContextMenu)
+        || opaque_content_with_values(surface, view, true, true)
+}
+
+fn native_gesture(surface: &Surface, view: &NshView) -> Option<GestureBinding> {
+    if opaque_gesture(surface, view) {
+        return None;
+    }
+    let state = view.state();
+    let binding = surface.anim.borrow().gesture_binding(state.id)?;
+    (binding.values == gesture_values(surface, view, state.id)
+        && !binding.values.is_empty()
+        && binding.values.rotation.is_none())
+    .then_some(binding)
 }
 
 fn focus_safe(surface: &Surface, view: &NshView) -> bool {
@@ -473,6 +546,9 @@ impl InputSource {
     /// using its current editor text without requiring unchanged pixels. Plain
     /// built-in Inputs retain their native focus and selection capture while
     /// that same editor, hit geometry and input scope remain valid.
+    /// Callback-free pans and line-based Ctrl-wheel pinches retain their
+    /// original live value bindings and stable owner geometry. Engine writes
+    /// to those values retire the active native baseline before applying.
     pub fn dispatch(&self, snapshot: &InputSnapshot, event: &PlatformInput) -> InputDisposition {
         let Some(surface) = self.surface.upgrade() else {
             return InputDisposition::Rejected;
@@ -507,6 +583,18 @@ impl InputSource {
                 })
             {
                 cancel(&surface);
+            }
+            let owns_zoom = surface.input.zoom.borrow().as_ref().is_some_and(|(t, _)| {
+                t.presented.as_ref().is_some_and(|lease| {
+                    lease.load == frame.load
+                        && lease.scope == frame.scope
+                        && lease.viewport == frame.viewport
+                        && lease.scale == frame.scale
+                        && lease.origin == frame.origin
+                })
+            });
+            if owns_zoom {
+                surface.input.zoom.borrow_mut().take();
             }
             return InputDisposition::Rejected;
         }
@@ -591,16 +679,22 @@ impl InputSource {
                 let input = path
                     .first()
                     .is_some_and(|node| node.target == Some(PointerTarget::Input));
-                let visible_path = if input { &path[1..] } else { &path[..] };
-                (!visible_path.iter().any(|node| node.opaque_press)).then_some(())?;
                 let owner = if input {
                     path[0]
                 } else {
-                    path.into_iter().find(|node| node.target.is_some())?
+                    path.iter().copied().find(|node| node.target.is_some())?
                 };
+                let native_pan = matches!(&owner.target, Some(PointerTarget::Pan(_)));
+                if native_pan && path.iter().any(|node| node.opaque_gesture) {
+                    return None;
+                }
+                (!path.iter().any(|node| {
+                    node.opaque_press && !((input || native_pan) && node.view == owner.view)
+                }))
+                .then_some(())?;
                 Some(PressLease {
                     route: owner.route.clone(),
-                    target: owner.target?,
+                    target: owner.target.clone()?,
                     scope: frame.scope.clone(),
                     load: frame.load,
                     viewport: frame.viewport,
@@ -618,12 +712,15 @@ impl InputSource {
             return InputDisposition::ExactFallback;
         };
         let owner = &lease.route[0].view;
-        // A selection drag may leave the editor while its original contact
-        // must still belong to that same unobscured native owner.
-        let contact = if lease.target == PointerTarget::Input && kind != PointerKind::Down {
+        // Native drags may leave their owner; their original contact must
+        // still belong to that same unobscured native route.
+        let contact = if matches!(&lease.target, PointerTarget::Input | PointerTarget::Pan(_))
+            && kind != PointerKind::Down
+        {
             surface.input.pointers.borrow().iter().find_map(|pointer| {
                 (pointer.key == Key::Mouse
-                    && matches!(&pointer.item, Some(Item::Input(view)) if view == owner))
+                    && (matches!(&lease.target, PointerTarget::Pan(_))
+                        || matches!(&pointer.item, Some(Item::Input(view)) if view == owner)))
                 .then_some(pointer.start)
             })
         } else {
@@ -647,14 +744,14 @@ impl InputSource {
                         let (x, y) = local(view, x, y);
                         crate::scroll::grabs_thumb(view, x, y)
                     })
-                    || match lease.target {
+                    || match &lease.target {
                         PointerTarget::Input => {
                             hit.view != *owner
                                 || !native_input(surface, owner)
                                 || path.iter().skip(1).any(|view| opaque(surface, view, true))
                         }
                         PointerTarget::Action(binding) => {
-                            owner.state().props.input_action != Some(binding)
+                            owner.state().props.input_action != Some(*binding)
                                 || path.iter().any(|view| opaque(surface, view, true))
                                 || path
                                     .into_iter()
@@ -665,13 +762,22 @@ impl InputSource {
                                     })
                                     .is_none_or(|view| {
                                         view != *owner
-                                            || view.state().props.input_action != Some(binding)
+                                            || view.state().props.input_action != Some(*binding)
                                     })
                         }
+                        PointerTarget::Pan(binding) => {
+                            native_gesture(surface, owner).as_ref() != Some(binding)
+                                || !path.contains(owner)
+                                || path.iter().any(|view| {
+                                    opaque_gesture(surface, view)
+                                        || (view != owner && opaque(surface, view, true))
+                                })
+                        }
+                        PointerTarget::Pinch(_) => true,
                     }
             })
-            || (lease.target == PointerTarget::Input
-                && kind == PointerKind::Move
+            || ((lease.target == PointerTarget::Input && kind == PointerKind::Move
+                || matches!(&lease.target, PointerTarget::Pan(_)))
                 && (pick(&surface.root, x, y, true).is_some_and(|hit| {
                     chain(&hit.view).iter().any(|view| {
                         let state = view.state();
@@ -732,8 +838,10 @@ impl InputSource {
         let ScrollDelta::Lines(delta) = event.delta else {
             return InputDisposition::ExactFallback;
         };
-        if event.modifiers.control
-            || !surface.input.pointers.borrow().is_empty()
+        if event.modifiers.control {
+            return self.pinch(surface, frame, event, -delta.y * crate::events::LINE);
+        }
+        if !surface.input.pointers.borrow().is_empty()
             || surface.input.hover_item.borrow().is_some()
             || surface.input.wheel.borrow().is_some()
             || surface.input.pinching()
@@ -810,9 +918,109 @@ impl InputSource {
         crate::scroll::wheel(surface, view, dx, dy);
         InputDisposition::Handled
     }
+
+    fn pinch(
+        &self,
+        surface: &Rc<Surface>,
+        frame: &Frame,
+        event: &gpui::ScrollWheelEvent,
+        dy: f32,
+    ) -> InputDisposition {
+        if !surface.input.pointers.borrow().is_empty()
+            || surface.input.hover_item.borrow().is_some()
+            || surface.input.wheel.borrow().is_some()
+            || surface.input.pinching()
+            || surface
+                .input
+                .hovered
+                .borrow()
+                .iter()
+                .any(|view| view.state().events.contains_listener(EventKind::HoverOut))
+        {
+            return InputDisposition::ExactFallback;
+        }
+        let (x, y) = (
+            f32::from(event.position.x) - frame.origin.0,
+            f32::from(event.position.y) - frame.origin.1,
+        );
+        let Some(path) = frame.root.path(x, y) else {
+            return InputDisposition::Rejected;
+        };
+        let Some(owner) = path.iter().copied().find(|node| {
+            node.gesture
+                .as_ref()
+                .is_some_and(|binding| binding.values.pinch.is_some())
+        }) else {
+            return InputDisposition::ExactFallback;
+        };
+        if path
+            .iter()
+            .any(|node| node.opaque_gesture || (node.view != owner.view && node.opaque_wheel))
+        {
+            return InputDisposition::ExactFallback;
+        }
+        let lease = PressLease {
+            route: owner.route.clone(),
+            target: PointerTarget::Pinch(owner.gesture.clone().unwrap()),
+            scope: frame.scope.clone(),
+            load: frame.load,
+            viewport: frame.viewport,
+            scale: frame.scale,
+            origin: frame.origin,
+        };
+        let live = pick(&surface.root, x, y, true);
+        if !lease.native_matches(surface)
+            || live.is_none_or(|hit| {
+                hit.item.is_some()
+                    || !chain(&hit.view).contains(&owner.view)
+                    || chain(&hit.view).iter().any(|view| {
+                        opaque_gesture(surface, view)
+                            || (view != &owner.view && opaque_content(surface, view, false))
+                    })
+            })
+        {
+            if surface
+                .input
+                .zoom
+                .borrow()
+                .as_ref()
+                .is_some_and(|(t, _)| t.view == owner.view && t.presented.is_some())
+            {
+                surface.input.zoom.borrow_mut().take();
+            }
+            return InputDisposition::Rejected;
+        }
+        let current = surface.input.zoom.borrow().as_ref().map(|(t, _)| t.clone());
+        let transform = match current {
+            Some(t) => {
+                let Some(original) = t.presented.as_ref() else {
+                    return InputDisposition::ExactFallback;
+                };
+                if t.view != owner.view
+                    || original.route != lease.route
+                    || original.target != lease.target
+                    || !original.native_matches(surface)
+                {
+                    surface.input.zoom.borrow_mut().take();
+                    return InputDisposition::Rejected;
+                }
+                t
+            }
+            None => {
+                let mut t = transform_view(surface, &owner.view);
+                t.rotation = false;
+                t.presented = Some(lease);
+                transform_begin(surface, &t);
+                t
+            }
+        };
+        surface.input.last.set(Some((x, y)));
+        zoom_step(surface, transform, dy);
+        InputDisposition::Handled
+    }
 }
 
-fn cancel(surface: &Rc<Surface>) {
+pub(super) fn cancel(surface: &Rc<Surface>) {
     if surface.input.presented_press.borrow_mut().take().is_some() {
         if let Some(mut pointer) = take(surface, Key::Mouse) {
             if let Some(item @ Item::Input(_)) = pointer.item.take() {

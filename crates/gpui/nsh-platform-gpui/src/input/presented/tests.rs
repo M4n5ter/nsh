@@ -1,4 +1,8 @@
-use nsh_core::{MountItem, Points, ViewProps, geometry::size};
+use nsh_core::{
+    MountItem, Points, ViewProps,
+    animation::{AnimationOp, AnimationProp},
+    geometry::size,
+};
 
 use super::*;
 
@@ -56,6 +60,689 @@ fn click(down: bool) -> PlatformInput {
             ..Default::default()
         })
     }
+}
+
+fn move_mouse(x: f32, y: f32) -> PlatformInput {
+    PlatformInput::MouseMove(gpui::MouseMoveEvent {
+        position: gpui::point(gpui::px(x), gpui::px(y)),
+        pressed_button: Some(MouseButton::Left),
+        ..Default::default()
+    })
+}
+
+fn release_mouse(x: f32, y: f32) -> PlatformInput {
+    PlatformInput::MouseUp(gpui::MouseUpEvent {
+        button: MouseButton::Left,
+        position: gpui::point(gpui::px(x), gpui::px(y)),
+        click_count: 1,
+        ..Default::default()
+    })
+}
+
+fn ctrl_wheel(notches: f32) -> PlatformInput {
+    PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+        position: gpui::point(gpui::px(20.0), gpui::px(20.0)),
+        delta: ScrollDelta::Lines(gpui::point(0.0, notches * 48.0 / crate::events::LINE)),
+        modifiers: gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
+fn mount_animation(surface: &Rc<Surface>, item: MountItem) {
+    if let MountItem::Animation(op) = &item {
+        animation_changed(surface, op);
+    }
+    mount_animation_raw(surface, item);
+}
+
+fn mount_animation_raw(surface: &Rc<Surface>, item: MountItem) {
+    surface.anim.borrow_mut().apply(&item);
+    surface.mounter.borrow_mut().apply(surface, &item);
+}
+
+fn native_gestures() -> (Rc<Surface>, NshView, NshView) {
+    let surface = new_surface();
+    let owner = view(&surface, 2, ROOT_ID, ViewKind::View);
+    let image = view(&surface, 4, owner.id(), ViewKind::View);
+    bind_native_gestures(&surface, &owner, &image);
+    (surface, owner, image)
+}
+
+fn bind_native_gestures(surface: &Rc<Surface>, owner: &NshView, image: &NshView) {
+    {
+        let mut state = image.state_mut();
+        state.props.pointer_events = PointerEvents::None;
+        state
+            .style
+            .transform
+            .push(nsh_core::TransformKind::TranslateX, 0.0);
+        state
+            .style
+            .transform
+            .push(nsh_core::TransformKind::TranslateY, 0.0);
+        state
+            .style
+            .transform
+            .push(nsh_core::TransformKind::Scale, 1.0);
+    }
+    for (node, value) in [(101, 10.0), (102, -5.0), (103, 2.0)] {
+        mount_animation(
+            surface,
+            MountItem::Animation(AnimationOp::CreateValue { node, value }),
+        );
+    }
+    mount_animation(
+        surface,
+        MountItem::Gestures {
+            id: owner.id(),
+            values: GestureValues {
+                pan_x: Some(101),
+                pan_y: Some(102),
+                pinch: Some(103),
+                ..Default::default()
+            },
+        },
+    );
+    mount_animation(
+        surface,
+        MountItem::AnimationBindings {
+            id: image.id(),
+            bindings: vec![
+                (AnimationProp::Transform(0), 101),
+                (AnimationProp::Transform(1), 102),
+                (AnimationProp::Transform(2), 103),
+            ],
+        },
+    );
+    surface.write_animations();
+}
+
+fn assert_pinch(image: &NshView, expected: f32) {
+    let actual = image.state().anim.transform[2].unwrap();
+    assert!(
+        (actual - expected).abs() < 0.00001,
+        "scale {actual}, expected {expected}"
+    );
+}
+
+#[test]
+fn presented_native_pan_and_ctrl_wheel_drive_the_original_values_across_redraws() {
+    let (surface, owner, image) = native_gestures();
+    let source = InputSource::new(&surface);
+    let original = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&original, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&original, &move_mouse(70.0, 50.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        surface.anim.borrow().pan_values(owner.id()),
+        (Some(60.0), Some(25.0))
+    );
+    assert_eq!(image.state().anim.transform[..2], [Some(60.0), Some(25.0)]);
+
+    // Growing content and the image's animated transform do not move its owner.
+    image.state_mut().frame.size.height = Points(600.0);
+    assert_eq!(
+        source.dispatch(&original, &move_mouse(100.0, 80.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        surface.anim.borrow().pan_values(owner.id()),
+        (Some(90.0), Some(55.0))
+    );
+    assert_eq!(
+        source.dispatch(&original, &release_mouse(100.0, 80.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(image.state().anim.transform[..2], [Some(90.0), Some(55.0)]);
+
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(1.0)),
+        InputDisposition::Handled
+    );
+    assert_pinch(&image, 2.2);
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(1.0)),
+        InputDisposition::Handled
+    );
+    assert_pinch(&image, 2.42);
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(-1.0)),
+        InputDisposition::Handled
+    );
+    assert_pinch(&image, 2.2);
+}
+
+#[test]
+fn native_pan_rebinding_does_not_redirect_an_active_drag_to_replacement_values() {
+    let (surface, owner, image) = native_gestures();
+    let source = InputSource::new(&surface);
+    let original = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&original, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&original, &move_mouse(70.0, 50.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(image.state().anim.transform[..2], [Some(60.0), Some(25.0)]);
+    for (node, value) in [(201, 100.0), (202, 200.0)] {
+        mount_animation(
+            &surface,
+            MountItem::Animation(AnimationOp::CreateValue { node, value }),
+        );
+    }
+    mount_animation(
+        &surface,
+        MountItem::Gestures {
+            id: owner.id(),
+            values: GestureValues {
+                pan_x: Some(201),
+                pan_y: Some(202),
+                ..Default::default()
+            },
+        },
+    );
+    assert_eq!(
+        source.dispatch(&original, &move_mouse(100.0, 80.0)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(
+        surface.anim.borrow().pan_values(owner.id()),
+        (Some(100.0), Some(200.0))
+    );
+    assert_eq!(image.state().anim.transform[..2], [Some(60.0), Some(25.0)]);
+    assert!(surface.input.pointers.borrow().is_empty());
+
+    let rebound = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&rebound, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&rebound, &move_mouse(50.0, 40.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        surface.anim.borrow().pan_values(owner.id()),
+        (Some(130.0), Some(220.0))
+    );
+    assert_eq!(
+        source.dispatch(&rebound, &release_mouse(50.0, 40.0)),
+        InputDisposition::Handled
+    );
+}
+
+#[test]
+fn native_pan_rejects_replaced_value_slots_even_when_the_descriptor_is_unchanged() {
+    for release in [false, true] {
+        let (surface, owner, image) = native_gestures();
+        let source = InputSource::new(&surface);
+        let original = source.sample().unwrap();
+        let binding = surface.anim.borrow().gesture_binding(owner.id()).unwrap();
+        assert_eq!(
+            source.dispatch(&original, &click(true)),
+            InputDisposition::Handled
+        );
+        assert_eq!(
+            source.dispatch(&original, &move_mouse(70.0, 50.0)),
+            InputDisposition::Handled
+        );
+        if release {
+            mount_animation_raw(
+                &surface,
+                MountItem::Animation(AnimationOp::Release { node: 101 }),
+            );
+            assert!(surface.anim.borrow().gesture_binding(owner.id()).is_none());
+        }
+        // Bypass the ordinary mutation hook to prove graph birth identity
+        // also revokes a stale lease after direct same-id graph replacement.
+        mount_animation_raw(
+            &surface,
+            MountItem::Animation(AnimationOp::CreateValue {
+                node: 101,
+                value: 900.0,
+            }),
+        );
+        assert_ne!(
+            surface.anim.borrow().gesture_binding(owner.id()).unwrap(),
+            binding
+        );
+        assert_eq!(
+            source.dispatch(&original, &move_mouse(100.0, 80.0)),
+            InputDisposition::Rejected
+        );
+        assert_eq!(
+            surface.anim.borrow().pan_values(owner.id()),
+            (Some(900.0), Some(25.0))
+        );
+        surface.write_animations();
+        assert_eq!(image.state().anim.transform[..2], [Some(900.0), Some(25.0)]);
+        assert!(surface.input.pointers.borrow().is_empty());
+
+        let replacement = source.sample().unwrap();
+        assert_eq!(
+            source.dispatch(&replacement, &click(true)),
+            InputDisposition::Handled
+        );
+        assert_eq!(
+            source.dispatch(&replacement, &move_mouse(50.0, 40.0)),
+            InputDisposition::Handled
+        );
+        assert_eq!(
+            surface.anim.borrow().pan_values(owner.id()),
+            (Some(930.0), Some(45.0))
+        );
+        assert_eq!(
+            source.dispatch(&replacement, &release_mouse(50.0, 40.0)),
+            InputDisposition::Handled
+        );
+    }
+}
+
+#[test]
+fn callbacks_keep_native_gestures_exact_and_revoke_an_already_active_pan() {
+    for event in [
+        EventKind::Touch,
+        EventKind::MouseMove,
+        EventKind::HoverIn,
+        EventKind::HoverOut,
+        EventKind::HoverMove,
+        EventKind::Focus,
+        EventKind::Blur,
+        EventKind::ContextMenu,
+        EventKind::Press,
+        EventKind::PressDown,
+        EventKind::PressUp,
+        EventKind::LongPress,
+        EventKind::PanStart,
+        EventKind::PanEnd,
+        EventKind::PinchStart,
+        EventKind::PinchEnd,
+        EventKind::RotationStart,
+        EventKind::RotationEnd,
+    ] {
+        let (surface, owner, image) = native_gestures();
+        let source = InputSource::new(&surface);
+        owner.state_mut().events.set(event, true);
+        let opaque = source.sample().unwrap();
+        assert_eq!(
+            source.dispatch(&opaque, &click(true)),
+            InputDisposition::ExactFallback,
+            "{event:?}"
+        );
+        assert_eq!(
+            source.dispatch(&opaque, &ctrl_wheel(1.0)),
+            InputDisposition::ExactFallback,
+            "{event:?}"
+        );
+        assert_eq!(
+            surface.anim.borrow().pan_values(owner.id()),
+            (Some(10.0), Some(-5.0))
+        );
+        assert_pinch(&image, 2.0);
+
+        owner.state_mut().events.set(event, false);
+        let original = source.sample().unwrap();
+        assert_eq!(
+            source.dispatch(&original, &click(true)),
+            InputDisposition::Handled
+        );
+        assert_eq!(
+            source.dispatch(&original, &move_mouse(70.0, 50.0)),
+            InputDisposition::Handled
+        );
+        owner.state_mut().events.set(event, true);
+        assert_eq!(
+            source.dispatch(&original, &move_mouse(100.0, 80.0)),
+            InputDisposition::Rejected,
+            "{event:?}"
+        );
+        assert_eq!(
+            surface.anim.borrow().pan_values(owner.id()),
+            (Some(60.0), Some(25.0))
+        );
+        assert_eq!(image.state().anim.transform[..2], [Some(60.0), Some(25.0)]);
+        assert!(surface.input.pointers.borrow().is_empty());
+        assert_eq!(
+            source.dispatch(&source.sample().unwrap(), &click(true)),
+            InputDisposition::ExactFallback
+        );
+    }
+}
+
+#[test]
+fn ctrl_wheel_rejects_rebound_and_recycled_pinch_values_without_scaling_the_replacement() {
+    for rebind in [false, true] {
+        let (surface, owner, image) = native_gestures();
+        let source = InputSource::new(&surface);
+        let original = source.sample().unwrap();
+        assert_eq!(
+            source.dispatch(&original, &ctrl_wheel(1.0)),
+            InputDisposition::Handled
+        );
+        assert_pinch(&image, 2.2);
+        let replacement_node = if rebind { 203 } else { 103 };
+        if !rebind {
+            mount_animation_raw(
+                &surface,
+                MountItem::Animation(AnimationOp::Release { node: 103 }),
+            );
+        }
+        mount_animation_raw(
+            &surface,
+            MountItem::Animation(AnimationOp::CreateValue {
+                node: replacement_node,
+                value: 5.0,
+            }),
+        );
+        if rebind {
+            mount_animation(
+                &surface,
+                MountItem::Gestures {
+                    id: owner.id(),
+                    values: GestureValues {
+                        pan_x: Some(101),
+                        pan_y: Some(102),
+                        pinch: Some(replacement_node),
+                        ..Default::default()
+                    },
+                },
+            );
+            mount_animation(
+                &surface,
+                MountItem::AnimationBindings {
+                    id: image.id(),
+                    bindings: vec![(AnimationProp::Transform(2), replacement_node)],
+                },
+            );
+        }
+        surface.write_animations();
+        assert_pinch(&image, 5.0);
+        assert_eq!(
+            source.dispatch(&original, &ctrl_wheel(1.0)),
+            InputDisposition::Rejected
+        );
+        assert_pinch(&image, 5.0);
+        assert!(surface.input.zoom.borrow().is_none());
+
+        let replacement = source.sample().unwrap();
+        assert_eq!(
+            source.dispatch(&replacement, &ctrl_wheel(1.0)),
+            InputDisposition::Handled
+        );
+        assert_pinch(&image, 5.5);
+    }
+}
+
+#[test]
+fn native_gestures_preserve_callback_boundaries_at_the_destination_and_old_hover() {
+    for release in [false, true] {
+        let (surface, owner, _) = native_gestures();
+        let sibling = view(&surface, 6, ROOT_ID, ViewKind::View);
+        sibling.state_mut().frame = crate::geom::rect(320.0, 0.0, 60.0, 300.0);
+        sibling.state_mut().events.set(EventKind::HoverIn, true);
+        let source = InputSource::new(&surface);
+        let original = source.sample().unwrap();
+        assert_eq!(
+            source.dispatch(&original, &click(true)),
+            InputDisposition::Handled
+        );
+        assert_eq!(
+            source.dispatch(&original, &move_mouse(70.0, 50.0)),
+            InputDisposition::Handled
+        );
+        let destination = if release {
+            release_mouse(350.0, 20.0)
+        } else {
+            move_mouse(350.0, 20.0)
+        };
+        assert_eq!(
+            source.dispatch(&original, &destination),
+            InputDisposition::Rejected
+        );
+        assert_eq!(
+            surface.anim.borrow().pan_values(owner.id()),
+            (Some(60.0), Some(25.0))
+        );
+        assert!(surface.input.pointers.borrow().is_empty());
+    }
+
+    let (surface, _, image) = native_gestures();
+    let sibling = view(&surface, 6, ROOT_ID, ViewKind::View);
+    sibling.state_mut().frame = crate::geom::rect(320.0, 0.0, 60.0, 300.0);
+    sibling.state_mut().events.set(EventKind::HoverOut, true);
+    surface.input.hovered.borrow_mut().push(sibling);
+    let source = InputSource::new(&surface);
+    let original = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(1.0)),
+        InputDisposition::ExactFallback
+    );
+    assert_pinch(&image, 2.0);
+    surface.input.hovered.borrow_mut().clear();
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(1.0)),
+        InputDisposition::Handled
+    );
+    assert_pinch(&image, 2.2);
+}
+
+#[test]
+fn native_value_adjustments_retire_the_old_baseline_while_unrelated_writes_keep_it() {
+    let (surface, owner, image) = native_gestures();
+    let source = InputSource::new(&surface);
+    let original = source.sample().unwrap();
+    let binding = surface.anim.borrow().gesture_binding(owner.id()).unwrap();
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(1.0)),
+        InputDisposition::Handled
+    );
+    assert_pinch(&image, 2.2);
+    mount_animation(
+        &surface,
+        MountItem::Animation(AnimationOp::CreateValue {
+            node: 999,
+            value: 0.0,
+        }),
+    );
+    mount_animation(
+        &surface,
+        MountItem::Animation(AnimationOp::Set {
+            node: 999,
+            value: 90.0,
+        }),
+    );
+    assert!(surface.input.zoom.borrow().is_some());
+    mount_animation(
+        &surface,
+        MountItem::Animation(AnimationOp::Adjust {
+            node: 103,
+            factor: 2.0,
+            offset: 0.6,
+        }),
+    );
+    surface.write_animations();
+    assert_eq!(
+        surface.anim.borrow().gesture_binding(owner.id()).unwrap(),
+        binding
+    );
+    assert!(surface.input.zoom.borrow().is_none());
+    assert_pinch(&image, 5.0);
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(1.0)),
+        InputDisposition::Handled
+    );
+    assert_pinch(&image, 5.5);
+
+    mount_animation(
+        &surface,
+        MountItem::Animation(AnimationOp::Set {
+            node: 103,
+            value: 5.0,
+        }),
+    );
+    assert_eq!(
+        source.dispatch(&original, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&original, &move_mouse(70.0, 50.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        surface.anim.borrow().pan_values(owner.id()),
+        (Some(60.0), Some(25.0))
+    );
+    mount_animation(
+        &surface,
+        MountItem::Animation(AnimationOp::Set {
+            node: 999,
+            value: 180.0,
+        }),
+    );
+    assert_eq!(surface.input.pointers.borrow().len(), 1);
+    mount_animation(
+        &surface,
+        MountItem::Animation(AnimationOp::Adjust {
+            node: 101,
+            factor: 1.0,
+            offset: 5.0,
+        }),
+    );
+    assert!(surface.input.pointers.borrow().is_empty());
+    assert_eq!(
+        surface.anim.borrow().pan_values(owner.id()),
+        (Some(65.0), Some(25.0))
+    );
+    assert_eq!(
+        surface.anim.borrow().gesture_binding(owner.id()).unwrap(),
+        binding
+    );
+    assert_eq!(
+        source.dispatch(&original, &click(true)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        source.dispatch(&original, &move_mouse(50.0, 40.0)),
+        InputDisposition::Handled
+    );
+    assert_eq!(
+        surface.anim.borrow().pan_values(owner.id()),
+        (Some(95.0), Some(45.0))
+    );
+    assert_eq!(
+        source.dispatch(&original, &release_mouse(50.0, 40.0)),
+        InputDisposition::Handled
+    );
+}
+
+#[gpui::test]
+fn idle_native_zoom_retires_without_delivering_a_new_pinch_end_callback(
+    cx: &mut gpui::TestAppContext,
+) {
+    use std::time::Duration;
+
+    use nsh_core::ui::{
+        Root,
+        prelude::{GestureEvent, Interactive, IntoElement, component, view as native_view},
+    };
+
+    thread_local! {
+        static ENDED: RefCell<Option<crossbeam_channel::Sender<f32>>> = const { RefCell::new(None) };
+    }
+    #[component]
+    fn Observer() -> impl IntoElement {
+        let ended = ENDED.with(|ended| ended.borrow_mut().take().unwrap());
+        native_view().on_pinch_end(move |event: &GestureEvent| {
+            ended.send(event.value).unwrap();
+        })
+    }
+
+    cx.executor().allow_parking();
+    let (ended_tx, ended_rx) = crossbeam_channel::unbounded();
+    let (surface, _app) = cx.update(|cx| {
+        let app = crate::rt::init_test_app(cx);
+        let surface = new_surface();
+        *surface.text_system.borrow_mut() = Some(cx.text_system().clone());
+        surface.start(
+            nsh_engine::EngineConfig::new(Root::new::<Observer>(move || {
+                ENDED.with(|ended| *ended.borrow_mut() = Some(ended_tx.clone()));
+            })),
+            false,
+        );
+        (surface, app)
+    });
+    let synchronize = || {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        surface.control(|control| {
+            control.advance_clock(Duration::ZERO, move || tx.send(()).unwrap());
+        });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        surface.drain();
+    };
+    synchronize();
+    let owner = surface.root.with_children(|children| {
+        children
+            .iter()
+            .find(|view| view.state().events.contains(EventKind::PinchEnd))
+            .cloned()
+            .unwrap()
+    });
+    owner.state_mut().frame = crate::geom::rect(0.0, 0.0, 300.0, 300.0);
+    owner.state_mut().events.set(EventKind::PinchEnd, false);
+    let image = view(&surface, 1000, owner.id(), ViewKind::View);
+    bind_native_gestures(&surface, &owner, &image);
+    let source = InputSource::new(&surface);
+    let original = source.sample().unwrap();
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(1.0)),
+        InputDisposition::Handled
+    );
+    assert_pinch(&image, 2.2);
+    assert!(surface.input.zoom.borrow().is_some());
+
+    // The engine already has the listener; only its native admission mask
+    // changes, reproducing a callback mounted while the idle timer is pending.
+    owner.state_mut().events.set(EventKind::PinchEnd, true);
+    cx.run_until_parked();
+    cx.advance_clock(Duration::from_millis(ZOOM_IDLE + 1));
+    cx.run_until_parked();
+    synchronize();
+    assert!(surface.input.zoom.borrow().is_none());
+    assert_pinch(&image, 2.2);
+    assert!(ended_rx.try_recv().is_err());
+    assert_eq!(
+        source.dispatch(&original, &ctrl_wheel(1.0)),
+        InputDisposition::Rejected
+    );
+    assert_eq!(
+        source.dispatch(&source.sample().unwrap(), &ctrl_wheel(1.0)),
+        InputDisposition::ExactFallback
+    );
+
+    // The registered callback still receives an ordinary exact-route gesture.
+    assert!(wheel_zoom(&surface, 20.0, 20.0, -48.0));
+    assert_pinch(&image, 2.42);
+    cx.run_until_parked();
+    cx.advance_clock(Duration::from_millis(ZOOM_IDLE + 1));
+    cx.run_until_parked();
+    synchronize();
+    let scale = ended_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        (scale - 1.1).abs() < 0.00001,
+        "ordinary pinch ended at {scale}"
+    );
+    assert_pinch(&image, 2.42);
+    surface.stop();
 }
 
 fn key_event(key: &str, down: bool) -> PlatformInput {
