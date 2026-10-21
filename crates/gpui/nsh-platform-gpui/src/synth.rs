@@ -106,31 +106,6 @@ fn printable(vk: u16, shift: bool) -> Option<char> {
     })
 }
 
-#[cfg(test)]
-mod printable_tests {
-    use super::printable;
-
-    #[test]
-    fn synthetic_printable_keys_follow_the_us_layout() {
-        for (vk, plain, shifted) in [
-            (0xBF, '/', '?'),
-            (0x31, '1', '!'),
-            (0xBB, '=', '+'),
-            (0x41, 'a', 'A'),
-            (0x20, ' ', ' '),
-            (0xDC, '\\', '|'),
-            (0xDE, '\'', '"'),
-        ] {
-            assert_eq!(printable(vk, false), Some(plain));
-            assert_eq!(printable(vk, true), Some(shifted));
-        }
-        for vk in [0x08, 0x09, 0x0D, 0x10, 0x1B, 0x25, 0x70, 0xFF] {
-            assert_eq!(printable(vk, false), None);
-            assert_eq!(printable(vk, true), None);
-        }
-    }
-}
-
 /// Draws what changed and takes the window's content, in device pixels,
 /// with its size in points. `None` when the window closed.
 pub(crate) async fn frame(
@@ -377,5 +352,30 @@ mod tests {
         assert_eq!(image.get_pixel(1, 0).0, [0, 128, 0, 255]);
         let image = x11::to_rgba(&[0, 255, 0, 0], 1, 1, masks, true);
         assert_eq!(image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+    }
+}
+
+#[cfg(test)]
+mod printable_tests {
+    use super::printable;
+
+    #[test]
+    fn synthetic_printable_keys_follow_the_us_layout() {
+        for (vk, plain, shifted) in [
+            (0xBF, '/', '?'),
+            (0x31, '1', '!'),
+            (0xBB, '=', '+'),
+            (0x41, 'a', 'A'),
+            (0x20, ' ', ' '),
+            (0xDC, '\\', '|'),
+            (0xDE, '\'', '"'),
+        ] {
+            assert_eq!(printable(vk, false), Some(plain));
+            assert_eq!(printable(vk, true), Some(shifted));
+        }
+        for vk in [0x08, 0x09, 0x0D, 0x10, 0x1B, 0x25, 0x70, 0xFF] {
+            assert_eq!(printable(vk, false), None);
+            assert_eq!(printable(vk, true), None);
+        }
     }
 }
