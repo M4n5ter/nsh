@@ -206,7 +206,7 @@ const NSH: &[Item] = &[
     ),
     (
         "View",
-        Export::Value(|ctx| dom::host_component(ctx, "view", true)),
+        Export::Value(|cx| dom::host_component(cx, "view", true)),
         Ts::function(
             "A view: the box layout, styles, touches and accessibility work on\n(UIView / ViewGroup).",
             &["(props: ViewProps): YNode"],
@@ -214,7 +214,7 @@ const NSH: &[Item] = &[
     ),
     (
         "Text",
-        Export::Value(|ctx| dom::host_component(ctx, "text", true)),
+        Export::Value(|cx| dom::host_component(cx, "text", true)),
         Ts::function(
             "A paragraph of text; a `<Text>` in it is a span of the same paragraph, other\nelements are inline attachments.",
             &["(props: TextProps): YNode"],
@@ -222,7 +222,7 @@ const NSH: &[Item] = &[
     ),
     (
         "Scroll",
-        Export::Value(|ctx| dom::host_component(ctx, "scroll", true)),
+        Export::Value(|cx| dom::host_component(cx, "scroll", true)),
         Ts::function(
             "A native scroll view (UIScrollView / ScrollView), zoomable; for long\nlists, `List` (`nsh/list`).",
             &["(props: ScrollProps): YNode"],
@@ -230,7 +230,7 @@ const NSH: &[Item] = &[
     ),
     (
         "Input",
-        Export::Value(|ctx| dom::host_component(ctx, "input", true)),
+        Export::Value(|cx| dom::host_component(cx, "input", true)),
         Ts::function(
             "A native text input (UITextField / UITextView, EditText); `ref` has\n`focus()`, `blur()` and `setSelection(start, end)`.",
             &["(props: InputProps): YNode"],
@@ -391,9 +391,9 @@ pub(crate) const MODULES: &[NativeModule] = &[
 /// functions of the runtime's module (`getSize`, `prefetch`).
 const IMAGE_EXPORTS: &[Item] = &[(
     "Image",
-    Export::Value(|ctx| {
-        let image = dom::host_component(ctx, "image", true);
-        components::add_runtime_functions(ctx, image, "nsh/image", "Image");
+    Export::Value(|cx| {
+        let image = dom::host_component(cx, "image", true);
+        components::add_runtime_functions(cx, image, "nsh/image", "Image");
         image
     }),
     Ts::value(
@@ -513,26 +513,26 @@ impl ModuleTable {
 
     /// The default object of the typed module `name` (its flat default
     /// module's), made once per VM; `None`: it has none.
-    pub(crate) fn default_object(&self, ctx: *mut JsContext, name: &str) -> Option<JsValue> {
+    pub(crate) fn default_object(&self, cx: *mut JsContext, name: &str) -> Option<JsValue> {
         let spec = self
             .registries
             .iter()
             .filter(|r| r.specifier() == Some(name))
             .flat_map(|r| r.module_specs())
             .find(|m| m.flat && m.default)?;
-        Some(self.object(ctx, name, &spec))
+        Some(self.object(cx, name, &spec))
     }
 
     /// Module `spec`'s object (owned), made once per VM: its functions,
     /// getters and constants, and on a flat default module the registry's
     /// native values too.
-    fn object(&self, ctx: *mut JsContext, name: &str, spec: &ModuleSpec) -> JsValue {
+    fn object(&self, cx: *mut JsContext, name: &str, spec: &ModuleSpec) -> JsValue {
         let key = (name.to_owned(), spec.name);
         if let Some(object) = self.objects.borrow().get(&key) {
             // SAFETY: a live value the table holds.
-            return unsafe { qjs::JS_DupValue(ctx, object.raw()) };
+            return unsafe { qjs::JS_DupValue(cx, object.raw()) };
         }
-        let object = components::module(ctx, spec);
+        let object = components::module(cx, spec);
         // SAFETY: inline tag check.
         if unsafe { qjs::JS_IsException(object) } {
             return object;
@@ -551,31 +551,31 @@ impl ModuleTable {
                 // SAFETY: a property of the object we own; the reference
                 // it returns is ours to free.
                 unsafe {
-                    let function = qjs::JS_GetPropertyStr(ctx, object, cname.as_ptr());
-                    components::add_functions(ctx, function, &members);
-                    qjs::JS_FreeValue(ctx, function);
+                    let function = qjs::JS_GetPropertyStr(cx, object, cname.as_ptr());
+                    components::add_functions(cx, function, &members);
+                    qjs::JS_FreeValue(cx, function);
                 }
             }
         }
         if spec.flat && spec.default {
             for native in self.natives(name) {
-                let value = env::reexport(ctx, native);
+                let value = env::reexport(cx, native);
                 // SAFETY: inline tag check.
                 if unsafe { qjs::JS_IsException(value) } {
                     // SAFETY: ours.
-                    unsafe { qjs::JS_FreeValue(ctx, object) };
+                    unsafe { qjs::JS_FreeValue(cx, object) };
                     return value;
                 }
                 let cname = CString::new(native).unwrap_or_default();
                 // SAFETY: the object takes the value.
-                unsafe { qjs::JS_SetPropertyStr(ctx, object, cname.as_ptr(), value) };
+                unsafe { qjs::JS_SetPropertyStr(cx, object, cname.as_ptr(), value) };
             }
         }
         // SAFETY: the table keeps one reference, the caller gets another.
-        let kept = unsafe { qjs::JS_DupValue(ctx, object) };
+        let kept = unsafe { qjs::JS_DupValue(cx, object) };
         self.objects
             .borrow_mut()
-            .insert(key, crate::web::js::V::own(ctx, kept));
+            .insert(key, crate::web::js::V::own(cx, kept));
         object
     }
 
@@ -596,18 +596,18 @@ impl ModuleTable {
     }
 
     /// Releases every value the cache owns before its context is destroyed.
-    pub(crate) fn free_all(&mut self, ctx: *mut JsContext) {
+    pub(crate) fn free_all(&mut self, cx: *mut JsContext) {
         for (_, module) in self.materialized.get_mut().drain() {
             // SAFETY: owned values; no JS runs after state uninstall.
             unsafe {
                 match module {
                     Materialized::Ready { exports, object } => {
                         for (_, value) in exports {
-                            qjs::JS_FreeValue(ctx, value);
+                            qjs::JS_FreeValue(cx, value);
                         }
-                        qjs::JS_FreeValue(ctx, object);
+                        qjs::JS_FreeValue(cx, object);
                     }
-                    Materialized::Failed(error) => qjs::JS_FreeValue(ctx, error),
+                    Materialized::Failed(error) => qjs::JS_FreeValue(cx, error),
                     Materialized::Initializing => {}
                 }
             }
@@ -764,15 +764,15 @@ fn registry_exports(registry: &Registry, out: &mut Vec<(String, Made)>) {
 #[derive(Clone, Copy, JsLifetime)]
 struct ModuleTablePtr(*const ModuleTable);
 
-pub(crate) fn install(ctx: &Ctx<'_>, table: *const ModuleTable) {
-    assert!(ctx.store_userdata(ModuleTablePtr(table)).is_ok());
+pub(crate) fn install(cx: &Ctx<'_>, table: *const ModuleTable) {
+    assert!(cx.store_userdata(ModuleTablePtr(table)).is_ok());
 }
 
 pub(crate) struct Resolver;
 impl rquickjs::loader::Resolver for Resolver {
     fn resolve<'js>(
         &mut self,
-        _ctx: &Ctx<'js>,
+        _cx: &Ctx<'js>,
         base: &str,
         name: &str,
         _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
@@ -817,32 +817,32 @@ pub(crate) struct Loader;
 impl rquickjs::loader::Loader for Loader {
     fn load<'js>(
         &mut self,
-        ctx: &Ctx<'js>,
+        cx: &Ctx<'js>,
         name: &str,
         _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
     ) -> rquickjs::Result<Module<'js>> {
         // Framework typed registries own their native exports, including
         // standard names migrated from handwritten adapters. LLRT providers
         // remain on their original ModuleDef path in this same VM.
-        let registered = ctx
+        let registered = cx
             .userdata::<ModuleTablePtr>()
             // SAFETY: `install`'s owner (the VM state or the bytecode
             // compiler) keeps the table alive while the context loads.
             .is_some_and(|table| unsafe { (&*table.0).exports(name).is_some() });
         if !registered && let Some(name) = crate::standard::normalize(name) {
-            return crate::standard::load(ctx, name);
+            return crate::standard::load(cx, name);
         }
         // SAFETY: the thunk uses this live context's registered table and
         // returns exactly the module created by the existing native loader.
-        unsafe { Module::from_load_fn(ctx.clone(), name, load_native) }
+        unsafe { Module::from_load_fn(cx.clone(), name, load_native) }
     }
 }
 
 /// Resolve an already-canonical native specifier through the same provider
 /// selection used by the runtime loader (also used by type discovery).
 #[cfg(not(feature = "bytecode-only"))]
-pub(crate) fn load_module<'js>(ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Module<'js>> {
-    rquickjs::loader::Loader::load(&mut Loader, ctx, name, None)
+pub(crate) fn load_module<'js>(cx: &Ctx<'js>, name: &str) -> rquickjs::Result<Module<'js>> {
+    rquickjs::loader::Loader::load(&mut Loader, cx, name, None)
 }
 
 unsafe extern "C" fn load_native(
@@ -851,8 +851,8 @@ unsafe extern "C" fn load_native(
 ) -> *mut qjs::JSModuleDef {
     // SAFETY: called by Module::from_load_fn while its runtime is locked;
     // the temporary Ctx never escapes this callback.
-    let ctx = unsafe { Ctx::from_raw(std::ptr::NonNull::new_unchecked(raw)) };
-    let table = ctx.userdata::<ModuleTablePtr>().map(|table| table.0);
+    let cx = unsafe { Ctx::from_raw(std::ptr::NonNull::new_unchecked(raw)) };
+    let table = cx.userdata::<ModuleTablePtr>().map(|table| table.0);
     match table {
         // SAFETY: install's owner keeps the table alive through this load.
         Some(table) => unsafe { load(raw, name, table as *mut c_void) },
@@ -868,7 +868,7 @@ unsafe extern "C" fn load_native(
 }
 
 unsafe extern "C" fn load(
-    ctx: *mut JsContext,
+    cx: *mut JsContext,
     name: *const c_char,
     opaque: *mut c_void,
 ) -> *mut qjs::JSModuleDef {
@@ -884,7 +884,7 @@ unsafe extern "C" fn load(
     if let Some((id, code)) = chunk {
         // SAFETY: a live context; `code` is trusted as the host's API
         // requires.
-        let m = unsafe { compile_chunk(ctx, name, code) };
+        let m = unsafe { compile_chunk(cx, name, code) };
         if !m.is_null() {
             table.chunks.borrow_mut().loaded.insert(id.to_owned());
         }
@@ -894,7 +894,7 @@ unsafe extern "C" fn load(
         // SAFETY: throws on a live context; `%s` keeps the name literal.
         unsafe {
             qjs::JS_ThrowReferenceError(
-                ctx,
+                cx,
                 c"could not load module '%s' (only registered native modules and bundle chunks can be imported at run time)"
                     .as_ptr(),
                 name,
@@ -904,13 +904,13 @@ unsafe extern "C" fn load(
     };
     // SAFETY: a new C module declaring its exports (set by `init`).
     unsafe {
-        let m = qjs::JS_NewCModule(ctx, name, Some(init));
+        let m = qjs::JS_NewCModule(cx, name, Some(init));
         if m.is_null() {
             return m;
         }
         for export in &exports {
             let export = CString::new(export.as_str()).unwrap_or_default();
-            qjs::JS_AddModuleExport(ctx, m, export.as_ptr());
+            qjs::JS_AddModuleExport(cx, m, export.as_ptr());
         }
         m
     }
@@ -921,9 +921,9 @@ unsafe extern "C" fn load(
 ///
 /// # Safety
 ///
-/// `ctx` is live; bytecode is trusted.
+/// `cx` is live; bytecode is trusted.
 unsafe fn compile_chunk(
-    ctx: *mut JsContext,
+    cx: *mut JsContext,
     name: *const c_char,
     code: ChunkCode,
 ) -> *mut qjs::JSModuleDef {
@@ -935,7 +935,7 @@ unsafe fn compile_chunk(
                 let len = source.len();
                 source.push('\0');
                 qjs::JS_Eval(
-                    ctx,
+                    cx,
                     source.as_ptr() as *const c_char,
                     len as _,
                     name,
@@ -943,7 +943,7 @@ unsafe fn compile_chunk(
                 )
             }
             ChunkCode::Bytecode(bytes) => qjs::JS_ReadObject(
-                ctx,
+                cx,
                 bytes.as_ptr(),
                 bytes.len() as _,
                 qjs::JS_READ_OBJ_BYTECODE as c_int,
@@ -956,38 +956,38 @@ unsafe fn compile_chunk(
             return std::ptr::null_mut();
         }
         if qjs::JS_VALUE_GET_TAG(module) != qjs::JS_TAG_MODULE {
-            qjs::JS_FreeValue(ctx, module);
-            qjs::JS_ThrowTypeError(ctx, c"chunk '%s' is not a module".as_ptr(), name);
+            qjs::JS_FreeValue(cx, module);
+            qjs::JS_ThrowTypeError(cx, c"chunk '%s' is not a module".as_ptr(), name);
             return std::ptr::null_mut();
         }
         let m = qjs::JS_VALUE_GET_PTR(module) as *mut qjs::JSModuleDef;
         // The context keeps the module: the value is one more reference.
-        qjs::JS_FreeValue(ctx, module);
+        qjs::JS_FreeValue(cx, module);
         m
     }
 }
 
-unsafe extern "C" fn init(ctx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_int {
+unsafe extern "C" fn init(cx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_int {
     // SAFETY: the module's name atom, freed below; exports are new values
     // the module takes; the state's table lives as long as the context.
     unsafe {
-        let atom = qjs::JS_GetModuleName(ctx, m);
-        let name = qjs::JS_AtomToCStringLen(ctx, std::ptr::null_mut(), atom);
-        qjs::JS_FreeAtom(ctx, atom);
+        let atom = qjs::JS_GetModuleName(cx, m);
+        let name = qjs::JS_AtomToCStringLen(cx, std::ptr::null_mut(), atom);
+        qjs::JS_FreeAtom(cx, atom);
         if name.is_null() {
             return -1;
         }
-        let state = crate::state::state(ctx);
+        let state = crate::state::state(cx);
         let specifier = CStr::from_ptr(name).to_string_lossy().into_owned();
-        qjs::JS_FreeCString(ctx, name);
+        qjs::JS_FreeCString(cx, name);
         let Some(exports) = (*state).modules.exports(&specifier) else {
             return -1;
         };
-        if let Some(object) = host_module(ctx, &specifier) {
+        if let Some(object) = host_module(cx, &specifier) {
             if qjs::JS_IsException(object) {
                 return -1;
             }
-            qjs::JS_FreeValue(ctx, object);
+            qjs::JS_FreeValue(cx, object);
             let canonical = {
                 let cached = (*state).modules.materialized.borrow();
                 let Some(Materialized::Ready { exports, .. }) = cached.get(&specifier) else {
@@ -998,8 +998,7 @@ unsafe extern "C" fn init(ctx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_in
             // Canonical values stay owned by the cache for the context's life.
             for (export, value) in canonical {
                 let cname = CString::new(export.as_str()).unwrap_or_default();
-                if qjs::JS_SetModuleExport(ctx, m, cname.as_ptr(), qjs::JS_DupValue(ctx, value))
-                    != 0
+                if qjs::JS_SetModuleExport(cx, m, cname.as_ptr(), qjs::JS_DupValue(cx, value)) != 0
                 {
                     return -1;
                 }
@@ -1013,7 +1012,7 @@ unsafe extern "C" fn init(ctx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_in
         {
             let name = CString::new(name.as_str()).unwrap_or_default();
             qjs::JS_ThrowTypeError(
-                ctx,
+                cx,
                 c"host export '%s' is registered twice".as_ptr(),
                 name.as_ptr(),
             );
@@ -1028,12 +1027,12 @@ unsafe extern "C" fn init(ctx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_in
             _ => None,
         });
         for (export, made) in exports {
-            let value = make(ctx, table, &specifier, default_spec.as_ref(), &export, made);
+            let value = make(cx, table, &specifier, default_spec.as_ref(), &export, made);
             if qjs::JS_IsException(value) {
                 return -1;
             }
             let cname = CString::new(export.as_str()).unwrap_or_default();
-            if qjs::JS_SetModuleExport(ctx, m, cname.as_ptr(), value) != 0 {
+            if qjs::JS_SetModuleExport(cx, m, cname.as_ptr(), value) != 0 {
                 return -1;
             }
         }
@@ -1045,7 +1044,7 @@ unsafe extern "C" fn init(ctx: *mut JsContext, m: *mut qjs::JSModuleDef) -> c_in
 /// making it threw). A typed module's object is the VM's one (`table`), and
 /// a value of a flat default module (`default_spec`) is that object's.
 fn make(
-    ctx: *mut JsContext,
+    cx: *mut JsContext,
     table: &ModuleTable,
     name: &str,
     default_spec: Option<&Arc<ModuleSpec>>,
@@ -1053,39 +1052,39 @@ fn make(
     made: Made,
 ) -> JsValue {
     let member = |spec: &ModuleSpec, member: &str| {
-        let object = crate::web::js::V::own(ctx, table.object(ctx, name, spec));
+        let object = crate::web::js::V::own(cx, table.object(cx, name, spec));
         // SAFETY: inline tag check; a property read of the live object.
         unsafe {
             if qjs::JS_IsException(object.raw()) {
                 return qjs::JS_EXCEPTION;
             }
             let member = CString::new(member).unwrap_or_default();
-            qjs::JS_GetPropertyStr(ctx, object.raw(), member.as_ptr())
+            qjs::JS_GetPropertyStr(cx, object.raw(), member.as_ptr())
         }
     };
     match made {
         Made::Own(Export::Function(f, length)) => {
             let cname = CString::new(export).unwrap_or_default();
-            reactive::new_function(ctx, &cname, f, length)
+            reactive::new_function(cx, &cname, f, length)
         }
-        Made::Own(Export::Value(make)) => make(ctx),
-        Made::Component(spec, module) => components::component(ctx, spec, module),
-        Made::Module(spec) | Made::Default(spec) => table.object(ctx, name, &spec),
+        Made::Own(Export::Value(make)) => make(cx),
+        Made::Component(spec, module) => components::component(cx, spec, module),
+        Made::Module(spec) | Made::Default(spec) => table.object(cx, name, &spec),
         Made::Function(spec, f, members) if !spec.default => {
-            let function = components::module_function(ctx, &spec, f);
+            let function = components::module_function(cx, &spec, f);
             if let Some(members) = members {
-                components::add_functions(ctx, function, &members);
+                components::add_functions(cx, function, &members);
             }
             function
         }
         // The object's function, which has its members already.
         Made::Function(spec, f, _) | Made::Constant(spec, f) => member(&spec, f),
-        Made::Class(def) => match crate::classes::constructor(ctx, def) {
+        Made::Class(def) => match crate::classes::constructor(cx, def) {
             Ok(ctor) => ctor.take(),
             Err(_) => qjs::JS_EXCEPTION,
         },
         Made::Value(spec) => {
-            let host = crate::classes::host_outside_calls(ctx);
+            let host = crate::classes::host_outside_calls(cx);
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 spec.make()
                     .to_js_value(&host)
@@ -1095,13 +1094,13 @@ fn make(
                 Ok(Err(error)) => {
                     let message = CString::new(error.to_string()).unwrap_or_default();
                     // SAFETY: the context is live and `%s` keeps the message literal.
-                    unsafe { qjs::JS_ThrowTypeError(ctx, c"%s".as_ptr(), message.as_ptr()) }
+                    unsafe { qjs::JS_ThrowTypeError(cx, c"%s".as_ptr(), message.as_ptr()) }
                 }
                 Err(panic) => {
                     let message =
                         CString::new(crate::classes::panic_message(panic)).unwrap_or_default();
                     // SAFETY: as above.
-                    unsafe { qjs::JS_ThrowInternalError(ctx, c"%s".as_ptr(), message.as_ptr()) }
+                    unsafe { qjs::JS_ThrowInternalError(cx, c"%s".as_ptr(), message.as_ptr()) }
                 }
             }
         }
@@ -1110,7 +1109,7 @@ fn make(
             // SAFETY: the context is live and `%s` keeps the name literal.
             unsafe {
                 qjs::JS_ThrowTypeError(
-                    ctx,
+                    cx,
                     c"host export '%s' is registered twice".as_ptr(),
                     name.as_ptr(),
                 )
@@ -1118,7 +1117,7 @@ fn make(
         }
         Made::Reexport(value) => match default_spec {
             Some(spec) => member(spec, value),
-            None => env::reexport(ctx, value),
+            None => env::reexport(cx, value),
         },
     }
 }
@@ -1126,15 +1125,15 @@ fn make(
 /// The exports of the UI set the host registered under `specifier`, as one
 /// object (`nativeModule`; owned): `None` when the host registered none,
 /// an exception when making an export threw.
-pub(crate) fn host_module(ctx: *mut JsContext, specifier: &str) -> Option<JsValue> {
+pub(crate) fn host_module(cx: *mut JsContext, specifier: &str) -> Option<JsValue> {
     // SAFETY: the context owns the table for its entire lifetime.
-    let table = unsafe { &(*crate::state::state(ctx)).modules };
+    let table = unsafe { &(*crate::state::state(cx)).modules };
     let cached = table.materialized.borrow().get(specifier).map(|module| {
         // SAFETY: duplicating does not run JS; the cache owns each value.
         unsafe {
             match module {
-                Materialized::Ready { object, .. } => (Some(qjs::JS_DupValue(ctx, *object)), None),
-                Materialized::Failed(error) => (None, Some(qjs::JS_DupValue(ctx, *error))),
+                Materialized::Ready { object, .. } => (Some(qjs::JS_DupValue(cx, *object)), None),
+                Materialized::Failed(error) => (None, Some(qjs::JS_DupValue(cx, *error))),
                 Materialized::Initializing => (None, None),
             }
         }
@@ -1144,8 +1143,8 @@ pub(crate) fn host_module(ctx: *mut JsContext, specifier: &str) -> Option<JsValu
         return Some(unsafe {
             match (value, error) {
                 (Some(value), _) => value,
-                (_, Some(error)) => qjs::JS_Throw(ctx, error),
-                _ => qjs::JS_ThrowTypeError(ctx, c"host module is already initializing".as_ptr()),
+                (_, Some(error)) => qjs::JS_Throw(cx, error),
+                _ => qjs::JS_ThrowTypeError(cx, c"host module is already initializing".as_ptr()),
             }
         });
     }
@@ -1160,12 +1159,12 @@ pub(crate) fn host_module(ctx: *mut JsContext, specifier: &str) -> Option<JsValu
         .borrow_mut()
         .insert(specifier.to_owned(), Materialized::Initializing);
     // No cache borrow is held while factories or conversions execute.
-    let materialized = materialize(ctx, table, specifier, exports, &public_names);
+    let materialized = materialize(cx, table, specifier, exports, &public_names);
     let value = match &materialized {
         // SAFETY: new owned values are retained in the cache below.
-        Materialized::Ready { object, .. } => unsafe { qjs::JS_DupValue(ctx, *object) },
+        Materialized::Ready { object, .. } => unsafe { qjs::JS_DupValue(cx, *object) },
         // SAFETY: as above; throwing transfers the duplicate to QuickJS.
-        Materialized::Failed(error) => unsafe { qjs::JS_Throw(ctx, qjs::JS_DupValue(ctx, *error)) },
+        Materialized::Failed(error) => unsafe { qjs::JS_Throw(cx, qjs::JS_DupValue(cx, *error)) },
         Materialized::Initializing => unreachable!(),
     };
     table
@@ -1177,7 +1176,7 @@ pub(crate) fn host_module(ctx: *mut JsContext, specifier: &str) -> Option<JsValu
 
 /// Constructs the whole module or retains its first error, before exposing it.
 fn materialize(
-    ctx: *mut JsContext,
+    cx: *mut JsContext,
     table: &ModuleTable,
     specifier: &str,
     exports: Vec<(String, Made)>,
@@ -1195,40 +1194,40 @@ fn materialize(
         {
             let name = CString::new(export.as_str()).unwrap_or_default();
             qjs::JS_ThrowTypeError(
-                ctx,
+                cx,
                 c"host export '%s' is registered twice".as_ptr(),
                 name.as_ptr(),
             );
-            return Materialized::Failed(qjs::JS_GetException(ctx));
+            return Materialized::Failed(qjs::JS_GetException(cx));
         }
-        let object = qjs::JS_NewObject(ctx);
+        let object = qjs::JS_NewObject(cx);
         if qjs::JS_IsException(object) {
-            return Materialized::Failed(qjs::JS_GetException(ctx));
+            return Materialized::Failed(qjs::JS_GetException(cx));
         }
         let mut canonical = Vec::new();
         for (export, made) in exports {
-            let value = make(ctx, table, specifier, default_spec.as_ref(), &export, made);
+            let value = make(cx, table, specifier, default_spec.as_ref(), &export, made);
             if !qjs::JS_IsException(value) {
                 let name = CString::new(export.as_str()).unwrap_or_default();
                 if !public_names.contains(&export)
                     || qjs::JS_DefinePropertyValueStr(
-                        ctx,
+                        cx,
                         object,
                         name.as_ptr(),
-                        qjs::JS_DupValue(ctx, value),
+                        qjs::JS_DupValue(cx, value),
                         qjs::JS_PROP_C_W_E as i32,
                     ) >= 0
                 {
                     canonical.push((export, value));
                     continue;
                 }
-                qjs::JS_FreeValue(ctx, value);
+                qjs::JS_FreeValue(cx, value);
             }
-            let error = qjs::JS_GetException(ctx);
+            let error = qjs::JS_GetException(cx);
             for (_, value) in canonical {
-                qjs::JS_FreeValue(ctx, value);
+                qjs::JS_FreeValue(cx, value);
             }
-            qjs::JS_FreeValue(ctx, object);
+            qjs::JS_FreeValue(cx, object);
             return Materialized::Failed(error);
         }
         Materialized::Ready {

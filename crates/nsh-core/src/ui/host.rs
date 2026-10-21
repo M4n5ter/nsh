@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::{
     Accessible, AnyElement, Interactive, IntoReactive,
     element::{ElNode, Element, IntoElement, IntoListener, Listener, ParentElement},
-    events::{self, NativeEvent, Selection, VideoInfo, VideoProgress, WebNavigation},
+    events::{self, Composition, NativeEvent, Selection, VideoInfo, VideoProgress, WebNavigation},
 };
 use crate::{
     AutoCapitalize, AutoFill, Color, EventKind, HeaderSlot, Hsla, JsonValue, KeyboardAppearance,
@@ -477,6 +477,17 @@ impl Input {
     /// A key was pressed: the character, `Backspace` or `Enter`.
     pub fn on_key_press<M>(self, listener: impl IntoListener<str, M>) -> Self {
         self.listen(EventKind::KeyPress, listener.into_listener(), events::key)
+    }
+
+    /// An input method's composition started, changed or ended (the text
+    /// being composed, empty once it ends): the text is the input's only
+    /// once committed, reported by [`Self::on_change`] first.
+    pub fn on_composition_change<M>(self, listener: impl IntoListener<Composition, M>) -> Self {
+        self.listen(
+            EventKind::CompositionChange,
+            listener.into_listener(),
+            events::composition,
+        )
     }
 
     /// The text's size changed (multiline inputs growing).
@@ -1122,7 +1133,7 @@ impl Painter {
 
     /// Whether `point` (in the canvas, as a touch's location) is inside the
     /// current path by `rule`, with the transform, as recorded so far (TS:
-    /// `ctx.isPointInPath(x, y, rule)`). Answered from the geometry here,
+    /// `cx.isPointInPath(x, y, rule)`). Answered from the geometry here,
     /// with no platform round trip; a number given as an animated value
     /// counts as 0, as in TS. To find what is under a tap, build the
     /// canvas's painter in a function the press handler calls too.
@@ -1131,14 +1142,14 @@ impl Painter {
     }
 
     /// Whether `point` is on the stroke of the current path with the line
-    /// width and cap recorded so far (TS: `ctx.isPointInStroke(x, y)`;
+    /// width and cap recorded so far (TS: `cx.isPointInStroke(x, y)`;
     /// round joins, no dashes). See [`Self::is_point_in_path`].
     pub fn is_point_in_stroke(&self, point: Point<Points>) -> bool {
         crate::canvas::point_in_stroke(&self.drawing.ops, None, point, |_| 0.0)
     }
 
     /// Whether `point` is inside `path` by `rule`, with the transform
-    /// recorded so far (TS: `ctx.isPointInPath(path2d, x, y, rule)`): the
+    /// recorded so far (TS: `cx.isPointInPath(path2d, x, y, rule)`): the
     /// shape [`Self::fill_path`] drew under a tap. See
     /// [`Self::is_point_in_path`].
     pub fn path_contains(&self, path: &Path, point: Point<Points>, rule: FillRule) -> bool {
@@ -1146,7 +1157,7 @@ impl Painter {
     }
 
     /// Whether `point` is on the stroke of `path` with the transform, line
-    /// width and cap recorded so far (TS: `ctx.isPointInStroke(path2d, x,
+    /// width and cap recorded so far (TS: `cx.isPointInStroke(path2d, x,
     /// y)`). See [`Self::is_point_in_path`].
     pub fn stroke_contains(&self, path: &Path, point: Point<Points>) -> bool {
         crate::canvas::point_in_stroke(&self.drawing.ops, Some(path), point, |_| 0.0)
