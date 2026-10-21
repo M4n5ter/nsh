@@ -257,6 +257,7 @@ fn classes(cx: *mut JsContext) -> Classes {
             value_proto,
             &[
                 (c"set", value_set, 1),
+                (c"adjust", value_adjust, 2),
                 (c"stop", value_stop, 0),
                 (c"getValue", value_get, 0),
                 (c"setOffset", value_set_offset, 1),
@@ -663,6 +664,23 @@ unsafe extern "C" fn value_set(
     };
     let v = dup(cx, arg(argc, argv, 0));
     send(cx, vec![int(ANIMATION_SET), int(id), v])
+        .err()
+        .unwrap_or(UNDEFINED)
+}
+
+unsafe extern "C" fn value_adjust(
+    cx: *mut JsContext,
+    this: JsValue,
+    argc: c_int,
+    argv: *mut JsValue,
+) -> JsValue {
+    let id = match this_node(cx, this) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let factor = dup(cx, arg(argc, argv, 0));
+    let offset = dup(cx, arg(argc, argv, 1));
+    send(cx, vec![int(ANIMATION_ADJUST), int(id), factor, offset])
         .err()
         .unwrap_or(UNDEFINED)
 }
@@ -1735,6 +1753,9 @@ pub(crate) const EXPORTS: &[Item] = &[
   constructor(value: number);
   /** Jumps to `value`, stopping any animation. */
   set(value: number): void;
+  /** Adjusts the base value to value * factor + offset on the UI thread,
+   * stopping its animation and retaining the offset from `setOffset`. */
+  adjust(factor: number, offset: number): void;
   /** Stops the running animation where it is; resolves with the value
    * there. */
   stop(): Promise<number>;
@@ -1976,6 +1997,7 @@ mod tests {
             v.setOffset(5);
             v.extractOffset();
             v.flattenOffset();
+            v.adjust(2, -3);
             v.getValue().then((x) => log.push(`value ${x}`));
             v.stop().then((x) => log.push(`stopped ${x}`));
             globalThis.report = () => text(log.join("|"));
@@ -1997,6 +2019,11 @@ mod tests {
                 },
                 A::ExtractOffset { node: 2 },
                 A::FlattenOffset { node: 2 },
+                A::Adjust {
+                    node: 2,
+                    factor: 2.0,
+                    offset: -3.0
+                },
                 A::Read {
                     node: 2,
                     request: 2

@@ -251,6 +251,16 @@ pub enum AnimationOp {
         /// New value.
         value: f32,
     },
+    /// Adjusts a base value atomically, stopping its animation and retaining
+    /// the offset added by `SetOffset`.
+    Adjust {
+        /// Value node.
+        node: NodeId,
+        /// Multiplier of the current base value.
+        factor: f32,
+        /// Amount added after multiplication.
+        offset: f32,
+    },
     /// Starts an animation on a value, replacing any running one.
     Start {
         /// Value node.
@@ -326,6 +336,29 @@ pub enum AnimationOp {
         /// Reported back with the value.
         request: AnimationId,
     },
+}
+
+impl AnimationOp {
+    /// The single node this operation writes, replaces or releases. Composite
+    /// controls can affect several nodes and return `None`, as do reads.
+    pub fn affected_value(&self) -> Option<NodeId> {
+        match self {
+            Self::CreateValue { node, .. }
+            | Self::CreateInterpolate { node, .. }
+            | Self::CreateDiffClamp { node, .. }
+            | Self::CreateMath { node, .. }
+            | Self::SetOutput { node, .. }
+            | Self::Set { node, .. }
+            | Self::Adjust { node, .. }
+            | Self::Start { node, .. }
+            | Self::Stop { node }
+            | Self::Release { node }
+            | Self::SetOffset { node, .. }
+            | Self::FlattenOffset { node }
+            | Self::ExtractOffset { node } => Some(*node),
+            _ => None,
+        }
+    }
 }
 
 /// A composite animation.

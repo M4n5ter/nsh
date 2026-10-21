@@ -34,4 +34,6 @@ codes! { ANIMATION:
     ANIMATION_EXTRACT_OFFSET = 14,
     /// node, request id
     ANIMATION_READ = 15,
+    /// node, factor, offset
+    ANIMATION_ADJUST = 16,
 }

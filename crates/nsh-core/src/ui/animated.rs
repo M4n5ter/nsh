@@ -667,6 +667,16 @@ impl AnimatedValue {
         self.0.act(|node| AnimationOp::Set { node, value });
     }
 
+    /// Adjusts the base value to `value * factor + offset` on the UI thread,
+    /// stopping its animation and retaining the offset from [`Self::set_offset`].
+    pub fn adjust(&self, factor: f32, offset: f32) {
+        self.0.act(|node| AnimationOp::Adjust {
+            node,
+            factor,
+            offset,
+        });
+    }
+
     /// Stops its animation where it is ([`Self::value`] then reads where
     /// that is; TS: `stop()`'s promise).
     pub fn stop(&self) {
@@ -1159,14 +1169,16 @@ mod tests {
         let release = move || v.set_offset(2.0);
         press();
         release();
+        v.adjust(2.0, -3.0);
         let _ = v.timing(3.0, 100.0, Easing::Linear);
         assert!(matches!(
             &ops(&executor)[..],
             [
                 AnimationOp::Set { node: a, value: 1.0 },
                 AnimationOp::SetOffset { node: b, offset: 2.0 },
-                AnimationOp::Start { node: c, .. },
-            ] if [*a, *b, *c] == [node; 3]
+                AnimationOp::Adjust { node: c, factor: 2.0, offset: -3.0 },
+                AnimationOp::Start { node: d, .. },
+            ] if [*a, *b, *c, *d] == [node; 4]
         ));
         let copy = v;
         assert_eq!(copy, v);

@@ -17,6 +17,8 @@ animation::graph::Finished.value                                 # a generic ani
 animation::graph::Graph::set(new)                                # a generic animated value (any prop: opacity, a color channel, a length)
 animation::graph::Graph::tick(now)                               # time
 animation::graph::Graph::value ->                                # a generic animated value (any prop: opacity, a color channel, a length)
+animation::ops::AnimationOp::Adjust.factor                       # an affine multiplier of a generic animated value
+animation::ops::AnimationOp::Adjust.offset                       # a generic animated value (any prop: opacity, a color channel, a length)
 animation::ops::AnimationOp::CreateDiffClamp.max                 # a generic animated value (any prop: opacity, a color channel, a length)
 animation::ops::AnimationOp::CreateDiffClamp.min                 # a generic animated value (any prop: opacity, a color channel, a length)
 animation::ops::AnimationOp::CreateInterpolate.input_range       # interpolation input stops (generic animated values)
@@ -216,6 +218,8 @@ ui::animated::AnimatedValue::interpolate(input)                  # an animated v
 ui::animated::AnimatedValue::interpolate(output)                 # an animated value (any quantity)
 ui::animated::AnimatedValue::interpolate_colors(input)           # an animated value (any quantity)
 ui::animated::AnimatedValue::interpolate_with(input)             # an animated value (any quantity)
+ui::animated::AnimatedValue::adjust(factor)                      # an affine multiplier of a generic animated value
+ui::animated::AnimatedValue::adjust(offset)                      # an animated value (any quantity)
 ui::animated::AnimatedValue::set(value)                          # an animated value (any quantity)
 ui::animated::AnimatedValue::set_offset(offset)                  # an animated value (any quantity)
 ui::animated::AnimatedValue::spring(to)                          # an animated value (any quantity)

@@ -665,6 +665,11 @@ fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
             node,
             value: r.number()?,
         },
+        ANIMATION_ADJUST => AnimationOp::Adjust {
+            node,
+            factor: r.number()?,
+            offset: r.number()?,
+        },
         ANIMATION_START => {
             let animation = r.int()? as nsh_core::animation::AnimationId;
             let config = r.value()?;

@@ -17,7 +17,7 @@ mod ops;
 pub use self::{
     animator::{AnimValues, Animator},
     driver::{MAX_SAMPLES, sample_driver, sample_easing},
-    graph::{AnimationValue, Finished, Graph},
+    graph::{AnimationValue, Finished, GestureBinding, Graph, ValueIdentity},
     ops::{
         AnimationId, AnimationOp, AnimationProp, Composite, Curve, Driver, EaseMode, Easing,
         Extrapolate, MathOp, NodeId, Operand, Output,
