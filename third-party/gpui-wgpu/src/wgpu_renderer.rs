@@ -1426,6 +1426,23 @@ impl WgpuRendererCore {
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
+        let encoder =
+            self.encode_frame(scene, target_view, size, premultiplied_alpha, clear_color)?;
+        Ok(self
+            .resources
+            .queue
+            .submit(std::iter::once(encoder.finish())))
+    }
+
+    /// Records a complete frame for immediate submission by the caller.
+    fn encode_frame(
+        &mut self,
+        scene: &Scene,
+        target_view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
+        premultiplied_alpha: bool,
+        clear_color: wgpu::Color,
+    ) -> Result<wgpu::CommandEncoder> {
         anyhow::ensure!(
             size.width.0 > 0 && size.height.0 > 0,
             "invalid render target size: {size:?}"
@@ -1470,11 +1487,11 @@ impl WgpuRendererCore {
         scene: &Scene,
         frame_view: &wgpu::TextureView,
         clear_color: wgpu::Color,
-    ) -> Result<wgpu::SubmissionIndex> {
-        if let Some(submission) =
-            crate::fast::frame::record_frame(self, scene, frame_view, clear_color)?
+    ) -> Result<wgpu::CommandEncoder> {
+        if let Some(encoder) =
+            crate::fast::frame::encode_frame(self, scene, frame_view, clear_color)?
         {
-            return Ok(submission);
+            return Ok(encoder);
         }
         let mut instance_offset = 0;
         let instance_bindings = self
@@ -1611,11 +1628,7 @@ impl WgpuRendererCore {
             }
         }
 
-        let submission = self
-            .resources()
-            .queue
-            .submit(std::iter::once(encoder.finish()));
-        Ok(submission)
+        Ok(encoder)
     }
 
     fn write_instances(
@@ -2483,15 +2496,22 @@ impl WgpuHeadlessRenderer {
         Ok((padded_bytes_per_row, buffer_size, pixel_length))
     }
 
-    /// Reads the actual target into caller-owned storage, reusing only unmapped
+    /// Records drawing and readback in one submission, reusing only unmapped
     /// buffers. A pending or failed mapping is cancelled and never cached again.
-    fn read_pixels(&mut self, pixels: &mut [u8]) -> anyhow::Result<()> {
+    fn render_pixels(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        pixels: &mut [u8],
+    ) -> anyhow::Result<()> {
+        self.check_gpu_errors()?;
+        self.ensure_render_target(size)?;
         let target = self
             .render_target
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
         let texture = target.texture.clone();
-        let size = target.size();
+        let view = target.view.clone();
         let (padded_bytes_per_row, buffer_size, pixel_length) = self.readback_layout(size)?;
         anyhow::ensure!(
             pixels.len() == pixel_length,
@@ -2516,11 +2536,9 @@ impl WgpuHeadlessRenderer {
             },
         };
         let result = (|| {
-            let mut encoder = self.core.resources.device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor {
-                    label: Some("headless_readback_encoder"),
-                },
-            );
+            let mut encoder =
+                self.core
+                    .encode_frame(scene, &view, size, false, wgpu::Color::BLACK)?;
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
@@ -2630,8 +2648,7 @@ impl WgpuHeadlessRenderer {
             "Headless destination length must be {length}, got {}",
             pixels.len()
         );
-        self.render(scene, size)?;
-        self.read_pixels(pixels)
+        self.render_pixels(scene, size, pixels)
     }
 
     /// Render to an offscreen target without waiting for pixel readback.

@@ -244,25 +244,38 @@ fn plan_scene<'a>(
 }
 
 /// Forwarded to by `WgpuRendererCore::record_frame`, which draws both the
-/// windows' frames and the headless renderer's. Records and submits the
-/// frame. The storage-buffer and WebGL instance-texture transports share the
-/// scene graph and path planning, including rounded clip scopes.
-pub(crate) fn record_frame(
+/// windows' frames and the headless renderer's. Leaves the encoder open so
+/// headless readback can share the frame's submission. The storage-buffer and
+/// WebGL instance-texture transports share the scene graph and path planning,
+/// including rounded clip scopes.
+pub(crate) fn encode_frame(
     renderer: &mut WgpuRendererCore,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
     clear_color: wgpu::Color,
-) -> Result<Option<wgpu::SubmissionIndex>> {
-    record_into(renderer, scene, frame_view, clear_color).map(Some)
+) -> Result<Option<wgpu::CommandEncoder>> {
+    encode_into(renderer, scene, frame_view, clear_color).map(Some)
 }
 
 /// Records `scene` into `frame_view`, cleared to `clear` first, and submits it.
+#[cfg(test)]
 pub(crate) fn record_into(
     host: &mut impl FrameHost,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
     clear: wgpu::Color,
 ) -> Result<wgpu::SubmissionIndex> {
+    let queue = host.target()?.queue.clone();
+    let encoder = encode_into(host, scene, frame_view, clear)?;
+    Ok(queue.submit(std::iter::once(encoder.finish())))
+}
+
+fn encode_into(
+    host: &mut impl FrameHost,
+    scene: &Scene,
+    frame_view: &wgpu::TextureView,
+    clear: wgpu::Color,
+) -> Result<wgpu::CommandEncoder> {
     // The state is taken for the frame so that it can change while the host
     // lends out the GPU objects. The uploaded globals stay with the host,
     // which tells the frame's alpha mode by them.
@@ -280,7 +293,7 @@ fn record_with(
     scene: &Scene,
     frame_view: &wgpu::TextureView,
     clear: wgpu::Color,
-) -> Result<wgpu::SubmissionIndex> {
+) -> Result<wgpu::CommandEncoder> {
     state.bind_groups.begin_frame();
 
     // The layer tiles to rasterize before the frame draws them.
@@ -617,7 +630,7 @@ fn record(
     scenes: &[PlannedScene],
     uploads: &[SceneUpload],
     paths: &PathUpload,
-) -> wgpu::SubmissionIndex {
+) -> wgpu::CommandEncoder {
     let graph = DrawGraph { scenes, uploads };
     let mut encoder = target
         .device
@@ -661,7 +674,7 @@ fn record(
             graph: &graph,
         },
     );
-    target.queue.submit(std::iter::once(encoder.finish()))
+    encoder
 }
 
 /// A scene to draw, where, and with what.
