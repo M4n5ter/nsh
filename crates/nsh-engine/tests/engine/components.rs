@@ -1877,3 +1877,30 @@ fn a_base_checkbox_reports_the_next_value_and_styles_its_indicator() {
     assert_eq!(off_mark.opacity, 0.5);
     assert_eq!(off_mark.background_color.0, 0x00ff_00ff);
 }
+
+#[test]
+fn a_rust_components_tooltip_reaches_its_host() {
+    let (_engine, rx) = start(
+        r#"import { mount, Text } from "nsh";
+import { Button, Tooltip } from "nsh/base";
+mount(() => (
+  <Button tooltip={<Tooltip open><Text>Save changes</Text></Tooltip>}>
+    <Text>Save</Text>
+  </Button>
+));
+"#,
+    );
+    // Controlled open avoids waiting for a pointer or the tooltip's delay.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut trigger = false;
+    let mut tooltip = false;
+    while let Ok(batch) = rx.recv_deadline(deadline) {
+        trigger |= shows(&batch, "Save");
+        tooltip |= shows(&batch, "Save changes");
+        if trigger && tooltip {
+            break;
+        }
+    }
+    assert!(trigger, "the Rust component is mounted");
+    assert!(tooltip, "the component's tooltip is mounted on its host");
+}
