@@ -459,6 +459,14 @@ pub enum SceneQuery {
     MenuClosed,
     /// The app's storage: its entries.
     Storage,
+    /// The window's content is this size: what lies outside it, and no
+    /// scroll view brings in, is not on screen.
+    SetViewport {
+        /// Width in points.
+        width: f32,
+        /// Height in points.
+        height: f32,
+    },
     /// View `id`'s bounds on screen, in points from the viewport's top left.
     Bounds {
         /// The view.
@@ -466,6 +474,14 @@ pub enum SceneQuery {
     },
     /// The viewport's size in points.
     Viewport,
+    /// The text view showing span `id` (a nested text that takes presses)
+    /// and where in its text it is: `[view, start, end]` (UTF-16 units),
+    /// or `null` for a view.
+    Span {
+        /// The span.
+        id: u32,
+    },
+
     /// The text input `id` holds.
     InputText {
         /// The view.

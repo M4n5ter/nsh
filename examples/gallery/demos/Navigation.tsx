@@ -234,11 +234,11 @@ function Unsaved() {
               paddingHorizontal: 14,
               fontSize: 15,
               color: colors.text,
-              backgroundColor: colors.inset,
+              backgroundColor: colors.field,
               borderWidth: 1,
-              borderColor: focused() ? colors.accent : colors.border,
+              borderColor: focused() ? colors.accent : colors.fieldBorder,
               borderRadius: radius.control,
-              ...finish.inset,
+              ...finish.field,
             }}
           />
           <Text style={{ fontSize: 13, color: colors.muted }}>
@@ -467,6 +467,7 @@ export function Navigation() {
         presentation={sheet() === "pageSheet" ? "pageSheet" : sheet() === "formSheet" ? "formSheet" : "fullScreen"}
         animation={sheet() === "fade" ? "fade" : "slide"}
         onOpenChange={(open) => !open && close()}
+        style={{ flex: 1 }}
       >
         <ModalBody
           fullScreen={sheet() === "fullScreen" || sheet() === "fade"}
@@ -486,6 +487,7 @@ export function Navigation() {
         closeOnBackdropPress={false}
         closeOnSwipe={false}
         onCancel={() => cancels.set(cancels() + 1)}
+        style={{ flex: 1 }}
       >
         <ModalBody
           title="Kept open"
@@ -494,7 +496,7 @@ export function Navigation() {
           onClose={close}
         />
       </Dialog>
-      <Dialog open={sheet() === "dialog"} animation="fade" onOpenChange={(open) => !open && close()}>
+      <Dialog open={sheet() === "dialog"} animation="fade" onOpenChange={(open) => !open && close()} style={{ flex: 1 }}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.62)", alignItems: "center", justifyContent: "center", padding: 16 }}>
           <View
             style={{

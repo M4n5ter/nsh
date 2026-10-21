@@ -283,6 +283,12 @@ pub trait Scene: Send + Sync {
     fn clipboard(&self) -> Result<Option<String>, String>;
     /// The app's storage's entries.
     fn storage(&self) -> Result<std::collections::BTreeMap<String, String>, String>;
+    /// The window's content is `size` ([`Native::viewport`]): what lies
+    /// outside it, and no scroll view brings in, is not on screen.
+    fn set_viewport(&self, size: Size<Points>) -> Result<(), String>;
+    /// The text view showing span `id` (a nested text that takes presses)
+    /// and where in its text the span is (UTF-16 units); `None` for a view.
+    fn span(&self, id: NodeId) -> Result<Option<(NodeId, u32, u32)>, String>;
 }
 
 impl Scene for Model {
@@ -366,6 +372,13 @@ impl Scene for Model {
     }
     fn storage(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
         Ok(self.storage_entries())
+    }
+    fn set_viewport(&self, size: Size<Points>) -> Result<(), String> {
+        self.lock().screen.set_viewport(size);
+        Ok(())
+    }
+    fn span(&self, id: NodeId) -> Result<Option<(NodeId, u32, u32)>, String> {
+        Ok(self.lock().screen.span(id))
     }
 }
 
@@ -504,6 +517,10 @@ pub fn answer(model: &Model, step: &TestStep) -> Option<Result<serde_json::Value
             SceneQuery::MenuClosed => model.menu_closed().map(|()| Value::Null),
             SceneQuery::Clipboard => Ok(Value::from(model.clipboard_text())),
             SceneQuery::Storage => json(to_value(model.storage_entries())),
+            SceneQuery::SetViewport { width, height } => model
+                .set_viewport(Size::new(Points(*width), Points(*height)))
+                .map(|()| Value::Null),
+            SceneQuery::Span { id } => model.span(*id).and_then(|s| json(to_value(s))),
             SceneQuery::Bounds { .. }
             | SceneQuery::Viewport
             | SceneQuery::InputText { .. }
@@ -620,6 +637,16 @@ impl Scene for RemoteScene {
     fn storage(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
         self.query(SceneQuery::Storage)
     }
+    fn set_viewport(&self, size: Size<Points>) -> Result<(), String> {
+        self.query::<serde_json::Value>(SceneQuery::SetViewport {
+            width: size.width.0,
+            height: size.height.0,
+        })
+        .map(drop)
+    }
+    fn span(&self, id: NodeId) -> Result<Option<(NodeId, u32, u32)>, String> {
+        self.query(SceneQuery::Span { id })
+    }
 }
 
 /// A key the agent presses.
@@ -640,6 +667,15 @@ pub trait Native: Send + Sync {
     /// The view `id`'s bounds in the window's content, in points from its
     /// top-left (`None`: it has no native view on screen).
     fn bounds(&self, id: NodeId) -> Option<Bounds<Points>>;
+    /// Where the characters `start..end` (UTF-16 units) of text view
+    /// `text` are on screen: the part on their first line, in the
+    /// window's content as [`Native::bounds`] (`None`: not on screen, or
+    /// the platform cannot say). A press there goes to the span they are
+    /// (a nested text that takes presses), as the platform finds it.
+    fn text_bounds(&self, text: NodeId, start: u32, end: u32) -> Option<Bounds<Points>> {
+        let _ = (text, start, end);
+        None
+    }
     /// The size of the window's content, in points.
     fn viewport(&self) -> Size<Points>;
     /// A press (a click, a tap) at `at`.
@@ -889,12 +925,18 @@ fn well_inside(bounds: &Bounds<Points>, at: Point<Points>) -> bool {
 pub struct Agent {
     scene: std::sync::Arc<dyn Scene>,
     native: Box<dyn Native>,
+    /// The window's size the scene was told last.
+    viewport: Mutex<Option<Size<Points>>>,
 }
 
 impl Agent {
     /// An agent on the app `scene` sees, acting through `native`.
     pub fn new(scene: std::sync::Arc<dyn Scene>, native: Box<dyn Native>) -> Agent {
-        Agent { scene, native }
+        Agent {
+            scene,
+            native,
+            viewport: Mutex::new(None),
+        }
     }
 
     /// Takes `step`; blocks until it is done and the app is quiet.
@@ -908,6 +950,11 @@ impl Agent {
     fn run(&self, step: TestStep) -> Result<serde_json::Value, String> {
         use serde_json::Value;
         let done = |r: Result<(), String>| r.map(|()| Value::Null);
+        // What is on screen depends on the window: the scene knows it before
+        // it answers.
+        if !matches!(step, TestStep::Scene { .. }) {
+            self.sync_viewport()?;
+        }
         match step {
             TestStep::Ready { timeout_ms } => done(self.ready(Duration::from_millis(timeout_ms))),
             TestStep::Press { selector } => done(self.press(&selector)),
@@ -986,6 +1033,17 @@ impl Agent {
         }
     }
 
+    /// Tells the scene the window's size when it changed.
+    fn sync_viewport(&self) -> Result<(), String> {
+        let size = self.native.viewport();
+        let mut told = self.viewport.lock().unwrap_or_else(|e| e.into_inner());
+        if *told != Some(size) {
+            self.scene.set_viewport(size)?;
+            *told = Some(size);
+        }
+        Ok(())
+    }
+
     /// Answers an agent elsewhere with this one's scene and platform.
     fn scene_query(&self, query: SceneQuery) -> Result<serde_json::Value, String> {
         use serde_json::{Value, to_value};
@@ -1011,6 +1069,10 @@ impl Agent {
             SceneQuery::MenuClosed => scene.menu_closed().map(|()| Value::Null),
             SceneQuery::Clipboard => scene.clipboard().map(Value::from),
             SceneQuery::Storage => scene.storage().and_then(|e| json(to_value(e))),
+            SceneQuery::SetViewport { width, height } => scene
+                .set_viewport(Size::new(Points(width), Points(height)))
+                .map(|()| Value::Null),
+            SceneQuery::Span { id } => scene.span(id).and_then(|s| json(to_value(s))),
             SceneQuery::Bounds { id } => {
                 json(to_value(self.native.bounds(id).map(|b| {
                     [b.origin.x.0, b.origin.y.0, b.size.width.0, b.size.height.0]
@@ -1057,7 +1119,11 @@ impl Agent {
                 "`{selector}` matches {n} {what}s: say which (`{selector} >> nth=0`), or look inside \
                  a view around it (`id:list >> {selector}`)"
             )),
-            Pick::Disabled => Err(format!("`{selector}` is disabled; {}", self.on_screen())),
+            Pick::Disabled => Err(format!(
+                "`{selector}` {}; {}",
+                crate::screen::disabled(what),
+                self.on_screen()
+            )),
         }
     }
 
@@ -1073,7 +1139,24 @@ impl Agent {
         self.settled()?;
         let picked = self.scene.pick(selector, target)?;
         let id = self.picked(picked, selector, what)?;
-        Ok((id, self.scroll_into_view(id, selector)?))
+        let Some((text, start, end)) = self.scene.span(id)? else {
+            return Ok((id, self.scroll_into_view(id, selector)?));
+        };
+        // A span of a text: its text view comes into view, then the finger
+        // goes on its characters.
+        self.scroll_into_view(text, selector)?;
+        let at = self
+            .native
+            .text_bounds(text, start, end)
+            .filter(|b| !b.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "`{selector}` is a span of a text, and this platform does not say where its \
+                     characters are; {}",
+                    self.on_screen()
+                )
+            })?;
+        Ok((id, at.center()))
     }
 
     /// The middle of view `id` on screen, scrolled into view first when it
