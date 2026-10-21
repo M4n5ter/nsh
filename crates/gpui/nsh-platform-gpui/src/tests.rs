@@ -348,6 +348,7 @@ fn windows(cx: &mut TestAppContext) {
     // The engine (and the settings portal) run on threads of their own.
     cx.executor().allow_parking();
     keys_reach_the_fields_of_a_surface_showing_a_native_component(cx);
+    #[cfg(feature = "dev")]
     synthetic_keys_type_printable_characters_after_shortcuts(cx);
     compositions_are_reported_and_hold_values_until_they_end(cx);
     configured_assets_stay_with_their_original_load(cx);
@@ -675,6 +676,7 @@ fn keys_reach_the_fields_of_a_surface_showing_a_native_component(cx: &mut TestAp
 }
 
 /// The test agent's synthetic path must translate keys only after shortcuts.
+#[cfg(feature = "dev")]
 fn synthetic_keys_type_printable_characters_after_shortcuts(cx: &mut TestAppContext) {
     let source = r#"
 import { Input, mount, signal } from "nsh";
