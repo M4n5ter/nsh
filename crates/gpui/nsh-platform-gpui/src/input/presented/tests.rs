@@ -1,4 +1,4 @@
-use nsh_core::{MountItem, Points, ViewProps};
+use nsh_core::{MountItem, Points, ViewProps, geometry::size};
 
 use super::*;
 
@@ -62,47 +62,47 @@ fn click(down: bool) -> PlatformInput {
 fn presented_wheels_keep_the_original_scroll_across_growth_and_a_new_nested_owner() {
     let surface = new_surface();
     let outer = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
-    outer.state_mut().scroll.as_mut().unwrap().content = (300.0, 1200.0);
+    outer.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(1200.0));
     let source = InputSource::new(&surface);
     let snapshot = source.sample().unwrap();
     assert_eq!(
         source.dispatch(&snapshot, &wheel(-3.0)),
         InputDisposition::Handled
     );
-    assert_eq!(outer.state().scroll.as_ref().unwrap().y, STEP);
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(STEP));
     assert_eq!(
         source.dispatch(&snapshot, &wheel(3.0)),
         InputDisposition::Handled
     );
-    assert_eq!(outer.state().scroll.as_ref().unwrap().y, 0.0);
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(0.0));
 
-    outer.state_mut().scroll.as_mut().unwrap().content = (300.0, 1800.0);
+    outer.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(1800.0));
     let nested = view(&surface, 4, 2, ViewKind::Scroll);
-    nested.state_mut().scroll.as_mut().unwrap().content = (300.0, 900.0);
+    nested.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(900.0));
     assert_eq!(
         source.dispatch(&snapshot, &wheel(-3.0)),
         InputDisposition::Handled
     );
-    assert_eq!(outer.state().scroll.as_ref().unwrap().y, STEP);
-    assert_eq!(nested.state().scroll.as_ref().unwrap().y, 0.0);
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(STEP));
+    assert_eq!(nested.state().scroll.as_ref().unwrap().y, Points(0.0));
     assert_eq!(
         source.dispatch(&snapshot, &wheel(3.0)),
         InputDisposition::Handled
     );
-    assert_eq!(outer.state().scroll.as_ref().unwrap().y, 0.0);
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(0.0));
     // The edge is consumed by the same owner, rather than handed to a new hit.
     assert_eq!(
         source.dispatch(&snapshot, &wheel(3.0)),
         InputDisposition::Handled
     );
-    assert_eq!(outer.state().scroll.as_ref().unwrap().y, 0.0);
+    assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(0.0));
 }
 
 #[test]
 fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
     let surface = new_surface();
     let original = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
-    original.state_mut().scroll.as_mut().unwrap().content = (300.0, 1200.0);
+    original.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(1200.0));
     let source = InputSource::new(&surface);
     let old = source.sample().unwrap();
     surface
@@ -110,18 +110,18 @@ fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
         .borrow_mut()
         .apply(&surface, &MountItem::Remove { id: 2 });
     let replacement = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
-    replacement.state_mut().scroll.as_mut().unwrap().content = (300.0, 1200.0);
+    replacement.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(1200.0));
     assert_eq!(
         source.dispatch(&old, &wheel(-3.0)),
         InputDisposition::Rejected
     );
-    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, 0.0);
+    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, Points(0.0));
     let fresh = source.sample().unwrap();
     assert_eq!(
         source.dispatch(&fresh, &wheel(-3.0)),
         InputDisposition::Handled
     );
-    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, STEP);
+    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, Points(STEP));
 
     replacement.state_mut().frame.size.width = Points(250.0);
     assert_eq!(
@@ -159,7 +159,7 @@ fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
         source.dispatch(&current, &wheel(-3.0)),
         InputDisposition::Rejected
     );
-    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, STEP);
+    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, Points(STEP));
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn resize_and_modal_changes_cancel_only_the_original_surfaces_native_capture() {
 fn native_thumb_over_a_full_width_button_never_acquires_a_button_lease() {
     let surface = new_surface();
     let scroll = view(&surface, 2, ROOT_ID, ViewKind::Scroll);
-    scroll.state_mut().scroll.as_mut().unwrap().content = (300.0, 1200.0);
+    scroll.state_mut().scroll.as_mut().unwrap().content = size(Points(300.0), Points(1200.0));
     let button = view(&surface, 4, 2, ViewKind::View);
     button.state_mut().props.input_action = Some(7);
     button.state_mut().events.set(EventKind::Press, true);
@@ -443,7 +443,7 @@ fn physical_mouse_cleanup_ends_native_selection_thumb_and_hover_without_a_new_hi
     {
         let mut state = scroll.state_mut();
         let scroll = state.scroll.as_mut().unwrap();
-        scroll.content = (300.0, 1200.0);
+        scroll.content = size(Points(300.0), Points(1200.0));
         scroll.indicator = true;
     }
     let editor = view(&surface, 4, 2, ViewKind::Input);
@@ -504,11 +504,11 @@ fn physical_mouse_cleanup_ends_native_selection_thumb_and_hover_without_a_new_hi
     source.cancel_pointer();
     assert!(surface.input.pointers.borrow().is_empty());
     crate::scroll::thumb_move(&surface, &scroll, 0.0, 10_000.0);
-    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, 0.0);
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, Points(0.0));
     mouse(PointerKind::Down, 296.0, 20.0);
     mouse(PointerKind::Move, 296.0, 10_020.0);
-    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, 900.0);
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, Points(900.0));
     source.cancel_pointer();
     assert!(surface.input.pointers.borrow().is_empty());
-    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, 900.0);
+    assert_eq!(scroll.state().scroll.as_ref().unwrap().y, Points(900.0));
 }
