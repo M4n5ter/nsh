@@ -173,6 +173,7 @@ function App() {
     }}</Each>
     <Input testID="next" ref={(node) => next = node} defaultValue="next"
       onFocus={() => focused.set("next")} style={{ height: 30 }} />
+    <Input testID="plain" defaultValue="abcdef" style={{ width: 160, height: 30 }} />
   </View>;
 }
 mount(App);
@@ -508,7 +509,7 @@ fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
 }
 
 fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext) {
-    use crate::InputDisposition::{Handled, Rejected};
+    use crate::InputDisposition::{ExactFallback, Handled, Rejected};
 
     let code = nsh_bundler::compile_module("App.tsx", PRESENTED_KEYBOARD, &[]).unwrap();
     let (view, cx) =
@@ -602,6 +603,92 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
     assert_eq!(source.dispatch(&current, &key("f6", true)), Handled);
     source.dispatch(&current, &key("f6", false));
     wait_for_report(&view, cx, "1|4|editor:1|0:a|1|2|1|1:1");
+
+    // A plain Input can acquire native focus from its presented geometry even
+    // when an unrelated thinking update has already redrawn the surface.
+    let (plain, start, outside) = view.read_with(cx, |view, _| {
+        let surface = view.surface();
+        let plain = find_test_view(&surface.root, "plain").unwrap();
+        let matrix = plain.to_root().unwrap();
+        let size = plain.state().frame.size;
+        let position = |x| {
+            let (x, y) = matrix.map(x, size.height.0 / 2.0).unwrap();
+            let (ox, oy) = surface.origin.get();
+            gpui::point(gpui::px(x + ox), gpui::px(y + oy))
+        };
+        (plain, position(0.0), position(size.width.0 + 20.0))
+    });
+    let down = gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+        button: gpui::MouseButton::Left,
+        position: start,
+        click_count: 1,
+        ..Default::default()
+    });
+    let drag = gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+        position: outside,
+        pressed_button: Some(gpui::MouseButton::Left),
+        ..Default::default()
+    });
+    let up = gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+        button: gpui::MouseButton::Left,
+        position: outside,
+        click_count: 1,
+        ..Default::default()
+    });
+    let before_click = source.sample().unwrap();
+    cx.simulate_keystrokes("f7");
+    wait_for_report(&view, cx, "1|5|editor:1|0:a|1|2|1|1:1");
+    assert_eq!(source.dispatch(&before_click, &down), Handled);
+    ime(&view, cx, |surface| {
+        assert_eq!(crate::text_input::focused(surface), Some(plain.clone()));
+        assert_eq!(
+            crate::text_input::ime::selected_text_range(surface).map(|selection| selection.range),
+            Some(0..0)
+        );
+    });
+    let focused = source.sample().unwrap();
+    cx.simulate_keystrokes("f7");
+    wait_for_report(&view, cx, "1|6|editor:1|0:a|1|2|1|1:1");
+    assert_eq!(source.dispatch(&before_click, &drag), Handled);
+    cx.simulate_keystrokes("f7");
+    wait_for_report(&view, cx, "1|7|editor:1|0:a|1|2|1|1:1");
+    assert_eq!(source.dispatch(&before_click, &up), Handled);
+    ime(&view, cx, |surface| {
+        assert!(source.editor_matches(&focused));
+        assert_eq!(crate::text_input::focused(surface), Some(plain.clone()));
+        assert_eq!(
+            crate::text_input::ime::selected_text_range(surface).map(|selection| selection.range),
+            Some(0..6)
+        );
+        crate::text_input::ime::replace_and_mark_text_in_range(surface, None, "ni", None);
+        crate::text_input::ime::replace_text_in_range(surface, None, "你好");
+    });
+    assert_eq!(field_text(&view, cx).as_deref(), Some("你好"));
+
+    let before_cancel = source.sample().unwrap();
+    assert_eq!(source.dispatch(&before_cancel, &down), Handled);
+    source.cancel_pointer();
+    assert_eq!(source.dispatch(&before_cancel, &drag), ExactFallback);
+    ime(&view, cx, |surface| {
+        // A later move reaching the editor must not revive the cancelled drag.
+        assert!(!crate::text_input::pointer(
+            surface,
+            &plain,
+            &crate::view::ItemPointer {
+                kind: crate::input::PointerKind::Move,
+                x: 180.0,
+                y: 15.0,
+                clicks: 0,
+                modifiers: crate::input::Modifiers::default(),
+            }
+        ));
+        assert_eq!(
+            crate::text_input::ime::selected_text_range(surface).map(|selection| selection.range),
+            Some(0..0)
+        );
+        crate::text_input::ime::replace_text_in_range(surface, None, "世界");
+    });
+    assert_eq!(field_text(&view, cx).as_deref(), Some("世界你好"));
     view.update(cx, |view, _| view.stop());
 }
 

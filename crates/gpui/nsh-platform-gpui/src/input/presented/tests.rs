@@ -303,6 +303,86 @@ fn sealed_press_preserves_mouse_move_listeners() {
 }
 
 #[test]
+fn presented_inputs_reject_occlusion_reparenting_and_replaced_owners() {
+    let surface = new_surface();
+    let parent = view(&surface, 2, ROOT_ID, ViewKind::View);
+    parent.state_mut().props.input_action = Some(7);
+    parent.state_mut().events.set(EventKind::Press, true);
+    let editor = view(&surface, 4, parent.id(), ViewKind::Input);
+    surface.mounter.borrow_mut().apply(
+        &surface,
+        &MountItem::Input {
+            id: editor.id(),
+            config: Box::new(nsh_core::InputConfig {
+                editable: false,
+                ..Default::default()
+            }),
+        },
+    );
+    let source = InputSource::new(&surface);
+    let original = source.sample().unwrap();
+    let overlay = view(&surface, 6, ROOT_ID, ViewKind::View);
+    assert_eq!(source.dispatch(&original, &click(true)), InputDisposition::Rejected);
+    assert_eq!(crate::text_input::focused_view(&surface), None);
+    surface.mounter.borrow_mut().apply(&surface, &MountItem::Remove { id: overlay.id() });
+
+    // Readonly editors still own native focus and selection, without giving a
+    // containing press action the click or permitting text replacement.
+    assert_eq!(source.dispatch(&original, &click(true)), InputDisposition::Handled);
+    assert_eq!(crate::text_input::focused_view(&surface), Some(editor.clone()));
+    assert!(!source.editor_matches(&source.sample().unwrap()));
+    let native_move = crate::view::ItemPointer {
+        kind: PointerKind::Move,
+        x: 350.0,
+        y: 20.0,
+        clicks: 0,
+        modifiers: Modifiers::default(),
+    };
+    assert!(crate::text_input::pointer(&surface, &editor, &native_move));
+    let moved = PlatformInput::MouseMove(gpui::MouseMoveEvent {
+        position: gpui::point(gpui::px(350.0), gpui::px(20.0)),
+        pressed_button: Some(MouseButton::Left),
+        ..Default::default()
+    });
+    parent.state_mut().events.set(EventKind::MouseMove, true);
+    assert_eq!(source.dispatch(&original, &moved), InputDisposition::Rejected);
+    assert!(!crate::text_input::pointer(&surface, &editor, &native_move));
+    assert_eq!(crate::text_input::focused_view(&surface), Some(editor.clone()));
+    parent.state_mut().events.set(EventKind::MouseMove, false);
+
+    // Arbitrary pointer and focus callbacks retain the exact-frame path.
+    for event in [EventKind::Focus, EventKind::Touch, EventKind::MouseMove] {
+        editor.state_mut().events.set(event, true);
+        let snapshot = source.sample().unwrap();
+        assert_eq!(source.dispatch(&snapshot, &click(true)), InputDisposition::ExactFallback);
+        editor.state_mut().events.set(event, false);
+    }
+
+    let before_reparent = source.sample().unwrap();
+    let another_parent = view(&surface, 8, ROOT_ID, ViewKind::View);
+    surface.mounter.borrow_mut().apply(
+        &surface,
+        &MountItem::Insert {
+            parent: another_parent.id(),
+            child: editor.id(),
+            before: None,
+        },
+    );
+    assert_eq!(source.dispatch(&before_reparent, &click(true)), InputDisposition::Rejected);
+    let reparented = source.sample().unwrap();
+    assert_eq!(source.dispatch(&reparented, &click(true)), InputDisposition::Handled);
+    assert_eq!(source.dispatch(&reparented, &click(false)), InputDisposition::Handled);
+
+    surface.mounter.borrow_mut().apply(&surface, &MountItem::Remove { id: editor.id() });
+    let replacement = view(&surface, editor.id(), another_parent.id(), ViewKind::Input);
+    assert_eq!(source.dispatch(&reparented, &click(true)), InputDisposition::Rejected);
+    let current = source.sample().unwrap();
+    assert_eq!(source.dispatch(&current, &click(true)), InputDisposition::Handled);
+    assert_eq!(crate::text_input::focused_view(&surface), Some(replacement));
+    assert_eq!(source.dispatch(&current, &click(false)), InputDisposition::Handled);
+}
+
+#[test]
 fn resize_and_modal_changes_cancel_only_the_original_surfaces_native_capture() {
     let surface = new_surface();
     let button = view(&surface, 2, ROOT_ID, ViewKind::View);
