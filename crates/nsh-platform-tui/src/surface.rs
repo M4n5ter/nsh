@@ -867,7 +867,10 @@ impl Surface {
                         nsh_core::platform::ColorScheme::Light
                     }) == nsh_core::platform::ColorScheme::Dark
                 }
-                MountItem::Animation(op) => self.animation.apply(op, &mut finished),
+                MountItem::Animation(op) => {
+                    self.presented_animation_changed(&op);
+                    self.animation.apply(op, &mut finished);
+                }
                 MountItem::AnimationBindings { id, bindings } => {
                     if let Some(node) = self.node_mut(id) {
                         node.bindings = bindings;

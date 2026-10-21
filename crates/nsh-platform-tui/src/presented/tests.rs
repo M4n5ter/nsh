@@ -113,6 +113,228 @@ fn scroll_surface() -> Surface {
     surface
 }
 
+fn gesture_surface() -> Surface {
+    use nsh_core::{GestureValues, PointerEvents, animation::AnimationOp};
+
+    let mut surface = Surface::new(40, 12, CellMetrics::default());
+    let mut items = mount(2, ViewKind::View, frame(0.0, 0.0, 160.0, 96.0));
+    for (node, value) in [(100, 0.0), (101, 0.0), (102, 1.0)] {
+        items.push(MountItem::Animation(AnimationOp::CreateValue {
+            node,
+            value,
+        }));
+    }
+    items.push(MountItem::Gestures {
+        id: 2,
+        values: GestureValues {
+            pan_x: Some(100),
+            pan_y: Some(101),
+            pinch: Some(102),
+            ..Default::default()
+        },
+    });
+    items.extend(mount(4, ViewKind::Image, frame(0.0, 0.0, 80.0, 48.0)));
+    items.extend([
+        MountItem::Insert {
+            parent: 2,
+            child: 4,
+            before: None,
+        },
+        MountItem::ViewProps {
+            id: 4,
+            props: Box::new(ViewProps {
+                pointer_events: PointerEvents::None,
+                ..Default::default()
+            }),
+        },
+    ]);
+    surface.apply(MountBatch { items });
+    surface.drain_events().for_each(drop);
+    surface
+}
+
+#[test]
+fn native_value_pans_keep_their_capture_while_other_content_commits() {
+    let mut surface = gesture_surface();
+    let mut child = mount(5, ViewKind::View, frame(0.0, 0.0, 64.0, 48.0));
+    child.push(MountItem::Insert {
+        parent: 2,
+        child: 5,
+        before: None,
+    });
+    surface.apply(MountBatch { items: child });
+    let lease = surface.input_snapshot().press_at(2, 1).unwrap();
+    assert!(lease.is_native_pan());
+    assert_eq!(lease.binding(), None);
+    assert_eq!(
+        surface.handle_presented_mouse(down(2, 1), &lease),
+        Some(true)
+    );
+    let mut changed = mount(6, ViewKind::View, frame(180.0, 0.0, 80.0, 48.0));
+    // The captured hit moves away and gains a real listener. Only the
+    // original native value owner may receive this continuing drag.
+    changed.extend([
+        MountItem::Frame {
+            id: 5,
+            frame: frame(80.0, 48.0, 64.0, 48.0),
+        },
+        events(5, &[EventKind::Touch]),
+    ]);
+    surface.apply(MountBatch { items: changed });
+    assert_eq!(
+        surface
+            .handle_presented_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 3), &lease),
+        Some(true)
+    );
+    assert_eq!(surface.animation.value(100), Some(24.0));
+    assert_eq!(surface.animation.value(101), Some(32.0));
+    // A native capture can leave its viewport without retargeting the drag.
+    assert_eq!(
+        surface.handle_presented_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 30, 10),
+            &lease
+        ),
+        Some(true)
+    );
+    assert_eq!(surface.animation.value(100), Some(224.0));
+    assert_eq!(surface.animation.value(101), Some(144.0));
+    assert_eq!(
+        surface.handle_presented_mouse(up(30, 10), &lease),
+        Some(true)
+    );
+    assert!(surface.pointer.is_none());
+    assert!(
+        !surface
+            .drain_events()
+            .any(|event| matches!(event, SurfaceEvent::Event(..)))
+    );
+}
+
+#[test]
+fn native_gesture_bindings_reject_replacement_rebinding_and_actual_callbacks() {
+    use nsh_core::{GestureValues, animation::AnimationOp};
+
+    for change in 0..5 {
+        let mut surface = gesture_surface();
+        let lease = surface.input_snapshot().press_at(2, 1).unwrap();
+        let mut wheel = mouse(MouseEventKind::ScrollUp, 2, 1);
+        wheel.modifiers = KeyModifiers::CONTROL;
+        let pinch = surface.input_snapshot().wheel_at(wheel).unwrap();
+        assert_eq!(
+            surface.handle_presented_mouse(down(2, 1), &lease),
+            Some(true)
+        );
+        let items = match change {
+            0 => vec![MountItem::Animation(AnimationOp::CreateValue {
+                node: 100,
+                value: 9.0,
+            })],
+            1 => vec![
+                MountItem::Animation(AnimationOp::Release { node: 102 }),
+                MountItem::Animation(AnimationOp::CreateValue {
+                    node: 102,
+                    value: 9.0,
+                }),
+            ],
+            2 => vec![MountItem::Gestures {
+                id: 2,
+                values: GestureValues {
+                    pan_x: Some(101),
+                    pan_y: Some(100),
+                    pinch: Some(102),
+                    ..Default::default()
+                },
+            }],
+            3 => vec![events(2, &[EventKind::PanEnd, EventKind::PinchEnd])],
+            _ => vec![events(ROOT_ID, &[EventKind::Touch])],
+        };
+        surface.apply(MountBatch { items });
+        surface.drain_events().for_each(drop);
+        let before = [
+            surface.animation.value(100),
+            surface.animation.value(101),
+            surface.animation.value(102),
+        ];
+        assert_eq!(
+            surface.handle_presented_mouse(
+                mouse(MouseEventKind::Drag(MouseButton::Left), 5, 3),
+                &lease
+            ),
+            None,
+            "change {change}"
+        );
+        assert_eq!(
+            surface.handle_presented_wheel(wheel, 1, &pinch),
+            None,
+            "change {change}"
+        );
+        assert_eq!(
+            [
+                surface.animation.value(100),
+                surface.animation.value(101),
+                surface.animation.value(102)
+            ],
+            before,
+            "change {change}"
+        );
+        assert!(
+            !surface
+                .drain_events()
+                .any(|event| matches!(event, SurfaceEvent::Event(..)))
+        );
+        if change >= 3 {
+            let snapshot = surface.input_snapshot();
+            assert!(snapshot.press_at(2, 1).is_none());
+            assert!(snapshot.wheel_at(wheel).is_none());
+        }
+    }
+}
+
+#[test]
+fn native_pinch_and_atomic_controls_use_live_values_without_old_pan_baselines() {
+    use nsh_core::animation::AnimationOp;
+
+    let mut surface = gesture_surface();
+    let mut wheel = mouse(MouseEventKind::ScrollUp, 2, 1);
+    wheel.modifiers = KeyModifiers::CONTROL;
+    let pinch = surface.input_snapshot().wheel_at(wheel).unwrap();
+    assert_eq!(surface.handle_presented_wheel(wheel, 2, &pinch), Some(2));
+    let scale = surface.animation.value(102).unwrap();
+    assert!((scale - 1.21).abs() < 0.00001);
+    surface.apply(MountBatch {
+        items: vec![MountItem::Animation(AnimationOp::Adjust {
+            node: 102,
+            factor: 2.0,
+            offset: 0.0,
+        })],
+    });
+    assert_eq!(surface.handle_presented_wheel(wheel, 1, &pinch), Some(1));
+    assert!((surface.animation.value(102).unwrap() - scale * 2.0 * 1.1).abs() < 0.00001);
+    let pan = surface.input_snapshot().press_at(2, 1).unwrap();
+    surface.handle_presented_mouse(down(2, 1), &pan).unwrap();
+    surface
+        .handle_presented_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 3), &pan)
+        .unwrap();
+    surface.apply(MountBatch {
+        items: vec![MountItem::Animation(AnimationOp::Adjust {
+            node: 100,
+            factor: 1.0,
+            offset: 16.0,
+        })],
+    });
+    assert_eq!(surface.animation.value(100), Some(40.0));
+    assert_eq!(
+        surface.handle_presented_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 6, 3), &pan),
+        None
+    );
+    assert_eq!(surface.animation.value(100), Some(40.0));
+    assert!(
+        !surface
+            .drain_events()
+            .any(|event| matches!(event, SurfaceEvent::Event(..)))
+    );
+}
+
 #[test]
 fn presented_wheels_keep_the_original_owner_when_content_and_nested_hits_move() {
     fn send_sync<T: Send + Sync>() {}
@@ -133,7 +355,7 @@ fn presented_wheels_keep_the_original_owner_when_content_and_nested_hits_move() 
     surface.apply(MountBatch { items });
     let lease = surface
         .input_snapshot()
-        .wheel_at(2, 0)
+        .wheel_at(mouse(MouseEventKind::ScrollDown, 2, 0))
         .expect("outer scroll");
     let down = mouse(MouseEventKind::ScrollDown, 2, 0);
     surface.drain_events().for_each(drop);
@@ -197,7 +419,7 @@ fn changed_native_owners_and_scopes_reject_the_old_wheel_without_retargeting() {
         let mut surface = scroll_surface();
         let lease = surface
             .input_snapshot()
-            .wheel_at(2, 0)
+            .wheel_at(mouse(MouseEventKind::ScrollDown, 2, 0))
             .expect("original scroll");
         let mut items = Vec::new();
         match change {
@@ -288,7 +510,10 @@ fn changed_native_owners_and_scopes_reject_the_old_wheel_without_retargeting() {
         assert_eq!(surface.drain_events().count(), 0, "{change:?}");
         if matches!(change, Change::AnotherPane) {
             assert_eq!(surface.node(8).unwrap().scroll.y, px(0.0));
-            let fresh = surface.input_snapshot().wheel_at(2, 0).expect("new pane");
+            let fresh = surface
+                .input_snapshot()
+                .wheel_at(mouse(MouseEventKind::ScrollDown, 2, 0))
+                .expect("new pane");
             assert_eq!(
                 surface.handle_presented_wheel(mouse(MouseEventKind::ScrollDown, 2, 0), 1, &fresh),
                 Some(1)
@@ -303,10 +528,16 @@ fn changed_native_owners_and_scopes_reject_the_old_wheel_without_retargeting() {
 fn wheel_leases_require_a_hit_and_keep_immediate_callbacks_on_the_exact_path() {
     let mut surface = scroll_surface();
     assert!(
-        surface.input_snapshot().wheel_at(30, 0).is_none(),
+        surface
+            .input_snapshot()
+            .wheel_at(mouse(MouseEventKind::ScrollDown, 30, 0))
+            .is_none(),
         "no focused/first-scroll fallback"
     );
-    let lease = surface.input_snapshot().wheel_at(2, 0).unwrap();
+    let lease = surface
+        .input_snapshot()
+        .wheel_at(mouse(MouseEventKind::ScrollDown, 2, 0))
+        .unwrap();
     let mut zoom = mouse(MouseEventKind::ScrollDown, 2, 0);
     zoom.modifiers = KeyModifiers::CONTROL;
     assert_eq!(surface.handle_presented_wheel(zoom, 1, &lease), None);
@@ -334,7 +565,10 @@ fn wheel_leases_require_a_hit_and_keep_immediate_callbacks_on_the_exact_path() {
         });
         surface.drain_events().for_each(drop);
         assert!(
-            surface.input_snapshot().wheel_at(2, 0).is_none(),
+            surface
+                .input_snapshot()
+                .wheel_at(mouse(MouseEventKind::ScrollDown, 2, 0))
+                .is_none(),
             "{kind:?}"
         );
         assert_eq!(
@@ -347,7 +581,10 @@ fn wheel_leases_require_a_hit_and_keep_immediate_callbacks_on_the_exact_path() {
     surface.apply(MountBatch {
         items: vec![events(2, &[])],
     });
-    let fresh = surface.input_snapshot().wheel_at(2, 0).unwrap();
+    let fresh = surface
+        .input_snapshot()
+        .wheel_at(mouse(MouseEventKind::ScrollDown, 2, 0))
+        .unwrap();
     assert_eq!(
         surface.handle_presented_wheel(mouse(MouseEventKind::ScrollDown, 2, 0), 1, &fresh),
         Some(1)
@@ -378,7 +615,7 @@ fn a_presented_wheel_preserves_hover_feedback_and_the_next_keyboard_scroll_targe
     assert_eq!(surface.focused(), None);
     let lease = surface
         .input_snapshot()
-        .wheel_at(25, 0)
+        .wheel_at(mouse(MouseEventKind::ScrollDown, 25, 0))
         .expect("second pane");
     assert_eq!(
         surface.handle_presented_wheel(mouse(MouseEventKind::ScrollDown, 25, 0), 1, &lease),
@@ -436,7 +673,7 @@ fn a_box_none_scroll_keeps_its_selectable_text_as_ordinary_wheel_content() {
     assert_eq!(surface.hit_test(20.0, 8.0), Some(4));
     let lease = surface
         .input_snapshot()
-        .wheel_at(2, 0)
+        .wheel_at(mouse(MouseEventKind::ScrollDown, 2, 0))
         .expect("selectable text's scroll ancestor");
     assert_eq!(
         surface.handle_presented_wheel(mouse(MouseEventKind::ScrollDown, 2, 0), 1, &lease),
@@ -499,7 +736,7 @@ fn a_presented_close_survives_underlay_and_color_feedback_commits() {
     let mut surface = surface();
     let snapshot = surface.input_snapshot();
     let lease = snapshot.press_at(1, 1).expect("presented Close action");
-    assert_eq!(lease.binding(), CLOSE_ACTION);
+    assert_eq!(lease.binding(), Some(CLOSE_ACTION));
     assert_eq!(lease.target(), CLOSE);
 
     surface.apply(MountBatch {

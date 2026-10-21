@@ -1189,7 +1189,7 @@ impl Surface {
         self.scroll_wheel_owner(id, mouse, steps)
     }
 
-    fn pinch_wheel(&mut self, id: NodeId, kind: MouseEventKind, mut steps: u16) -> u16 {
+    pub(crate) fn pinch_wheel(&mut self, id: NodeId, kind: MouseEventKind, mut steps: u16) -> u16 {
         let Some(node) = self.node(id) else {
             return 0;
         };
@@ -1507,7 +1507,7 @@ impl Surface {
                 if let Some(id) = self.drag_input {
                     self.place_caret(id, x, y, true);
                 }
-                self.drag_pointer(x, y);
+                self.drag_pointer(x, y, true);
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -1903,7 +1903,7 @@ impl Surface {
         );
     }
 
-    fn drag_pointer(&mut self, x: f32, y: f32) {
+    pub(crate) fn drag_pointer(&mut self, x: f32, y: f32, report_touch: bool) {
         let Some(mut pointer) = self.pointer.take() else {
             return;
         };
@@ -1960,7 +1960,9 @@ impl Surface {
         }
         pointer.last = (x, y);
         self.pointer = Some(pointer);
-        self.raw_touch(TouchPhase::Move, x, y, activated);
+        if report_touch {
+            self.raw_touch(TouchPhase::Move, x, y, activated);
+        }
     }
 
     fn pan_event(&mut self, id: NodeId, kind: EventKind, pointer: &Pointer, x: f32, y: f32) {
@@ -2002,6 +2004,20 @@ impl Surface {
             return None;
         }
         pointer.pressable
+    }
+
+    pub(crate) fn native_pan_owner(&self) -> Option<NodeId> {
+        let pointer = self.pointer.as_ref()?;
+        if pointer.native.is_some()
+            || pointer.scroll.is_some()
+            || pointer.pressable.is_some()
+            || pointer.link.is_some()
+            || pointer.navigation
+            || self.drag_input.is_some()
+        {
+            return None;
+        }
+        pointer.pan.or(pointer.pan_candidate)
     }
 
     pub(crate) fn clear_sealed_pointer(&mut self) {

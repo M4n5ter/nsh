@@ -7,11 +7,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use nsh_core::{Bounds, EventKind, Matrix, NodeId, Points, ScrollBehavior, Size, ViewKind};
+use nsh_core::{
+    Bounds, EventKind, Matrix, NodeId, PanActivation, Points, ScrollBehavior, Size, ViewKind,
+    animation::GestureBinding,
+};
 
 use crate::{CellMetrics, Surface, geometry::HitSnapshot};
 
-/// An immutable sample of native hit shapes, sealed presses and scroll owners.
+/// Native hit shapes, sealed actions, value-only gestures and scroll owners.
 ///
 /// This contains no engine, component or scene owner. Publish it alongside the
 /// terminal bytes it describes, after their successful flush, and use
@@ -29,15 +32,25 @@ pub struct InputSnapshot {
     blocked: bool,
     owners: HashMap<NodeId, NodeId>,
     routes: HashMap<NodeId, PressRoute>,
-    wheel_owners: HashMap<NodeId, NodeId>,
-    wheel_routes: HashMap<NodeId, WheelRoute>,
+    wheel_owners: HashMap<(NodeId, bool), NodeId>,
+    wheel_routes: HashMap<(NodeId, bool), WheelRoute>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum PointerTarget {
+    Action(u64),
+    Pan {
+        binding: GestureBinding,
+        activation: Option<PanActivation>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct PressRoute {
     target: NodeId,
     incarnation: u64,
-    binding: u64,
+    owner: PointerTarget,
+    ancestry: Vec<(NodeId, u64)>,
     matrix: Matrix,
     size: Size<Points>,
     clip: Bounds<Points>,
@@ -50,15 +63,23 @@ struct WheelRoute {
     matrix: Matrix,
     size: Size<Points>,
     clip: Bounds<Points>,
-    horizontal: bool,
-    mirrored: bool,
-    behavior: Box<ScrollBehavior>,
+    policy: WheelPolicy,
 }
 
-/// The original native Scroll owner at one cell of a completed presentation.
+#[derive(Clone, Debug, PartialEq)]
+enum WheelPolicy {
+    Scroll {
+        horizontal: bool,
+        mirrored: bool,
+        behavior: Box<ScrollBehavior>,
+    },
+    Pinch(GestureBinding),
+}
+
+/// The native Scroll or value-only Pinch owner of a completed presentation.
 ///
 /// This retains a native view incarnation, not an application callback. Its
-/// queued onScroll notification still reports that view's current offset.
+/// queued onScroll notification still reports a scroll view's current offset.
 /// A default lease is inert and authorizes no surface.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
@@ -71,11 +92,12 @@ pub struct WheelLease {
     origin: (u16, u16),
 }
 
-/// The original sealed press route at one cell of a completed presentation.
+/// A sealed action or value-only native Pan in a completed presentation.
 ///
 /// Keep this same lease for its left-button Down, Drag and Up. The native
-/// surface checks its identity and the host must additionally validate
-/// [`Self::binding`] in the engine before dispatching its resulting callback.
+/// surface checks its identity. An action's [`Self::binding`] must additionally
+/// be validated in the engine before entering app code; a native Pan has no
+/// binding and never authorizes an application input callback.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct PressLease {
@@ -88,9 +110,17 @@ pub struct PressLease {
 }
 
 impl PressLease {
-    /// The JS event owner's sealed action binding, to validate before app code.
-    pub fn binding(&self) -> u64 {
-        self.route.binding
+    /// The sealed app action binding, or `None` for a value-only native Pan.
+    pub fn binding(&self) -> Option<u64> {
+        match &self.route.owner {
+            PointerTarget::Action(binding) => Some(*binding),
+            PointerTarget::Pan { .. } => None,
+        }
+    }
+
+    /// Whether this capture moves native animation values without app input.
+    pub fn is_native_pan(&self) -> bool {
+        matches!(self.route.owner, PointerTarget::Pan { .. })
     }
 
     /// The native activation owner, rather than a text child that was hit.
@@ -102,7 +132,7 @@ impl PressLease {
         Arc::ptr_eq(&self.instance, &other.instance)
             && self.route.target == other.route.target
             && self.route.incarnation == other.route.incarnation
-            && self.route.binding == other.route.binding
+            && self.route.owner == other.route.owner
             && self.viewport == other.viewport
             && self.metrics == other.metrics
             && self.scope == other.scope
@@ -111,12 +141,13 @@ impl PressLease {
 }
 
 impl InputSnapshot {
-    /// Resolves the native Scroll ancestor of the presented cell's actual hit.
+    /// Resolves a wheel's original Scroll or Ctrl+wheel native Pinch owner.
     ///
     /// Native components, media, captures and immediate application callbacks
     /// keep the embedding's exact-presentation path. Selectable text is ordinary
     /// scroll content. This does not use the focused or first available scroll.
-    pub fn wheel_at(&self, column: u16, row: u16) -> Option<WheelLease> {
+    pub fn wheel_at(&self, mouse: MouseEvent) -> Option<WheelLease> {
+        let (column, row) = (mouse.column, mouse.row);
         if column >= self.viewport.0 || row >= self.viewport.1 {
             return None;
         }
@@ -125,7 +156,11 @@ impl InputSnapshot {
             (f32::from(row) + 0.5) * self.metrics.height().0,
         );
         let hit = self.geometry.hit_test(x, y)?;
-        let route = self.wheel_routes.get(self.wheel_owners.get(&hit)?)?.clone();
+        let control = mouse
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        let owner = self.wheel_owners.get(&(hit, control))?;
+        let route = self.wheel_routes.get(&(*owner, control))?.clone();
         Some(WheelLease {
             instance: self.instance.clone(),
             route: Some(route),
@@ -138,8 +173,8 @@ impl InputSnapshot {
 
     /// Resolves an ordinary left press at the terminal cell's native center.
     ///
-    /// Opaque routes, such as native components, selections, gestures, system
-    /// overlays and focus callbacks, intentionally have no press lease.
+    /// Native components, selections, callback-capable gestures, system
+    /// overlays and focus callbacks intentionally have no press lease.
     pub fn press_at(&self, column: u16, row: u16) -> Option<PressLease> {
         if self.blocked || column >= self.viewport.0 || row >= self.viewport.1 {
             return None;
@@ -170,7 +205,7 @@ impl InputSnapshot {
 }
 
 impl Surface {
-    /// Samples immutable hit geometry, sealed presses and native scroll owners.
+    /// Samples hit geometry, sealed actions and native scroll/gesture owners.
     ///
     /// Taking a snapshot does not publish it or grant input authority. The
     /// embedding host publishes it only after flushing its corresponding frame.
@@ -194,14 +229,58 @@ impl Surface {
                     })
                 {
                     if let std::collections::hash_map::Entry::Vacant(entry) =
-                        wheel_routes.entry(target)
+                        wheel_routes.entry((target, false))
                         && let Some(route) = self.wheel_route(target, &geometry)
                     {
                         entry.insert(route);
                     }
-                    if wheel_routes.contains_key(&target) {
-                        wheel_owners.insert(hit, target);
+                    if wheel_routes.contains_key(&(target, false)) {
+                        wheel_owners.insert((hit, false), target);
                     }
+                }
+                if self.pointer.is_none()
+                    && !path.iter().any(|&id| self.opaque_native_gesture_node(id))
+                    && !path.iter().any(|&id| {
+                        self.node(id).is_some_and(|node| {
+                            node.kind == ViewKind::Scroll
+                                && node.scroll.enabled
+                                && node.scroll.behavior.pinch
+                                && node.scroll.behavior.zooms()
+                        })
+                    })
+                    && let Some(target) = path.iter().copied().find(|&id| {
+                        self.node(id)
+                            .is_some_and(|node| node.gestures.pinch.is_some())
+                    })
+                    && let Some(route) = self.pinch_route(target, &geometry)
+                {
+                    wheel_routes.entry((target, true)).or_insert(route);
+                    wheel_owners.insert((hit, true), target);
+                }
+                if !path.iter().any(|&id| self.opaque_native_gesture_node(id))
+                    && self.native_gesture_focus_safe(&path)
+                    && let Some(target) = path.iter().copied().find(|&id| {
+                        self.node(id).is_some_and(|node| {
+                            node.gestures.pan_x.is_some()
+                                || node.gestures.pan_y.is_some()
+                                || node.props.pan_activation.is_some()
+                        })
+                    })
+                    && let Some(node) = self.node(target)
+                    && let Some(binding) = self.animation.gesture_binding(node.gestures)
+                    && (binding.values.pan_x.is_some() || binding.values.pan_y.is_some())
+                    && let Some(route) = self.press_route(
+                        target,
+                        PointerTarget::Pan {
+                            binding,
+                            activation: node.props.pan_activation,
+                        },
+                        &geometry,
+                    )
+                {
+                    owners.insert(hit, target);
+                    routes.entry(target).or_insert(route);
+                    continue;
                 }
                 if path.iter().any(|&id| self.opaque_press_node(id)) {
                     continue;
@@ -226,21 +305,12 @@ impl Surface {
                 {
                     continue;
                 }
-                let Some((matrix, size)) = geometry.geometry(target) else {
-                    continue;
-                };
-                let Some(clip) = geometry.clip_rect(target) else {
-                    continue;
-                };
-                owners.insert(hit, target);
-                routes.entry(target).or_insert(PressRoute {
-                    target,
-                    incarnation: node.generation,
-                    binding,
-                    matrix,
-                    size,
-                    clip,
-                });
+                if let Some(route) =
+                    self.press_route(target, PointerTarget::Action(binding), &geometry)
+                {
+                    owners.insert(hit, target);
+                    routes.entry(target).or_insert(route);
+                }
             }
         }
         InputSnapshot {
@@ -296,6 +366,81 @@ impl Surface {
         })
     }
 
+    fn opaque_native_gesture_node(&self, id: NodeId) -> bool {
+        self.node(id).is_none_or(|node| {
+            matches!(
+                node.kind,
+                ViewKind::Input | ViewKind::Native | ViewKind::WebView | ViewKind::Video
+            ) || node.native.is_some()
+                || node.media.is_some()
+                || node
+                    .text
+                    .as_ref()
+                    .is_some_and(|(text, _, _)| text.is_selectable() || !text.links.is_empty())
+                || [
+                    EventKind::Touch,
+                    EventKind::HoverIn,
+                    EventKind::HoverOut,
+                    EventKind::PressDown,
+                    EventKind::PressUp,
+                    EventKind::Press,
+                    EventKind::LongPress,
+                    EventKind::Focus,
+                    EventKind::PanStart,
+                    EventKind::PanEnd,
+                    EventKind::PinchStart,
+                    EventKind::PinchEnd,
+                    EventKind::RotationStart,
+                    EventKind::RotationEnd,
+                ]
+                .into_iter()
+                .any(|kind| node.events.contains_listener(kind))
+                || (node.kind == ViewKind::Screen
+                    && node.screen.gesture_enabled
+                    && self.navigation_can_back(id))
+        })
+    }
+
+    fn native_gesture_focus_safe(&self, path: &[NodeId]) -> bool {
+        let target = path.iter().copied().find(|&id| {
+            self.node(id)
+                .is_some_and(|node| node.kind == ViewKind::Scroll && node.scroll.enabled)
+        });
+        target.is_none()
+            || target == self.focus
+            || !self.focus.is_some_and(|id| {
+                self.node(id)
+                    .is_some_and(|node| node.events.contains_listener(EventKind::Blur))
+            })
+    }
+
+    fn press_route(
+        &self,
+        target: NodeId,
+        owner: PointerTarget,
+        geometry: &HitSnapshot,
+    ) -> Option<PressRoute> {
+        let node = self.node(target)?;
+        let (matrix, size) = geometry.geometry(target)?;
+        let ancestry = geometry
+            .ancestors(target)
+            .into_iter()
+            .map(|id| {
+                let node = self.node(id)?;
+                (self.animated_style(id).opacity > 0.0).then_some((id, node.generation))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(PressRoute {
+            target,
+            incarnation: node.generation,
+            owner,
+            ancestry,
+            matrix,
+            size,
+            clip: geometry.clip_rect(target)?,
+        })
+    }
+
     fn wheel_route(&self, target: NodeId, geometry: &HitSnapshot) -> Option<WheelRoute> {
         let node = self.node(target)?;
         if node.kind != ViewKind::Scroll
@@ -320,19 +465,46 @@ impl Surface {
             matrix,
             size,
             clip: geometry.clip_rect(target)?,
-            horizontal: node.scroll.horizontal,
-            mirrored: node.scroll.mirrored,
-            behavior: node.scroll.behavior.clone(),
+            policy: WheelPolicy::Scroll {
+                horizontal: node.scroll.horizontal,
+                mirrored: node.scroll.mirrored,
+                behavior: node.scroll.behavior.clone(),
+            },
         })
     }
 
-    /// Delivers ordinary wheel detents only to their original native Scroll.
+    fn pinch_route(&self, target: NodeId, geometry: &HitSnapshot) -> Option<WheelRoute> {
+        let node = self.node(target)?;
+        node.gestures.pinch?;
+        let binding = self.animation.gesture_binding(node.gestures)?;
+        let ancestry = geometry
+            .ancestors(target)
+            .into_iter()
+            .map(|id| {
+                let node = self.node(id)?;
+                (self.animated_style(id).opacity > 0.0 && !self.opaque_native_gesture_node(id))
+                    .then_some((id, node.generation))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (matrix, size) = geometry.geometry(target)?;
+        Some(WheelRoute {
+            target,
+            ancestry,
+            matrix,
+            size,
+            clip: geometry.clip_rect(target)?,
+            policy: WheelPolicy::Pinch(binding),
+        })
+    }
+
+    /// Delivers wheel detents only to their original Scroll or native Pinch.
     ///
     /// Content growth and that owner's own offset may advance while output is
     /// pending. A changed incarnation, ancestry, viewport, scope, geometry or
     /// scroll policy rejects the lease. A newly hit nested Scroll cannot take
-    /// the old input. Ctrl+wheel zoom and application callback routes keep the
-    /// embedding's exact-presentation handler.
+    /// the old input. A value-only Ctrl+wheel Pinch additionally pins its live
+    /// animation value births. Application input callbacks and scroll zoom
+    /// retain the embedding's exact-presentation handler.
     pub fn handle_presented_wheel(
         &mut self,
         mouse: MouseEvent,
@@ -351,6 +523,7 @@ impl Surface {
             || mouse
                 .modifiers
                 .contains(crossterm::event::KeyModifiers::CONTROL)
+                != matches!(route.policy, WheelPolicy::Pinch(_))
             || !Arc::ptr_eq(&self.input_instance, &lease.instance)
             || (self.columns, self.rows) != lease.viewport
             || self.metrics != lease.metrics
@@ -361,9 +534,11 @@ impl Surface {
             return None;
         }
         let current = self.hit_snapshot();
-        if self.input_scope(&current) != lease.scope
-            || self.wheel_route(route.target, &current).as_ref() != Some(route)
-        {
+        let offered = match &route.policy {
+            WheelPolicy::Scroll { .. } => self.wheel_route(route.target, &current),
+            WheelPolicy::Pinch(_) => self.pinch_route(route.target, &current),
+        };
+        if self.input_scope(&current) != lease.scope || offered.as_ref() != Some(route) {
             return None;
         }
         let (x, y) = (
@@ -372,13 +547,30 @@ impl Surface {
         );
         let hit = current.hit_test(x, y)?;
         let path = current.ancestors(hit);
-        if !path.contains(&route.target) || path.iter().any(|&id| self.opaque_wheel_node(id)) {
+        if !path.contains(&route.target)
+            || path.iter().any(|&id| match &route.policy {
+                WheelPolicy::Scroll { .. } => self.opaque_wheel_node(id),
+                WheelPolicy::Pinch(_) => self.opaque_native_gesture_node(id),
+            })
+            || (matches!(route.policy, WheelPolicy::Pinch(_))
+                && path.iter().any(|&id| {
+                    self.node(id).is_some_and(|node| {
+                        node.kind == ViewKind::Scroll
+                            && node.scroll.enabled
+                            && node.scroll.behavior.pinch
+                            && node.scroll.behavior.zooms()
+                    })
+                }))
+        {
             return None;
         }
         // Both hover paths exclude callbacks; retain native feedback and the
         // next keyboard scroll target without changing this wheel's owner.
         self.set_hover(Some(hit));
-        Some(self.scroll_wheel_owner(route.target, mouse, steps))
+        Some(match &route.policy {
+            WheelPolicy::Scroll { .. } => self.scroll_wheel_owner(route.target, mouse, steps),
+            WheelPolicy::Pinch(_) => self.pinch_wheel(route.target, mouse.kind, steps),
+        })
     }
 
     fn opaque_press_node(&self, id: NodeId) -> bool {
@@ -411,12 +603,13 @@ impl Surface {
                 && self.navigation_can_back(id))
     }
 
-    /// Handles an ordinary left press only while its presented route still fits.
+    /// Handles a sealed action or native Pan while its presented route fits.
     ///
     /// `None` rejects a stale or unsupported route without entering its mouse
     /// callbacks. `Some(changed)` is the original native handler's result. A
     /// successful Down captures the same route for Drag and Up. Color feedback
-    /// may change; geometry changes conservatively cancel this leased gesture.
+    /// may change; geometry changes cancel the capture. A native Pan can leave
+    /// its viewport while that original owner and contact route remain valid.
     pub fn handle_presented_mouse(
         &mut self,
         mouse: MouseEvent,
@@ -438,7 +631,17 @@ impl Surface {
             && !current.blocked
             && self.node(lease.target()).is_some_and(|node| {
                 node.generation == lease.route.incarnation
-                    && node.props.input_action == Some(lease.binding())
+                    && match &lease.route.owner {
+                        PointerTarget::Action(binding) => node.props.input_action == Some(*binding),
+                        PointerTarget::Pan {
+                            binding,
+                            activation,
+                        } => {
+                            node.props.pan_activation == *activation
+                                && self.animation.gesture_binding(node.gestures).as_ref()
+                                    == Some(binding)
+                        }
+                    }
             });
         if !identity_matches {
             self.reject_presented_press(lease);
@@ -458,7 +661,12 @@ impl Surface {
                 self.clear_sealed_pointer();
             }
             let changed = self.handle_event(crossterm::event::Event::Mouse(mouse));
-            if self.sealed_pointer_owner() != Some(lease.target()) {
+            let owner = if lease.is_native_pan() {
+                self.native_pan_owner()
+            } else {
+                self.sealed_pointer_owner()
+            };
+            if owner != Some(lease.target()) {
                 self.clear_sealed_pointer();
                 return None;
             }
@@ -469,7 +677,11 @@ impl Surface {
             .presented_press
             .as_ref()
             .is_some_and(|captured| captured.same_capture(lease))
-            || self.sealed_pointer_owner() != Some(lease.target())
+            || (if lease.is_native_pan() {
+                self.native_pan_owner()
+            } else {
+                self.sealed_pointer_owner()
+            }) != Some(lease.target())
             || current.routes.get(&lease.target()) != Some(&lease.route)
         {
             self.reject_presented_press(lease);
@@ -478,22 +690,49 @@ impl Surface {
         // Generic native mouse dispatch may enter a newly hit component or
         // hover responder before it reaches capture handling. Both Drag and
         // Up must still resolve to this same ordinary route at their point.
-        if !current
-            .press_at(mouse.column, mouse.row)
-            .is_some_and(|offered| {
-                offered.route.target == lease.target()
-                    && offered.route.incarnation == lease.route.incarnation
-                    && offered.route.binding == lease.binding()
-            })
-        {
+        let (column, row) = if lease.is_native_pan() {
+            lease.origin
+        } else {
+            (mouse.column, mouse.row)
+        };
+        if !current.press_at(column, row).is_some_and(|offered| {
+            offered.route.target == lease.target()
+                && offered.route.incarnation == lease.route.incarnation
+                && offered.route.owner == lease.route.owner
+        }) {
             self.reject_presented_press(lease);
             return None;
+        }
+        if lease.is_native_pan() {
+            if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+                let x = (f32::from(mouse.column) + 0.5) * self.metrics.width().0;
+                let y = (f32::from(mouse.row) + 0.5) * self.metrics.height().0;
+                // This original native capture may leave the viewport. Do not
+                // route its continuation through a newly hit hosted component.
+                self.drag_pointer(x, y, false);
+            } else {
+                self.clear_sealed_pointer();
+            }
+            return Some(true);
         }
         let changed = self.handle_event(crossterm::event::Event::Mouse(mouse));
         if matches!(mouse.kind, MouseEventKind::Up(_)) {
             self.presented_press = None;
         }
         Some(changed)
+    }
+
+    pub(crate) fn presented_animation_changed(&mut self, op: &nsh_core::animation::AnimationOp) {
+        let affected = self.presented_press.as_ref().is_some_and(|lease| {
+            if let PointerTarget::Pan { binding, .. } = &lease.route.owner {
+                self.animation.affects_gesture(op, binding)
+            } else {
+                false
+            }
+        });
+        if affected {
+            self.clear_sealed_pointer();
+        }
     }
 
     fn reject_presented_press(&mut self, lease: &PressLease) {
