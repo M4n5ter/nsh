@@ -57,8 +57,8 @@ mount(App);
 在 TSX 中，每个标签都使用 PascalCase，并指向作用域中的绑定：原语从 `nsh` 导入，基础组件从 `nsh/base` 导入。只有 `<If>` 和 `<Each>` 是无需导入的全局组件。`<view>` 这样的小写标签会导致构建错误，因为 TypeScript 只能对照每个名称一个的全局类型来检查它，`List`、`Each` 这类泛型组件就无法推断条目类型。编译器通过导入识别这些元素并就地创建原生视图，所以导入它们在运行时没有任何开销。参见 [JSX 与组件](../docs/jsx-and-components.md)。
 
 ```tsx
-import { Canvas, Image, Input, List, Scroll, Text, Video, View, WebView } from "nsh";
-import { Button, Dialog, NavPage, NavStack, SafeAreaView } from "nsh/base";
+import { Canvas, Image, Input, List, Overlay, Scroll, Text, Video, View, WebView } from "nsh";
+import { Button, Dialog, Menu, NavPage, NavStack, Popover, SafeAreaView, Sheet, Tooltip } from "nsh/base";
 ```
 
 > [!NOTE]
@@ -79,6 +79,7 @@ TSX 从 `nsh` 导入，Rust 从 `nsh_core::ui::prelude` 导入。
 | `<Canvas>` | `canvas(painter)` | 回放 2D 绘制的视图 | [Canvas](./canvas.md) |
 | `<WebView>` | `web_view(url)`、`web_view_html(html, base)` | WKWebView / android.webkit.WebView | [WebView](./web-view.md) |
 | `<Video>` | `video(url)` | AVPlayerLayer / TextureView 上的 MediaPlayer | [Video](./video.md) |
+| `<Overlay>` | `overlay()` | 窗口（或所在对话框）之上的视图，相对锚点放置 | [Overlay](./overlay.md) |
 | `<If>`、`<Each>` | `when(..)`、`each(..)`、`dynamic(..)` | 控制流：它们选出的元素 | [控制流](./control-flow.md) |
 | `<InputAccessoryView>`（`nsh/ios`） | `input_accessory_view(id)` | iOS 上键盘上方的工具栏 | [nsh/ios](../modules/nsh-ios.md) |
 
@@ -89,6 +90,8 @@ TSX 从 `nsh/base` 导入，Rust 从 `nsh_base` crate 导入。它们负责行�
 | 组件 | Rust | 作用 | 页面 |
 |---|---|---|---|
 | `<Button>` | `nsh_base::button()` | 带有状态和角色的可按压控件 | [Button](./button.md) |
+| `<Checkbox>` | `nsh_base::checkbox()` | 带指示器的勾选 / 未勾选 / 半选控件 | [Checkbox](./checkbox.md) |
+| `<Switch>` | `nsh_base::switch()` | 带轨道和滑块的开 / 关控件 | [Switch](./switch.md) |
 | `<Dialog>` | `nsh_base::dialog()` | 把子元素呈现在其他一切之上 | [Dialog](./dialog.md) |
 | `<NavStack>`、`<NavPage>` | `nsh_base::nav_stack()`、`nsh_base::nav_page()` | 原生导航：带有平台标题栏和返回手势的页面栈 | [NavStack](./nav-stack.md) |
 | `<SafeAreaView>` | `nsh_base::safe_area_view()` | 让内容避开刘海、系统栏和主屏幕指示条 | [SafeAreaView](./safe-area-view.md) |
@@ -96,6 +99,10 @@ TSX 从 `nsh/base` 导入，Rust 从 `nsh_base` crate 导入。它们负责行�
 | `AlertDialog` | `nsh_base::alert_dialog()` | 系统的提示框和操作表 | [AlertDialog](./alert-dialog.md) |
 | `<TextView>` | `nsh_base::text_view()` | 用文本和视图显示 Markdown 或 HTML 文档 | [TextView](./text-view.md) |
 | `<SelectionArea>` | `nsh_base::selection_area()` | 让其中的文字一起选择 | [SelectionArea](./selection-area.md) |
+| `<Popover>` | `nsh_base::popover()` | 锚定在触发元素上、显示在一切之上的内容 | [Popover](./popover.md) |
+| `<Menu>`、`<ContextMenu>`、`<MenuItem>`、`<MenuSeparator>`、`<Submenu>` | `nsh_base::menu()`、... | 菜单：桌面上是带级联子菜单的弹出层，手机上是 sheet | [Menu](./menu.md) |
+| `<Tooltip>` | `nsh_base::tooltip()` | 悬停或手指按住时显示在触发元素旁的提示 | [Tooltip](./tooltip.md) |
+| `<Sheet>` | `nsh_base::sheet()` | 位于屏幕一侧边缘、覆盖在背景层之上的面板 | [Sheet](./sheet.md) |
 
 > [!NOTE]
 > 字符串只有放在 `Text` 里才会被绘制。`View` 的字符串子节点不会创建原生视图，也不参与布局。
@@ -133,7 +140,7 @@ TSX 从 `nsh/base` 导入，Rust 从 `nsh_base` crate 导入。它们负责行�
 
 ### 状态样式
 
-视图处于某种状态时，在其自身样式之上、由原生侧应用的样式。每一个都是某个 Tailwind 变体的对象形式。后面的状态优先（selected 与 checked，然后是 hover、focus、active）；`disabledStyle` 优先于所有状态，视图被禁用时其他状态样式不生效。
+视图处于某种状态时，在其自身样式之上、由原生侧应用的样式。每一个都是某个 Tailwind 变体的对象形式。后面的状态优先（selected、checked 与 indeterminate，然后是 hover、focus、active）；`disabledStyle` 优先于所有状态，视图被禁用时其他状态样式不生效。
 
 | 属性 | Rust | 类变体 | 生效时机 |
 |---|---|---|---|
@@ -142,6 +149,7 @@ TSX 从 `nsh/base` 导入，Rust 从 `nsh_base` crate 导入。它们负责行�
 | `focusStyle` | `.focus(\|s\| ..)` | `focus:` | 视图获得焦点时。 |
 | `disabledStyle` | `.disabled_style(\|s\| ..)` | `disabled:` | `disabled` 时。 |
 | `checkedStyle` | `.checked(\|s\| ..)`、`.checked_style(style)` | `checked:` | `accessibilityState.checked` 为 `true` 时（复选框、开关、单选框；`"mixed"` 不算勾选）。 |
+| `indeterminateStyle` | `.indeterminate(\|s\| ..)`、`.indeterminate_style(style)` | `indeterminate:` | `accessibilityState.checked` 为 `"mixed"` 时（既非勾选也非未勾选的复选框）。 |
 | | `.selected(\|s\| ..)` | `selected:` | `accessibilityState.selected` 为 `true` 时（选中的 `Button`、标签页）。 |
 
 ```rust tabs
@@ -205,6 +213,28 @@ const at = signal<number | null>(null);
   </If>
 </View>
 ```
+
+<a id="tooltips"></a>
+
+### 工具提示
+
+`tooltip` 为任意元素加上提示：在桌面平台（macOS、Windows、Linux、GPUI 后端和桌面浏览器）上，指针在元素上停留半秒后显示在它上方，指针离开或按下时隐藏。手机和平板不显示。提示从不接收指针或按压，所以元素的行为与没有它时完全一样。
+
+| 属性 | Rust | 类型 | 说明 |
+|---|---|---|---|
+| `tooltip` | `.tooltip(..)` | `string \| JSX.Element` | 文字，显示在用主题 `popover` 令牌（`bg-popover`、`text-popover-foreground`、`border-border`，外观由主题决定）绘制的小气泡中；或一个元素，按原样显示（`nsh/base` 的 `Tooltip` 就是工具提示本身）。 |
+
+```rust tabs
+view().on_press(save).tooltip("保存文档").child(text("💾"))
+```
+
+```tsx tabs
+<View onPress={save} tooltip="保存文档">
+  <Text>💾</Text>
+</View>
+```
+
+需要自己的外观、位置、延迟或事件时，把 `nsh/base` 的 [`Tooltip`](tooltip.md) 作为 `tooltip` 传入，与 GPUI 的 `.tooltip(..)` 相同。
 
 ### 上下文菜单
 
