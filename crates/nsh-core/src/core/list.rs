@@ -1319,8 +1319,9 @@ impl ListState {
     }
 
     pub(super) fn rendered(&mut self, cell: u32, index: u32) {
-        self.source_dirty |= !self.source_geometry.is_empty();
         if let Some(slot) = self.slots.iter_mut().find(|s| s.cell == cell) {
+            // A previously unready cell may supply the first source geometry.
+            self.source_dirty = true;
             slot.rendered = Some(index);
             self.dirty = true;
         }

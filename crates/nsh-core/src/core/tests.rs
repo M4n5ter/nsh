@@ -1672,10 +1672,15 @@ fn list_keeps_visible_content_anchored() {
 
     // One message can itself be larger than the viewport. Its item top
     // remains zero while earlier source fragments arrive inside that item.
-    source_reading_survives_prepend_and_rich_replacement();
+    source_reading_survives_prepend_and_rich_replacement(false);
 }
 
-fn source_reading_survives_prepend_and_rich_replacement() {
+#[test]
+fn source_reading_survives_delayed_cell_acknowledgment() {
+    source_reading_survives_prepend_and_rich_replacement(true);
+}
+
+fn source_reading_survives_prepend_and_rich_replacement(delayed_ready: bool) {
     let mut c = core();
     let source = |offset| {
         Prop::TextSource(Some(Arc::new(crate::TextSource::Literal {
@@ -1754,17 +1759,30 @@ fn source_reading_survives_prepend_and_rich_replacement() {
                 child: 10,
                 before: None,
             },
-            Op::SetProp {
-                id: 100,
-                prop: Prop::CellIndex(0),
-            },
         ],
     );
+    if !delayed_ready {
+        c.apply(Op::SetProp {
+            id: 100,
+            prop: Prop::CellIndex(0),
+        })
+        .unwrap();
+    }
     c.commit();
     // Visibility alone makes unchanged source text eligible for anchoring.
     c.apply(style_op(10, &[("display", StyleValue::Str("flex"))]))
         .unwrap();
     assert_eq!(shift(c.commit()), 0.0);
+    if delayed_ready {
+        // Source geometry can exist before the cell is acknowledged. Becoming
+        // ready must index it even when the previous list index was empty.
+        c.apply(Op::SetProp {
+            id: 100,
+            prop: Prop::CellIndex(0),
+        })
+        .unwrap();
+        assert_eq!(shift(c.commit()), 0.0);
+    }
     c.set_scroll_offset(2, point(px(0.0), px(320.0)), 0);
     assert_eq!(shift(c.commit()), 0.0);
 
