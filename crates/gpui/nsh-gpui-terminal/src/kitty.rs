@@ -25,9 +25,10 @@ pub struct KittyFrame {
 impl KittyFrame {
     /// Compresses actual GPU pixels and admits their complete wire transaction.
     ///
-    /// The caller supplies one of its two owned, nonzero image slots. It must
-    /// not retransmit the displayed slot: Kitty removes an image's placements
-    /// when its id is retransmitted. Dimensions use real terminal metrics.
+    /// The caller owns two nonzero image slots. `previous` identifies the last
+    /// fully written frame's slot; `image` uses the alternate slot. Kitty
+    /// removes an image's placements when its id is retransmitted. Dimensions
+    /// use real terminal metrics.
     pub fn encode(
         frame: &CandidateFrame,
         image: u32,
@@ -211,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_frames_preserve_large_scenes_and_reject_displayed_slot_reuse() {
+    fn complete_frames_preserve_large_scenes_and_reject_previous_slot_reuse() {
         let small = frame(1, 1);
         assert!(KittyFrame::encode(&small, 41, Some(41), 120, 40).is_err());
         assert!(KittyFrame::encode(&small, 0, Some(41), 120, 40).is_err());

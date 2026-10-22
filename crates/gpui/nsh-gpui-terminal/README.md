@@ -38,9 +38,10 @@ additional per-frame byte quota.
 
 `KittyFrame::encode` compresses the complete GPU frame into PNG and chunks its
 base64 payload at the protocol's 4096-byte boundary. `KittyFrame::wire` contains
-the complete `q=1` upload into the non-displayed owned image slot followed by
-retirement of the old image. The sole writer writes and flushes that complete
-wire before `mark_presented`; successful frame replies do not gate publication.
+the complete `q=1` upload into the alternate owned image slot followed by
+retirement of the previously fully written slot. The sole writer writes and
+flushes that complete wire before `mark_presented`; successful frame replies
+do not gate publication.
 The sole reader ends the graphics session on any negative reply for either
 owned slot, including a late error. The independent capability query still
 requires a positive reply, and its nonce must differ from both image slots.
