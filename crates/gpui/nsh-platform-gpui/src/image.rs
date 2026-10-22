@@ -197,7 +197,10 @@ impl Location {
         match self {
             Location::Url(url) => url.clone(),
             Location::File(path) => format!("file://{}", path.display()),
-            Location::Data(uri) | Location::Memory(uri, _) => uri.clone(),
+            Location::Data(uri) => uri.clone(),
+            // App-written URIs must not address bytes carried by another
+            // surface, even if they spell the core's internal image key.
+            Location::Memory(uri, _) => format!("inline:{uri}"),
         }
     }
 }
@@ -2066,15 +2069,45 @@ mod tests {
         let source = ImageSource::default().with_bytes("image/svg+xml", SVG_ICON.to_vec().into());
         let same = ImageSource::default().with_bytes("image/svg+xml", SVG_ICON.to_vec().into());
         let location = Location::Memory(source.uri.to_string(), source.data.unwrap());
-        assert_eq!(location.key(), same.uri.as_ref());
-        assert!(location.key().starts_with("data:image/svg+xml;nsh-key="));
+        assert_eq!(location.key(), format!("inline:{}", same.uri));
         assert!(
-            data_uri(&location.key()).is_err(),
+            location
+                .key()
+                .starts_with("inline:data:image/svg+xml;nsh-key=")
+        );
+        assert!(
+            data_uri(&source.uri).is_err(),
             "the key is not a data URI payload"
         );
         let bytes = read(&location, &Access::default(), &mut |_, _| {}).unwrap();
         assert_eq!(bytes, SVG_ICON);
         assert_eq!(decode(bytes).unwrap().size, (24, 24));
+    }
+
+    #[test]
+    fn raw_uris_cannot_address_inline_cache_entries() {
+        // Blob MIME types can contain commas: excluding only malformed
+        // data URIs would still let these internal keys reach the cache.
+        for mime in ["image/svg+xml", "image/svg+xml,x"] {
+            let source = ImageSource::default().with_bytes(mime, SVG_ICON.to_vec().into());
+            let memory = Location::Memory(source.uri.to_string(), source.data.unwrap());
+            let raw = resolve(&source.uri, None).unwrap();
+            assert_ne!(raw.key(), memory.key());
+            assert_eq!(resolve(&memory.key(), None), None);
+            let loader = Loader::default();
+            loader.insert(memory.key(), picture(1, 1));
+            loader
+                .inflight
+                .borrow_mut()
+                .insert(memory.key(), Vec::new());
+            assert!(loader.cached(&memory.key()).is_some());
+            assert!(loader.cached(&raw.key()).is_none());
+            assert!(!loader.inflight.borrow().contains_key(&raw.key()));
+            assert_eq!(
+                read(&memory, &Access::default(), &mut |_, _| {}).unwrap(),
+                SVG_ICON
+            );
+        }
     }
 
     #[test]
@@ -2090,7 +2123,7 @@ mod tests {
 
         // Stand in for an existing worker so callbacks can be driven without
         // a GPUI event loop. Attached bytes must bypass the missing reader.
-        let key = source.uri.to_string();
+        let key = format!("inline:{}", source.uri);
         LOADER.with(|l| {
             l.inflight.borrow_mut().insert(
                 key.clone(),
