@@ -4743,7 +4743,8 @@ mod tests {
         surface.focus = None;
         let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 12));
         surface.render(buffer.area, &mut buffer);
-        assert_eq!(buffer[(4, 0)].symbol(), "A");
+        assert_eq!(buffer[(2, 0)].symbol(), "A");
+        assert_eq!(buffer[(4, 0)].symbol(), "中");
         assert_eq!(buffer[(0, 1)].symbol(), "B");
         assert!(
             buffer
