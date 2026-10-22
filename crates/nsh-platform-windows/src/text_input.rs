@@ -1862,7 +1862,7 @@ fn line_edge(input: &InputState, end: bool) -> usize {
         let model = input.model.borrow();
         let byte = model.text_at(at, secure);
         let text = model.text();
-        if byte > 0 && text[..byte].ends_with('\n') {
+        if byte > 0 && text[..byte].ends_with(['\r', '\n']) {
             at = at.saturating_sub(1);
         }
     }
