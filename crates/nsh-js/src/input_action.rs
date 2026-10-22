@@ -1,7 +1,6 @@
 //! Input callbacks with their arguments captured as immutable JSON.
 //!
-//! The callable owns its handler and snapshot. Comparing actions only
-//! inspects this native data; it never calls application code.
+//! The callable owns its handler and captured arguments.
 
 use std::{
     ffi::{c_int, c_void},
@@ -49,7 +48,6 @@ impl Actions {
 struct Data {
     handler: JsValue,
     args: JsValue,
-    canonical: String,
 }
 
 fn data(ctx: *mut JsContext, value: JsValue) -> *const Data {
@@ -66,22 +64,8 @@ fn data(ctx: *mut JsContext, value: JsValue) -> *const Data {
 }
 
 /// Whether `value` is an input action made by this VM.
-pub(crate) fn is_action(ctx: *mut JsContext, value: JsValue) -> bool {
+fn is_action(ctx: *mut JsContext, value: JsValue) -> bool {
     !data(ctx, value).is_null()
-}
-
-/// Exact handler identity and equal JSON snapshots, without JS calls.
-pub(crate) fn same(ctx: *mut JsContext, a: JsValue, b: JsValue) -> bool {
-    let (a, b) = (data(ctx, a), data(ctx, b));
-    if a.is_null() || b.is_null() {
-        return false;
-    }
-    // SAFETY: both values are live actions; strict equality of their
-    // function objects only compares identity and cannot invoke JS.
-    unsafe {
-        let (a, b) = (&*a, &*b);
-        a.canonical == b.canonical && qjs::JS_IsStrictEqual(ctx, a.handler, b.handler)
-    }
 }
 
 unsafe extern "C" fn finalize(rt: *mut qjs::JSRuntime, obj: JsValue) {
@@ -167,7 +151,7 @@ pub(crate) unsafe extern "C" fn input_action(
             );
         }
     }
-    let (args, canonical) = match capture(ctx, args) {
+    let args = match capture(ctx, args) {
         Ok(captured) => captured,
         Err(error) => return error,
     };
@@ -182,14 +166,13 @@ pub(crate) unsafe extern "C" fn input_action(
         let data = Box::new(Data {
             handler: qjs::JS_DupValue(ctx, handler),
             args,
-            canonical,
         });
         qjs::JS_SetOpaque(obj, Box::into_raw(data) as *mut c_void);
         obj
     }
 }
 
-fn capture(ctx: *mut JsContext, args: JsValue) -> Result<(JsValue, String), JsValue> {
+fn capture(ctx: *mut JsContext, args: JsValue) -> Result<JsValue, JsValue> {
     // SAFETY: a context reference for the decoder; its value owns a dup
     // of the argument. Only capture may read application properties.
     let cx = unsafe { Ctx::from_raw(ptr::NonNull::new_unchecked(ctx)) };
@@ -200,10 +183,10 @@ fn capture(ctx: *mut JsContext, args: JsValue) -> Result<(JsValue, String), JsVa
         }
         qjs::JS_EXCEPTION
     })?;
-    // Keep equality independent of serde_json's preserve_order feature.
+    // Capture object keys in a stable order.
     json.sort_all_objects();
-    let canonical = match serde_json::to_string(&json) {
-        Ok(value) if value.len() <= JSON_BYTES => value,
+    match serde_json::to_string(&json) {
+        Ok(value) if value.len() <= JSON_BYTES => {}
         _ => {
             Exception::throw_range(&cx, "inputAction: captured JSON exceeds 8 MiB");
             return Err(qjs::JS_EXCEPTION);
@@ -214,7 +197,7 @@ fn capture(ctx: *mut JsContext, args: JsValue) -> Result<(JsValue, String), JsVa
     if unsafe { qjs::JS_IsException(frozen) } {
         Err(frozen)
     } else {
-        Ok((frozen, canonical))
+        Ok(frozen)
     }
 }
 

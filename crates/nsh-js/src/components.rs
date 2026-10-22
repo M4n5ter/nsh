@@ -722,12 +722,11 @@ fn render_component(
         }
         Some(api)
     };
-    let mut events: Vec<_> = spec
+    let events = spec
         .events
         .iter()
         .filter(|e| has(cx, props, &handler_name(e.name)))
-        .map(|e| e.name)
-        .collect();
+        .count();
     // Lazy children: made while this signal (the core's `$children`) is
     // true.
     let lazy = (spec.lazy_children && spec.takes_children() && has(cx, props, "children"))
@@ -747,13 +746,7 @@ fn render_component(
         };
         reactive::add_cleanup(cx, cleanup);
     }
-    if !events.is_empty() || lazy.is_some() || renders.is_some() {
-        if lazy.is_some() {
-            events.push(CHILDREN);
-        }
-        if renders.is_some() {
-            events.extend([RENDER, UNRENDER]);
-        }
+    if events != 0 || lazy.is_some() || renders.is_some() {
         let id = dom::node_id(cx, node).unwrap_or(0);
         let mut edata = [
             props,
@@ -766,12 +759,7 @@ fn render_component(
         let on = Owned(cx, unsafe {
             qjs::JS_NewCFunctionData(cx, Some(on_native_event), 1, 0, 5, edata.as_mut_ptr())
         });
-        dom::set_component_handler(
-            cx,
-            dom::node_id(cx, node).unwrap_or(0),
-            on.1,
-            events.into_boxed_slice(),
-        )?;
+        dom::set_handler(cx, id, EventKind::NativeEvent, on.1)?;
     }
     // One effect reads every prop and sends those that changed.
     let mut pdata = [
@@ -910,20 +898,6 @@ unsafe extern "C" fn props_run(
                 continue;
             }
             qjs::JS_SetPropertyUint32(cx, prev, i as u32, value);
-        }
-    }
-    if spec.events.iter().any(|event| event.name == "press") {
-        let value = Owned(cx, get(cx, props, "onPress"));
-        // SAFETY: an inline tag check of the property just read.
-        let threw = unsafe { qjs::JS_IsException(value.1) };
-        if let Some(id) = dom::node_id(cx, node) {
-            let captured = if threw { UNDEFINED } else { value.1 };
-            if dom::set_component_input_action(cx, id, captured).is_err() && failed(&mut first) {
-                return qjs::JS_EXCEPTION;
-            }
-        }
-        if threw && failed(&mut first) {
-            return qjs::JS_EXCEPTION;
         }
     }
     match first {

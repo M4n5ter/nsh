@@ -26,7 +26,6 @@ use std::{
     ffi::{CStr, c_int, c_void},
     ptr,
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use nsh_core::{EventKind, NodeId, Op, Tag, decl, platform::Os};
@@ -49,8 +48,6 @@ const DETACHED: NodeId = 0;
 const ROOT: NodeId = 1;
 /// How deep nested arrays and accessors are unwrapped.
 const MAX_DEPTH: u32 = 64;
-// A presented surface can outlive its VM, so binding identities cannot reset.
-static NEXT_INPUT_ACTION: AtomicU64 = AtomicU64::new(1);
 
 /// The renderer's part of a context's state.
 pub(crate) struct Dom {
@@ -103,8 +100,6 @@ struct NodeData {
     children: Vec<JsValue>,
     /// Event handlers (owned).
     handlers: Vec<Handler>,
-    /// The currently published binding; its callable lives in `handlers`.
-    input_action: Option<u64>,
     /// Touch and responder handlers, by `touch::TOUCH_PROPS` index (owned).
     touch: Vec<(u8, JsValue)>,
     /// Has a `panActivation`: becomes the responder when the platform
@@ -128,14 +123,6 @@ struct NodeData {
 struct Handler {
     event: EventKind,
     value: JsValue,
-    /// Only the native component adapter knows which props it can read.
-    component_events: Option<Box<[&'static str]>>,
-    input_action: Option<InputAction>,
-}
-
-struct InputAction {
-    token: u64,
-    callable: JsValue,
 }
 
 /// The renderer of `cx`.
@@ -573,7 +560,6 @@ fn new_node(cx: *mut JsContext, id: NodeId, text: bool, tag: Option<Tag>) -> JsV
         parent: DETACHED,
         children: Vec::new(),
         handlers: Vec::new(),
-        input_action: None,
         content: DETACHED,
         places: false,
         object: UNDEFINED,
@@ -773,48 +759,6 @@ pub(crate) fn set_handler(
     set_event(cx, p, event, f)
 }
 
-/// Installs a Rust component's adapter with the event props bound to it.
-pub(crate) fn set_component_handler(
-    cx: *mut JsContext,
-    id: NodeId,
-    f: JsValue,
-    events: Box<[&'static str]>,
-) -> Result<(), JsValue> {
-    set_handler(cx, id, EventKind::NativeEvent, f)?;
-    let p = dom(cx).by_id(id);
-    if !p.is_null()
-        // SAFETY: live node data; only the installed adapter is changed.
-        && let Some(handler) = unsafe { &mut (*p).handlers }
-            .iter_mut()
-            .find(|h| h.event == EventKind::NativeEvent)
-    {
-        handler.component_events = Some(events);
-    }
-    publish_input_action(cx, p)
-}
-
-/// Captures a component's press action while its reactive props are read.
-pub(crate) fn set_component_input_action(
-    cx: *mut JsContext,
-    id: NodeId,
-    callable: JsValue,
-) -> Result<(), JsValue> {
-    let p = dom(cx).by_id(id);
-    if p.is_null() {
-        return Ok(());
-    }
-    // SAFETY: live node data; equality and duplication do not enter JS.
-    let old = unsafe { &mut (*p).handlers }
-        .iter_mut()
-        .find(|h| h.event == EventKind::NativeEvent)
-        .and_then(|handler| {
-            let next = capture_input_action(cx, handler.input_action.as_ref(), callable);
-            std::mem::replace(&mut handler.input_action, next)
-        });
-    free_input_action(cx, old);
-    publish_input_action(cx, p)
-}
-
 /// Inserts `value` into `parent` before `marker` (as `insert`).
 pub(crate) fn insert_value_at(
     cx: *mut JsContext,
@@ -883,9 +827,6 @@ unsafe extern "C" fn node_finalize(rt: *mut qjs::JSRuntime, obj: JsValue) {
                 .position(|h| h.event == EventKind::Dismiss)
         {
             let handler = data.handlers.swap_remove(i);
-            if let Some(action) = handler.input_action {
-                unsafe { qjs::JS_FreeValueRT(rt, action.callable) };
-            }
             let oldest = {
                 let mut dismissed = d.dismissed.borrow_mut();
                 dismissed.push((data.id, handler.value));
@@ -904,11 +845,7 @@ unsafe extern "C" fn node_finalize(rt: *mut qjs::JSRuntime, obj: JsValue) {
     for v in data
         .handlers
         .into_iter()
-        .flat_map(|h| {
-            [Some(h.value), h.input_action.map(|a| a.callable)]
-                .into_iter()
-                .flatten()
-        })
+        .map(|h| h.value)
         .chain(data.touch.into_iter().map(|(_, v)| v))
         .chain(data.retained.into_iter().map(|(_, v)| v))
     {
@@ -929,9 +866,6 @@ unsafe extern "C" fn node_mark(rt: *mut qjs::JSRuntime, obj: JsValue, mark: qjs:
     }
     for handler in &data.handlers {
         unsafe { qjs::JS_MarkValue(rt, handler.value, mark) };
-        if let Some(action) = &handler.input_action {
-            unsafe { qjs::JS_MarkValue(rt, action.callable, mark) };
-        }
     }
     for v in data
         .touch
@@ -1375,22 +1309,9 @@ fn set_event(
     let id = unsafe { (*p).id };
     let handlers = unsafe { &mut (*p).handlers };
     let at = handlers.iter().position(|h| h.event == event);
-    let handler = unsafe { qjs::JS_IsFunction(cx, value) }.then(|| {
-        let input_action = if event == EventKind::Press {
-            capture_input_action(
-                cx,
-                at.and_then(|i| handlers[i].input_action.as_ref()),
-                value,
-            )
-        } else {
-            None
-        };
-        Handler {
-            event,
-            value: unsafe { qjs::JS_DupValue(cx, value) },
-            component_events: None,
-            input_action,
-        }
+    let handler = unsafe { qjs::JS_IsFunction(cx, value) }.then(|| Handler {
+        event,
+        value: unsafe { qjs::JS_DupValue(cx, value) },
     });
     let now = handler.is_some();
     let (was, old) = match (at, handler) {
@@ -1416,80 +1337,8 @@ fn set_event(
     };
     if let Some(old) = old {
         unsafe { qjs::JS_FreeValue(cx, old.value) };
-        free_input_action(cx, old.input_action);
     }
-    pushed?;
-    publish_input_action(cx, p)
-}
-
-fn capture_input_action(
-    cx: *mut JsContext,
-    old: Option<&InputAction>,
-    callable: JsValue,
-) -> Option<InputAction> {
-    if !crate::input_action::is_action(cx, callable) {
-        return None;
-    }
-    let token = match old.filter(|old| crate::input_action::same(cx, old.callable, callable)) {
-        Some(old) => old.token,
-        None => NEXT_INPUT_ACTION
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
-                token.checked_add(1)
-            })
-            .expect("input action tokens exhausted"),
-    };
-    Some(InputAction {
-        token,
-        // SAFETY: the handler owns this duplicate of the sealed callable.
-        callable: unsafe { qjs::JS_DupValue(cx, callable) },
-    })
-}
-
-fn free_input_action(cx: *mut JsContext, action: Option<InputAction>) {
-    if let Some(action) = action {
-        // SAFETY: an owned duplicate, freed outside node-data borrows.
-        unsafe { qjs::JS_FreeValue(cx, action.callable) };
-    }
-}
-
-fn selected_input_action(data: &NodeData) -> Option<&InputAction> {
-    if !data.touch.is_empty() || data.handlers.len() != 1 {
-        return None;
-    }
-    let handler = &data.handlers[0];
-    match handler.event {
-        EventKind::Press => handler.input_action.as_ref(),
-        EventKind::NativeEvent if handler.component_events.as_deref() == Some(&["press"][..]) => {
-            handler.input_action.as_ref()
-        }
-        _ => None,
-    }
-}
-
-fn publish_input_action(cx: *mut JsContext, p: *mut NodeData) -> Result<(), JsValue> {
-    if p.is_null() {
-        return Ok(());
-    }
-    // SAFETY: live node data; selection does not enter JS.
-    let (id, was, now) = unsafe {
-        (
-            (*p).id,
-            (*p).input_action,
-            selected_input_action(&*p).map(|action| action.token),
-        )
-    };
-    if was != now {
-        dom(cx).push(
-            cx,
-            Op::SetProp {
-                id,
-                prop: nsh_core::Prop::InputAction(now),
-            },
-        )?;
-        // SAFETY: the native op queue does not enter JS or release nodes.
-        unsafe { (*p).input_action = now };
-    }
-    Ok(())
+    pushed
 }
 
 /// Sets touch handler `prop` of node `p` to `value` (borrowed; not a
@@ -1529,8 +1378,7 @@ fn set_touch(
     if let Some(old) = old {
         unsafe { qjs::JS_FreeValue(cx, old) };
     }
-    pushed?;
-    publish_input_action(cx, p)
+    pushed
 }
 
 /// Node `id`'s touch handler `prop` (owned), if it has one.

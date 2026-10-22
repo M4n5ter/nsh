@@ -257,9 +257,6 @@ pub struct ViewProps {
     pub accessibility: Accessibility,
     /// `testID`: an identifier for UI tests.
     pub test_id: Option<Arc<str>>,
-    /// The sealed press action currently bound by the JS event owner.
-    /// Embedders validate it again in the engine before entering app code.
-    pub input_action: Option<u64>,
     /// `panActivation`: the view's touch responder waits for a pan the
     /// platform recognizes.
     pub pan_activation: Option<PanActivation>,

@@ -853,7 +853,8 @@ mod tests {
         });
         wait(&surface, || {
             target(&surface.root, "Inside action").is_some_and(|view| {
-                view.state().props.input_action.is_some() && view.state().frame.size.height.0 > 0.0
+                view.state().events.contains(EventKind::Press)
+                    && view.state().frame.size.height.0 > 0.0
             })
         });
         let button = target(&surface.root, "Inside action").unwrap();
