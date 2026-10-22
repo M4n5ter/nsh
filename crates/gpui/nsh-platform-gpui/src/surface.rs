@@ -805,10 +805,11 @@ mod tests {
 
     #[test]
     fn new_tracking_reports_existing_native_focus_and_hover_then_tracks_departure() {
-        use nsh_core::{ViewKind, geometry::rect, tailwind::state};
+        use nsh_core::{ViewKind, tailwind::state};
+
+        use crate::geom::rect;
         let surface = Surface::new(nsh_engine::Environment::default());
-        surface.root.state_mut().frame =
-            rect(Points(0.0), Points(0.0), Points(400.0), Points(400.0));
+        surface.root.state_mut().frame = rect(0.0, 0.0, 400.0, 400.0);
         let mut items = vec![
             MountItem::Create {
                 id: 2,
@@ -816,7 +817,7 @@ mod tests {
             },
             MountItem::Frame {
                 id: 2,
-                frame: rect(Points(0.0), Points(0.0), Points(200.0), Points(200.0)),
+                frame: rect(0.0, 0.0, 200.0, 200.0),
             },
             MountItem::Insert {
                 parent: nsh_core::ROOT_ID,
@@ -830,7 +831,7 @@ mod tests {
         for (id, x, y) in [(4, 0.0, 0.0), (6, 0.0, 40.0), (8, 240.0, 0.0)] {
             items.push(MountItem::Frame {
                 id,
-                frame: rect(Points(x), Points(y), Points(100.0), Points(32.0)),
+                frame: rect(x, y, 100.0, 32.0),
             });
         }
         surface.apply(&MountBatch { items });
