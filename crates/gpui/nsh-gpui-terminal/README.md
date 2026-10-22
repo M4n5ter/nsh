@@ -12,8 +12,10 @@ The host constructs `gpui_wgpu::WgpuHeadlessRenderer` and creates `TerminalPlatf
 `run_embedded`, and pumps foreground work when woken or a timer is due. One
 native window is supported. The platform keeps two background executor workers
 and at most 64 foreground jobs per pump. Frames are requested when dirty; there
-is no imposed 60 Hz timer. GPU readback currently waits synchronously, so this
-first API does not establish a frame-rate or input-delivery latency result.
+is no imposed 60 Hz timer. Drawing encodes and submits the scene on the native
+owner thread, then hands an owned GPU readback ticket to the host. The host's
+existing background executor waits for readback, copies RGBA pixels and encodes
+the terminal wire. This API does not establish a frame-rate or input latency result.
 `pump_with_draw(false)` still runs foreground and window lifecycle work while
 the output pipeline is full. It preserves the original dirty frame without
 re-waking just for that deferred draw; the host allows drawing once a candidate
@@ -26,15 +28,20 @@ scale 1; it does not guess cell dimensions or synthesize pixel precision from
 cell reports. Keyboard callbacks run before the current native text handler
 commits a propagated printable character. A bracketed paste is one text commit.
 
-Each draw produces a `CandidateFrame` containing an issuer-bound `FrameToken`,
-viewport generation and tightly packed top-down RGBA8 pixels. In the draw sink,
-pair that token with the existing AppView's immutable native input snapshot.
+Each successful GPU submission produces a `SubmittedFrame` containing an
+issuer-bound `FrameToken`, viewport generation and its owned readback ticket.
+In the same synchronous draw sink, pair that token with the existing AppView's
+immutable native input snapshot. Complete the ticket on a background executor
+to obtain a `CandidateFrame` with the same token and tightly packed RGBA8 pixels;
+completion never samples application state again.
 Retain one output transaction in flight and one replaceable pending candidate.
 Once any wire byte is written, complete the entire transaction indivisibly.
 
 The renderer checks actual texture dimensions and readback-buffer limits before
 allocating pixels. Encoder output writers use fallible allocations without an
 additional per-frame byte quota.
+Only a successful, unmapped staging buffer returns to the renderer's single
+reuse cache. Dropping a pending ticket cancels mapping and discards its buffer.
 
 `KittyFrame::encode` compresses the complete GPU frame into PNG and chunks its
 base64 payload at the protocol's 4096-byte boundary. `KittyFrame::wire` contains

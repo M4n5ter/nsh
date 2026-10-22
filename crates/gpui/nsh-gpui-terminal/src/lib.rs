@@ -1,7 +1,8 @@
 //! A terminal platform for the same GPUI scene used by NSH desktop apps.
 //!
 //! The embedding host owns terminal input, protocol negotiation and output.
-//! Drawing produces a [`CandidateFrame`]; only the sole output owner's receipt
+//! Drawing produces a [`SubmittedFrame`] whose owned readback completes away
+//! from the native input thread. Only the sole output owner's receipt
 //! may call [`TerminalPlatform::mark_presented`]. GPU completion is not terminal
 //! presentation, and input still needs the NSH surface's original owner lease.
 //!
@@ -26,8 +27,8 @@ pub use platform::TerminalPlatform;
 
 /// An authentic draw's identity in one terminal viewport generation.
 ///
-/// The default token is inert. A token is issued only after a complete GPU
-/// readback, and does not itself grant input authority or prove output flush.
+/// The default token is inert. A token is issued after successful GPU
+/// submission, and does not grant input authority or prove output flush.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct FrameToken {
@@ -67,6 +68,45 @@ impl Hash for FrameToken {
         self.issuer.as_ref().map(Arc::as_ptr).hash(state);
         self.sequence.hash(state);
         self.viewport_generation.hash(state);
+    }
+}
+
+/// An authentic GPU submission whose readback belongs to the receiving host.
+///
+/// Bind the token to its native input snapshot synchronously in the draw sink,
+/// then move this ticket to a background executor. Completion never resamples
+/// application state and does not publish an input snapshot.
+#[non_exhaustive]
+pub struct SubmittedFrame {
+    pub(crate) token: FrameToken,
+    pub(crate) readback: gpui_wgpu::SubmittedReadback,
+}
+
+impl SubmittedFrame {
+    /// The identity paired with the scene at its original GPU submission.
+    pub fn token(&self) -> FrameToken {
+        self.token.clone()
+    }
+
+    /// The submitted GPU target's actual dimensions.
+    pub fn size(&self) -> gpui::Size<gpui::DevicePixels> {
+        self.readback.size()
+    }
+
+    /// The tightly packed RGBA8 length produced by a successful completion.
+    pub fn pixel_len(&self) -> usize {
+        self.readback.pixel_len()
+    }
+
+    /// Waits for readback and copies RGBA pixels on the calling background thread.
+    pub fn complete(self) -> anyhow::Result<CandidateFrame> {
+        let size = self.readback.size();
+        let pixels = self.readback.complete()?;
+        Ok(CandidateFrame {
+            token: self.token,
+            size,
+            pixels,
+        })
     }
 }
 

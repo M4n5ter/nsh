@@ -18,13 +18,13 @@ use gpui::{
 };
 
 use crate::{
-    CandidateFrame, FrameToken,
+    FrameToken, SubmittedFrame,
     dispatcher::Dispatcher,
     window::{TerminalWindow, WindowRef, WindowState},
 };
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
-type PixelSink = Box<dyn FnMut(CandidateFrame)>;
+type SubmissionSink = Box<dyn FnMut(SubmittedFrame)>;
 type MenuAction = Box<dyn FnMut(&dyn Action)>;
 type ValidateMenuAction = Box<dyn FnMut(&dyn Action) -> bool>;
 
@@ -47,14 +47,15 @@ struct Callbacks {
 ///
 /// This owns no terminal input or output. Keep the `ApplicationHandle` returned
 /// by `Application::run_embedded`, call [`Self::pump`] when woken, and send
-/// candidates to the host's sole writer. A candidate is not a presentation.
+/// submitted readbacks to a background executor and completed candidates to the
+/// host's sole writer. Neither submission nor completion is a presentation.
 #[non_exhaustive]
 pub struct TerminalPlatform {
     dispatcher: Arc<Dispatcher>,
     background: BackgroundExecutor,
     foreground: ForegroundExecutor,
     text: Arc<dyn PlatformTextSystem>,
-    resources: RefCell<Option<(Box<gpui_wgpu::WgpuHeadlessRenderer>, PixelSink)>>,
+    resources: RefCell<Option<(Box<gpui_wgpu::WgpuHeadlessRenderer>, SubmissionSink)>>,
     window: RefCell<Option<WindowRef>>,
     callbacks: RefCell<Callbacks>,
     started: Cell<bool>,
@@ -74,7 +75,7 @@ impl TerminalPlatform {
     /// it must not enter GPUI synchronously from a callback or worker thread.
     pub fn new(
         renderer: Box<gpui_wgpu::WgpuHeadlessRenderer>,
-        sink: Box<dyn FnMut(CandidateFrame)>,
+        sink: Box<dyn FnMut(SubmittedFrame)>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Rc<Self>> {
         let dispatcher = Dispatcher::new(wake.clone())?;
@@ -115,8 +116,8 @@ impl TerminalPlatform {
     }
 
     /// Runs at most 64 foreground tasks and one window frame on the creating
-    /// thread. Pending work re-wakes the host. Terminal IO remains external;
-    /// this first renderer performs synchronous GPU readback during a draw.
+    /// thread. Pending work re-wakes the host. Drawing submits an owned GPU
+    /// readback ticket; the host completes it off this native input thread.
     pub fn pump(&self) -> bool {
         self.pump_with_draw(true)
     }
@@ -545,7 +546,7 @@ mod tests {
         });
         assert!(platform.pump());
         assert_eq!(frames.borrow().len(), 1);
-        let original = frames.borrow()[0].token();
+        let original = frames.borrow_mut().remove(0).complete()?.token();
         platform.mark_presented(original.clone())?;
 
         let foreground = Rc::new(Cell::new(0));
@@ -582,14 +583,14 @@ mod tests {
         wakes.store(0, Ordering::SeqCst);
         assert!(!platform.pump_with_draw(false));
         assert_eq!(wakes.load(Ordering::SeqCst), 0);
-        assert_eq!(frames.borrow().len(), 1);
+        assert_eq!(frames.borrow().len(), 0);
         assert!(platform.has_pending());
 
         assert!(platform.pump());
         let current = {
-            let frames = frames.borrow();
-            assert_eq!(frames.len(), 2);
-            let frame = &frames[1];
+            let mut frames = frames.borrow_mut();
+            assert_eq!(frames.len(), 1);
+            let frame = frames.remove(0).complete()?;
             assert_eq!(frame.size(), size(DevicePixels(80), DevicePixels(40)));
             assert_eq!(
                 &frame.pixels()[(20 * 80 + 40) * 4..][..4],

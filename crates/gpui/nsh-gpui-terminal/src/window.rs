@@ -15,8 +15,8 @@ use gpui::{
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-use crate::{CandidateFrame, FrameToken};
-type PixelSink = Box<dyn FnMut(CandidateFrame)>;
+use crate::{FrameToken, SubmittedFrame};
+type SubmissionSink = Box<dyn FnMut(SubmittedFrame)>;
 type Wake = Arc<dyn Fn() + Send + Sync>;
 type Resize = Box<dyn FnMut(Size<Pixels>, f32)>;
 
@@ -62,7 +62,7 @@ pub(crate) struct WindowState {
     error: Option<String>,
     renderer: Box<gpui_wgpu::WgpuHeadlessRenderer>,
     atlas: Arc<dyn PlatformAtlas>,
-    sink: Option<PixelSink>,
+    sink: Option<SubmissionSink>,
     wake: Wake,
 }
 
@@ -104,7 +104,7 @@ impl TerminalWindow {
         handle: AnyWindowHandle,
         params: WindowParams,
         renderer: Box<gpui_wgpu::WgpuHeadlessRenderer>,
-        sink: PixelSink,
+        sink: SubmissionSink,
         wake: Wake,
     ) -> Result<(Self, WindowRef)> {
         let size = device_size(params.bounds.size)?;
@@ -591,32 +591,29 @@ impl PlatformWindow for TerminalWindow {
         if self.0.borrow().closed {
             return;
         }
-        let candidate = (|| -> Result<CandidateFrame> {
+        let submitted = (|| -> Result<SubmittedFrame> {
             let mut state = self.0.borrow_mut();
             let size = state.size;
-            let pixels = state
-                .renderer
-                .render_scene_to_image(scene, size)?
-                .into_raw();
-            state.sequence = state
+            let sequence = state
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("terminal candidate sequence exhausted"))?;
-            Ok(CandidateFrame {
+            let readback = state.renderer.submit_scene(scene, size)?;
+            state.sequence = sequence;
+            Ok(SubmittedFrame {
                 token: FrameToken {
                     issuer: Some(state.issuer.clone()),
                     sequence: state.sequence,
                     viewport_generation: state.viewport_generation,
                 },
-                size,
-                pixels,
+                readback,
             })
         })();
-        match candidate {
-            Ok(candidate) => {
+        match submitted {
+            Ok(submitted) => {
                 let sink = self.0.borrow_mut().sink.take();
                 if let Some(mut sink) = sink {
-                    sink(candidate);
+                    sink(submitted);
                     self.0.borrow_mut().sink = Some(sink);
                 }
             }
