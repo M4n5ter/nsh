@@ -3458,6 +3458,17 @@ mod tests {
             ),
             (vec![MountItem::Remove { id: 6 }], Some(2)),
             (
+                vec![
+                    MountItem::Remove { id: 6 },
+                    MountItem::Insert {
+                        parent: 4,
+                        child: 6,
+                        before: None,
+                    },
+                ],
+                Some(2),
+            ),
+            (
                 vec![MountItem::Command {
                     id: 8,
                     command: Command::Focus,
