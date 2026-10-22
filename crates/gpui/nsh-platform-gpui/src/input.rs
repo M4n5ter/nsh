@@ -1151,6 +1151,25 @@ pub(crate) fn focusable(surface: &Surface, view: &NshView) -> bool {
             || has_press(s.events))
 }
 
+/// A removed recycling slot cannot transfer focus to a new row inserted
+/// in the same batch. A sibling reorder uses Insert and keeps its owner.
+pub(crate) fn retire_focus_within(surface: &Rc<Surface>, root: &NshView) {
+    let contains = |view: NshView| {
+        std::iter::successors(Some(view), NshView::parent_view).any(|view| &view == root)
+    };
+    let native = crate::native::requested_focus(surface)
+        .or_else(|| crate::native::focused_component(surface))
+        .and_then(|id| surface.view(id))
+        .is_some_and(contains);
+    let nsh = crate::text_input::focused_view(surface).is_some_and(contains);
+    if native {
+        crate::native::focus_surface(surface);
+    }
+    if nsh {
+        crate::text_input::blur_all(surface);
+    }
+}
+
 /// Gives an eligible view focus within the current native modal scope.
 /// A real component receives GPUI focus; NSH controls share one owner.
 pub(crate) fn focus_view(surface: &Rc<Surface>, view: &NshView) -> bool {

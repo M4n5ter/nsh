@@ -206,6 +206,9 @@ pub(super) struct ListState {
     sticky_offset: f32,
     /// Sticky ranges last sent to the platform.
     pub(super) sent_sticky: Vec<StickyRange>,
+    /// Ready cells attached to the native list, in logical content order.
+    /// Node ids, not reusable shadow-tree keys; JS keeps owning every cell.
+    pub(super) mounted_cells: Vec<crate::NodeId>,
     pub(super) viewability: Viewability,
     /// Last reported viewable items (`first..=last`).
     pub(super) viewable: Option<(u32, u32)>,
@@ -265,6 +268,7 @@ impl ListState {
             sticky: Vec::new(),
             sticky_offset: 0.0,
             sent_sticky: Vec::new(),
+            mounted_cells: Vec::new(),
             viewability: Viewability::default(),
             viewable: None,
             end_threshold: END_THRESHOLD,

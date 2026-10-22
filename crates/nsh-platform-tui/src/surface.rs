@@ -644,6 +644,7 @@ impl Surface {
                     if self.navigation_removing(id) {
                         continue;
                     }
+                    self.retire_focus_within(id);
                     let now = self.now;
                     let retained = self.node_mut(id).is_some_and(|node| {
                         let transition = (!matches!(

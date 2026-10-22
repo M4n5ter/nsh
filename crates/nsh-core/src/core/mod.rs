@@ -2914,13 +2914,17 @@ impl<M: TextEngine> Core<M> {
             // (`sync_overlays`).
             if parent_created && child_kind != Kind::Overlay {
                 self.ensure_created(child);
-                let before = self.native_before(parent, child);
-                // By the nodes' own ids (the ops may name an alias).
-                self.mount.push(MountItem::Insert {
-                    parent: self.nodes[parent as usize].id,
-                    child: self.nodes[child as usize].id,
-                    before,
-                });
+                // Lists attach confirmed cells in item order, independently
+                // of the runtime's stable recycling-slot ownership.
+                if self.nodes[parent as usize].list.is_none() {
+                    let before = self.native_before(parent, child);
+                    // By the nodes' own ids (the ops may name an alias).
+                    self.mount.push(MountItem::Insert {
+                        parent: self.nodes[parent as usize].id,
+                        child: self.nodes[child as usize].id,
+                        before,
+                    });
+                }
             }
         }
         Ok(())
@@ -3318,6 +3322,7 @@ impl<M: TextEngine> Core<M> {
         }
         if let Some(list) = node.list.as_mut() {
             list.dirty = true;
+            list.mounted_cells.clear();
         }
         if let Some(input) = node.input.as_mut() {
             input.content = None;
@@ -3362,12 +3367,14 @@ impl<M: TextEngine> Core<M> {
             let c = &self.nodes[child as usize];
             if c.layout.is_some() && c.kind != Kind::Overlay {
                 self.ensure_created(child);
-                let child_id = self.nodes[child as usize].id;
-                self.mount.push(MountItem::Insert {
-                    parent: id,
-                    child: child_id,
-                    before: None,
-                });
+                if self.nodes[key as usize].list.is_none() {
+                    let child_id = self.nodes[child as usize].id;
+                    self.mount.push(MountItem::Insert {
+                        parent: id,
+                        child: child_id,
+                        before: None,
+                    });
+                }
             }
         }
         self.nodes[key as usize].children = original;
@@ -4745,6 +4752,59 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
+    /// Project confirmed cells to the native tree in content order. A cell
+    /// keeps its JS owner and node id while moving between recycling slots;
+    /// an unbound cell stays alive but cannot retain a native keyboard stop.
+    fn mount_list_cells(&mut self, key: Key, cells: Vec<NodeId>) {
+        let list = self.nodes[key as usize].list.as_mut().expect("list");
+        if list.mounted_cells == cells {
+            return;
+        }
+        let mut current = std::mem::take(&mut list.mounted_cells);
+        current.retain(|&id| {
+            // Runtime removal may already have moved or released this cell.
+            // Do not detach its new parent or a recycled shadow-tree key.
+            if !self
+                .key(id)
+                .is_ok_and(|cell| self.nodes[cell as usize].parent == key)
+            {
+                return false;
+            }
+            if cells.contains(&id) {
+                true
+            } else {
+                self.mount.push(MountItem::Remove { id });
+                false
+            }
+        });
+        let parent = self.nodes[key as usize].id;
+        let mut before = None;
+        for &id in cells.iter().rev() {
+            let at = current.iter().position(|&cell| cell == id);
+            let in_place = at.is_some_and(|at| current.get(at + 1).copied() == before);
+            if !in_place {
+                self.mount.push(MountItem::Insert {
+                    parent,
+                    child: id,
+                    before,
+                });
+                if let Some(at) = at {
+                    current.remove(at);
+                }
+                let at = before
+                    .and_then(|before| current.iter().position(|&cell| cell == before))
+                    .unwrap_or(current.len());
+                current.insert(at, id);
+            }
+            before = Some(id);
+        }
+        self.nodes[key as usize]
+            .list
+            .as_mut()
+            .expect("list")
+            .mounted_cells = current;
+    }
+
     /// Measures rendered cells, keeps the visible content anchored, picks
     /// the items to render and positions the cells of every list.
     fn update_lists(&mut self, relayout: bool) {
@@ -4978,6 +5038,18 @@ impl<M: TextEngine> Core<M> {
                     .iter()
                     .filter_map(|s| s.ready().map(|i| (i, s.cell))),
             );
+            ready.sort_unstable_by_key(|&(index, _)| index);
+            let mut cells = Vec::with_capacity(ready.len() + 3);
+            if extras[0].cell != u32::MAX {
+                cells.push(self.nodes[extras[0].cell as usize].id);
+            }
+            cells.extend(ready.iter().map(|&(_, cell)| self.nodes[cell as usize].id));
+            if list.count == 0 && extras[2].cell != u32::MAX {
+                cells.push(self.nodes[extras[2].cell as usize].id);
+            }
+            if extras[1].cell != u32::MAX {
+                cells.push(self.nodes[extras[1].cell as usize].id);
+            }
             // Cells left without an item still show their last one. Those
             // in the render window (the data shrank, the list jumped) would
             // show through: move them out of sight. Cells the window left
@@ -4989,6 +5061,7 @@ impl<M: TextEngine> Core<M> {
                 .filter(|s| s.index.is_none() && s.cell != u32::MAX)
                 .map(|s| s.cell)
                 .collect();
+            self.mount_list_cells(key, cells);
             for cell in hidden {
                 let frame = self.nodes[cell as usize].frame;
                 if frame.size.width.0.is_nan() {

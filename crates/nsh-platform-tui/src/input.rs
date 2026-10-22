@@ -649,6 +649,20 @@ impl Surface {
         self.set_focus_from(id, FocusSource::Navigation);
     }
 
+    /// A real removal retires the old owner even if its recycling slot is
+    /// inserted again later in this batch. Insert-only moves keep focus.
+    pub(crate) fn retire_focus_within(&mut self, root: NodeId) {
+        let mut history = std::mem::take(&mut self.focus_history);
+        history.retain(|id| !self.ancestors(*id).contains(&root));
+        self.focus_history = history;
+        if self
+            .focus
+            .is_some_and(|id| self.ancestors(id).contains(&root))
+        {
+            self.set_focus(None);
+        }
+    }
+
     pub(crate) fn set_focus_from(&mut self, id: Option<NodeId>, source: FocusSource) {
         let visible = self.visible_ids();
         let id = id.filter(|id| visible.contains(id) && self.focusable(*id));
