@@ -74,7 +74,7 @@ def smoke(docker_socket="/var/run/docker.sock"):
     # The Linux SDK opens the same plain local volume as the Sandbox. Host
     # networking lets it reach the daemon's loopback-only published port.
     run('docker', 'run', '--rm', '--network', 'host',
-        '--mount', f'type=bind,source={pathlib.Path(docker_socket).resolve()},target=/var/run/docker.sock',
+        '--mount', f'type=bind,source={pathlib.Path(docker_socket.removeprefix("unix://")).resolve()},target=/var/run/docker.sock',
         '--mount', f'type=volume,source={volume},target=/layerfs-store',
         '--mount', f'type=bind,source={state},target=/layerfs-state',
         '--mount', f'type=bind,source={source.resolve()},target=/layerfs-input,readonly',
