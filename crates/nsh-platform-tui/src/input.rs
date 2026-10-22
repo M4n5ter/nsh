@@ -3884,6 +3884,65 @@ mod tests {
     }
 
     #[test]
+    fn nested_wheels_keep_vertical_motion_outside_horizontal_readers() {
+        use nsh_core::{MountBatch, MountItem};
+
+        for presented in [false, true] {
+            for (width, kind, expected_x, expected_y) in [
+                (160.0, MouseEventKind::ScrollDown, 0.0, 48.0),
+                (1000.0, MouseEventKind::ScrollDown, 0.0, 48.0),
+                (1000.0, MouseEventKind::ScrollRight, 24.0, 0.0),
+            ] {
+                let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+                let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+                items.extend(create(4, ViewKind::Scroll, 2, 0.0));
+                items.extend([
+                    MountItem::ScrollConfig {
+                        id: 4,
+                        horizontal: true,
+                        scrollbar_visible: false,
+                        scroll_value: None,
+                        keyboard_dismiss: Default::default(),
+                        mirrored: false,
+                    },
+                    MountItem::ScrollContent {
+                        id: 2,
+                        size: Size::new(px(160.0), px(1000.0)),
+                    },
+                    MountItem::ScrollContent {
+                        id: 4,
+                        size: Size::new(px(width), px(32.0)),
+                    },
+                ]);
+                surface.apply(MountBatch { items });
+                surface.events.clear();
+                let mouse = MouseEvent {
+                    kind,
+                    column: 2,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                };
+                if presented {
+                    let lease = surface.input_snapshot().wheel_at(mouse).unwrap();
+                    assert_eq!(surface.handle_presented_wheel(mouse, 1, &lease), Some(1));
+                } else {
+                    assert_eq!(surface.handle_wheel(mouse, 1), 1);
+                }
+                assert_eq!(
+                    (
+                        surface.node(4).unwrap().scroll.x.0,
+                        surface.node(4).unwrap().scroll.y.0,
+                        surface.node(2).unwrap().scroll.x.0,
+                        surface.node(2).unwrap().scroll.y.0,
+                    ),
+                    (expected_x, 0.0, 0.0, expected_y),
+                    "presented={presented} width={width} kind={kind:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn wheel_burst_counts_horizontal_rtl_shift_and_zoom_with_mounted_limits() {
         use nsh_core::{GestureValues, MountBatch, MountItem, Size, animation::AnimationOp};
         let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
