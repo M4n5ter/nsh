@@ -1770,6 +1770,129 @@ mod tests {
 
     #[cfg(feature = "js")]
     #[test]
+    fn recycled_list_rows_keep_keyboard_order_and_retire_replaced_focus() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use nsh_core::{EventKind, EventPayload};
+
+        const APP: &str = r#"
+            import { mount, signal, View, Text, List } from 'nsh';
+            import { LayoutAnimation } from 'nsh/animated';
+            const rows = signal(Array.from({length: 40}, (_, i) => `row ${i}`));
+            const phase = signal('initial');
+            let list;
+            function action(label, run) {
+                const name = () => typeof label === 'function' ? label() : label;
+                return View({get accessibilityLabel() { return name(); }, onPress: run,
+                    style: {height: 32}, children: Text({children: name})});
+            }
+            mount(() => View({style: {flex: 1}, children: [
+                action('Scroll to twelve', () => {
+                    list.scrollToIndex({index: 12, animated: false}); phase.set('at twelve');
+                }),
+                action('Scroll to thirteen', () => {
+                    list.scrollToIndex({index: 13, animated: false}); phase.set('at thirteen');
+                }),
+                action('Filter rows', () => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.linear);
+                    rows.set(['match alpha', 'match beta']); phase.set('filtered');
+                }),
+                List({get each() { return rows(); }, keyExtractor: row => row,
+                    ref: node => { list = node; }, estimatedItemSize: 32,
+                    style: {height: 128}, focusable: false,
+                    header: action('Header action', () => {}),
+                    footer: action('Footer action', () => {}),
+                    children: row => action(row, () => phase.set(row()))}),
+                Text({children: () => phase()})
+            ]}));
+        "#;
+
+        fn wait(view: &mut AppView, started: Instant, ready: impl Fn(&AppView) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                view.tick(started.elapsed().as_secs_f64()).unwrap();
+                if ready(view) {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "list did not settle: {:?}\n{}",
+                    view.last_error(),
+                    view.snapshot()
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        fn target(view: &AppView, label: &str) -> Option<nsh_core::NodeId> {
+            view.accessibility_snapshot()
+                .into_iter()
+                .find(|node| node.label == label)
+                .map(|node| node.id)
+        }
+        fn press(view: &AppView, label: &str) {
+            view.control().unwrap().dispatch_event(
+                target(view, label).unwrap(),
+                EventKind::Press,
+                EventPayload::None,
+            );
+        }
+        fn focused(view: &AppView) -> Option<String> {
+            view.accessibility_snapshot()
+                .into_iter()
+                .find(|node| node.focused)
+                .map(|node| node.label)
+        }
+        fn tab(view: &mut AppView, backwards: bool) {
+            view.handle_event(Event::Key(KeyEvent::new(
+                if backwards {
+                    KeyCode::BackTab
+                } else {
+                    KeyCode::Tab
+                },
+                KeyModifiers::NONE,
+            )));
+        }
+
+        let started = Instant::now();
+        let mut view = AppView::new(AppOptions::default());
+        view.load(App::Js(Bundle::source(APP.into()))).unwrap();
+        wait(&mut view, started, |view| target(view, "row 0").is_some());
+        press(&view, "Scroll to twelve");
+        wait(&mut view, started, |view| {
+            view.snapshot().contains("at twelve") && target(view, "row 20").is_some()
+        });
+        let retained = target(&view, "row 12").unwrap();
+        view.surface_mut().set_focus(Some(retained));
+        tab(&mut view, false);
+        assert_eq!(focused(&view).as_deref(), Some("row 13"));
+        tab(&mut view, true);
+        assert_eq!(focused(&view).as_deref(), Some("row 12"));
+
+        press(&view, "Scroll to thirteen");
+        wait(&mut view, started, |view| {
+            view.snapshot().contains("at thirteen") && target(view, "row 21").is_some()
+        });
+        assert_eq!(target(&view, "row 12"), Some(retained));
+        assert_eq!(focused(&view).as_deref(), Some("row 12"));
+
+        let replaced = target(&view, "row 20").unwrap();
+        view.surface_mut().set_focus(Some(replaced));
+        press(&view, "Filter rows");
+        wait(&mut view, started, |view| {
+            view.snapshot().contains("filtered") && target(view, "match beta").is_some()
+        });
+        assert_ne!(focused(&view).as_deref(), Some("match alpha"));
+        assert_ne!(focused(&view).as_deref(), Some("match beta"));
+        let header = target(&view, "Header action").unwrap();
+        view.surface_mut().set_focus(Some(header));
+        for label in ["match alpha", "match beta", "Footer action"] {
+            tab(&mut view, false);
+            assert_eq!(focused(&view).as_deref(), Some(label));
+        }
+        view.stop();
+    }
+
+    #[cfg(feature = "js")]
+    #[test]
     fn nested_list_focus_reveals_the_canonical_row_after_a_membership_gap() {
         use nsh_core::{EventKind, EventPayload};
 

@@ -946,6 +946,142 @@ mod tests {
         surface.stop();
     }
 
+    #[cfg(feature = "js")]
+    #[gpui::test]
+    fn recycled_list_rows_keep_keyboard_order_and_retire_replaced_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::time::{Duration, Instant};
+
+        const APP: &str = r#"
+            import { mount, signal, View, Text, List } from 'nsh';
+            import { LayoutAnimation } from 'nsh/animated';
+            const rows = signal(Array.from({length: 40}, (_, i) => `row ${i}`));
+            const phase = signal('initial');
+            let list;
+            function action(label, run) {
+                const name = () => typeof label === 'function' ? label() : label;
+                return View({get accessibilityLabel() { return name(); }, onPress: run,
+                    style: {height: 32}, children: Text({children: name})});
+            }
+            mount(() => View({style: {flex: 1}, children: [
+                action('Scroll to twelve', () => {
+                    list.scrollToIndex({index: 12, animated: false}); phase.set('at twelve');
+                }),
+                action('Scroll to thirteen', () => {
+                    list.scrollToIndex({index: 13, animated: false}); phase.set('at thirteen');
+                }),
+                action('Filter rows', () => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.linear);
+                    rows.set(['match alpha', 'match beta']); phase.set('filtered');
+                }),
+                List({get each() { return rows(); }, keyExtractor: row => row,
+                    ref: node => { list = node; }, estimatedItemSize: 32,
+                    style: {height: 128}, focusable: false,
+                    header: action('Header action', () => {}),
+                    footer: action('Footer action', () => {}),
+                    children: row => action(row, () => phase.set(row()))}),
+                Text({children: () => phase()})
+            ]}));
+        "#;
+
+        fn target(view: &NshView, label: &str) -> Option<NshView> {
+            if view.state().props.accessibility.label.as_deref() == Some(label) {
+                return Some(view.clone());
+            }
+            view.with_children(|children| children.iter().find_map(|view| target(view, label)))
+        }
+        fn wait(surface: &Rc<Surface>, ready: impl Fn() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                surface.control(|control| {
+                    control.advance_clock(Duration::ZERO, move || tx.send(()).unwrap());
+                });
+                rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                surface.drain();
+                if ready() {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "native list did not settle");
+            }
+        }
+        fn press(surface: &Rc<Surface>, label: &str) {
+            surface.event(
+                target(&surface.root, label).unwrap().id(),
+                EventKind::Press,
+                EventPayload::None,
+            );
+        }
+        fn focused(surface: &Rc<Surface>) -> Option<String> {
+            crate::text_input::focused_view(surface).and_then(|view| {
+                view.state()
+                    .props
+                    .accessibility
+                    .label
+                    .as_deref()
+                    .map(str::to_owned)
+            })
+        }
+        fn tab(surface: &Rc<Surface>, shift: bool) {
+            assert!(crate::input::key(
+                surface,
+                crate::input::KeyEvent {
+                    vk: 0x09,
+                    down: true,
+                    repeat: false,
+                    modifiers: crate::input::Modifiers {
+                        shift,
+                        ..Default::default()
+                    },
+                }
+            ));
+        }
+
+        cx.executor().allow_parking();
+        let (surface, _app) = cx.update(|cx| {
+            let app = crate::rt::init_test_app(cx);
+            let surface = Surface::new(nsh_engine::Environment::default());
+            surface.resized(640.0, 384.0, 1.0);
+            *surface.text_system.borrow_mut() = Some(cx.text_system().clone());
+            surface.start(
+                EngineConfig::new(nsh_engine::App::Js(nsh_engine::Bundle::source(APP.into()))),
+                false,
+            );
+            (surface, app)
+        });
+        wait(&surface, || target(&surface.root, "row 0").is_some());
+        press(&surface, "Scroll to twelve");
+        wait(&surface, || target(&surface.root, "row 20").is_some());
+        let retained = target(&surface.root, "row 12").unwrap();
+        assert!(crate::input::focus_view(&surface, &retained));
+        tab(&surface, false);
+        assert_eq!(focused(&surface).as_deref(), Some("row 13"));
+        tab(&surface, true);
+        assert_eq!(focused(&surface).as_deref(), Some("row 12"));
+
+        press(&surface, "Scroll to thirteen");
+        wait(&surface, || target(&surface.root, "row 21").is_some());
+        assert_eq!(target(&surface.root, "row 12"), Some(retained));
+        assert_eq!(focused(&surface).as_deref(), Some("row 12"));
+
+        let replaced = target(&surface.root, "row 20").unwrap();
+        assert!(crate::input::focus_view(&surface, &replaced));
+        press(&surface, "Filter rows");
+        wait(&surface, || target(&surface.root, "match beta").is_some());
+        assert_ne!(focused(&surface).as_deref(), Some("match alpha"));
+        assert_ne!(focused(&surface).as_deref(), Some("match beta"));
+        assert!(crate::input::focus_view(
+            &surface,
+            &target(&surface.root, "Header action").unwrap(),
+        ));
+        for label in ["match alpha", "match beta", "Footer action"] {
+            tab(&surface, false);
+            assert_eq!(focused(&surface).as_deref(), Some(label));
+        }
+        surface.stop();
+    }
+
     fn focus_return_input(id: NodeId, parent: NodeId, auto_focus: bool) -> Vec<MountItem> {
         vec![
             MountItem::Create {
