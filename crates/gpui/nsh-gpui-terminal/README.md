@@ -30,26 +30,27 @@ Each draw produces a `CandidateFrame` containing an issuer-bound `FrameToken`,
 viewport generation and tightly packed top-down RGBA8 pixels. In the draw sink,
 pair that token with the existing AppView's immutable native input snapshot.
 Retain one output transaction in flight and one replaceable pending candidate.
-Once any upload byte is written, complete its entire APC sequence.
+Once any wire byte is written, complete the entire transaction indivisibly.
 
 The renderer checks actual texture dimensions and readback-buffer limits before
 allocating pixels. Encoder output writers use fallible allocations without an
 additional per-frame byte quota.
 
 `KittyFrame::encode` compresses the complete GPU frame into PNG and chunks its
-base64 payload at the protocol's 4096-byte boundary. Upload into the
-non-displayed owned image slot, accept
-only the sole reader's successful matching `(image id, placement 1)` reply,
-then flush `retire_previous` before `mark_presented`. An ACK timeout or error
-ends this graphics session; reusing its slots could misattribute a late reply.
-The positive capability query's nonce must differ from both image slots.
-Restoration deletes only those owned slots, never every terminal image.
+base64 payload at the protocol's 4096-byte boundary. `KittyFrame::wire` contains
+the complete `q=1` upload into the non-displayed owned image slot followed by
+retirement of the old image. The sole writer writes and flushes that complete
+wire before `mark_presented`; successful frame replies do not gate publication.
+The sole reader ends the graphics session on any negative reply for either
+owned slot, including a late error. The independent capability query still
+requires a positive reply, and its nonce must differ from both image slots.
+Restoration deletes only those owned slots.
 
 Resize immediately revokes the old viewport's input geometry. Discard its
 pending candidate, finish any already-started output indivisibly, and recreate
 the next frame at the new dimensions. A GPU completion is a candidate, not a
-terminal publication. A terminal ACK proves protocol acceptance, not display
-vsync. The writer's completed receipt is the only caller of `mark_presented`.
+terminal publication. The writer's completed flush receipt is the only caller
+of `mark_presented`; that receipt does not prove display vsync.
 
 For incoming ordinary presses and scrolling, the host first dispatches against
 that token's original NSH input snapshot and native owner lease. A rejected

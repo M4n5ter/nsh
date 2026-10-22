@@ -1,11 +1,11 @@
 //! Complete Kitty image transactions; terminal IO belongs to the embedding host.
 //!
-//! Upload the back image, wait for its matching successful `(image, placement)`
-//! reply, then flush [`KittyFrame::retire_previous`]. Only that last receipt may
-//! publish the associated native input snapshot. A parser acknowledgement does
-//! not prove monitor presentation or refresh rate.
-//! A missing or failed acknowledgement terminates this graphics session: do
-//! not reuse its slots and misattribute a late reply to a later frame.
+//! Write and flush [`KittyFrame::wire`] indivisibly: the complete back-image
+//! upload requests errors only (`q=1`) and precedes retirement of the old image.
+//! That flush receipt may publish the associated native input snapshot; success
+//! replies do not gate publication or prove monitor presentation or refresh rate.
+//! The embedding host's sole reader must end the graphics session on any
+//! negative reply for either owned image slot, including a late error.
 
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -13,14 +13,13 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crate::{CandidateFrame, FrameToken, wire};
 const CHUNK_BYTES: usize = 4096;
 
-/// One fully admitted frame; upload and retirement must stay in this order.
+/// One fully admitted wire transaction containing upload followed by retirement.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct KittyFrame {
     token: FrameToken,
     image: u32,
-    upload: Vec<u8>,
-    retire: Vec<u8>,
+    wire: Vec<u8>,
 }
 
 impl KittyFrame {
@@ -53,7 +52,7 @@ impl KittyFrame {
             .ok_or_else(|| anyhow::anyhow!("terminal PNG payload size overflow"))?;
         let chunks = encoded_bytes.div_ceil(CHUNK_BYTES);
         let first = format!(
-            "\x1b[H\x1b_Ga=T,t=d,f=100,s={width},v={height},i={image},p=1,C=1,c={columns},r={rows},q=0,m={};",
+            "\x1b[H\x1b_Ga=T,t=d,f=100,s={width},v={height},i={image},p=1,C=1,c={columns},r={rows},q=1,m={};",
             u8::from(chunks > 1)
         );
         let retire = previous.map_or_else(Vec::new, |old| {
@@ -71,27 +70,27 @@ impl KittyFrame {
             .and_then(|n| n.checked_add(retire.len()))
             .ok_or_else(|| anyhow::anyhow!("terminal image wire size overflow"))?;
         let payload = STANDARD.encode(&png);
-        let mut upload = Vec::new();
-        upload.try_reserve_exact(wire_bytes - retire.len())?;
+        let mut wire = Vec::new();
+        wire.try_reserve_exact(wire_bytes)?;
         for (index, chunk) in payload.as_bytes().chunks(CHUNK_BYTES).enumerate() {
             if index == 0 {
-                upload.extend_from_slice(first.as_bytes());
+                wire.extend_from_slice(first.as_bytes());
             } else {
-                upload.extend_from_slice(if index + 1 < chunks {
+                wire.extend_from_slice(if index + 1 < chunks {
                     b"\x1b_Gm=1;"
                 } else {
                     b"\x1b_Gm=0;"
                 });
             }
-            upload.extend_from_slice(chunk);
-            upload.extend_from_slice(b"\x1b\\");
+            wire.extend_from_slice(chunk);
+            wire.extend_from_slice(b"\x1b\\");
         }
-        debug_assert_eq!(upload.len() + retire.len(), wire_bytes);
+        wire.extend_from_slice(&retire);
+        debug_assert_eq!(wire.len(), wire_bytes);
         Ok(Self {
             token: frame.token.clone(),
             image,
-            upload,
-            retire,
+            wire,
         })
     }
 
@@ -100,22 +99,18 @@ impl KittyFrame {
         self.token.clone()
     }
 
-    /// The image id whose placement `p=1` must receive an exact successful reply.
+    /// The owned back-image id used for this frame's placement `p=1`.
     pub fn image_id(&self) -> u32 {
         self.image
     }
 
-    /// Complete upload bytes; once started, these may not be replaced or split.
-    pub fn upload(&self) -> &[u8] {
-        &self.upload
-    }
-
-    /// Delete the old owned image only after the new placement was accepted.
+    /// Complete upload and retirement bytes, written and flushed indivisibly.
     ///
     /// Kitty stacks equal-z images by id, so a smaller back id may still be
-    /// behind the old image. The writer must flush this before publishing.
-    pub fn retire_previous(&self) -> &[u8] {
-        &self.retire
+    /// behind the old image until retirement. Only a successful flush of all
+    /// these bytes permits publication of this frame's native input snapshot.
+    pub fn wire(&self) -> &[u8] {
+        &self.wire
     }
 }
 
@@ -166,14 +161,15 @@ mod tests {
     fn rgba_payload_survives_chunking_and_only_the_old_owned_image_is_retired() {
         let frame = frame(192, 192);
         let encoded = KittyFrame::encode(&frame, 41, Some(73), 120, 40).unwrap();
-        let wire = std::str::from_utf8(encoded.upload())
+        let wire = std::str::from_utf8(encoded.wire())
             .unwrap()
             .strip_prefix("\x1b[H")
+            .unwrap()
+            .strip_suffix("\x1b[?2026h\x1b_Ga=d,d=I,i=73,q=2\x1b\\\x1b[?2026l")
+            .unwrap()
+            .strip_suffix("\x1b\\")
             .unwrap();
-        let packets: Vec<_> = wire
-            .split("\x1b\\")
-            .filter(|part| !part.is_empty())
-            .collect();
+        let packets: Vec<_> = wire.split("\x1b\\").collect();
         assert!(packets.len() > 1);
         let mut payload = String::new();
         for (index, packet) in packets.iter().enumerate() {
@@ -184,10 +180,13 @@ mod tests {
                 .unwrap();
             assert!(chunk.len() <= 4096);
             assert_eq!(chunk.len() % 4, 0);
+            if index + 1 < packets.len() {
+                assert_eq!(chunk.len(), 4096);
+            }
             if index == 0 {
                 assert_eq!(
                     control,
-                    "a=T,t=d,f=100,s=192,v=192,i=41,p=1,C=1,c=120,r=40,q=0,m=1"
+                    "a=T,t=d,f=100,s=192,v=192,i=41,p=1,C=1,c=120,r=40,q=1,m=1"
                 );
             } else {
                 assert_eq!(
@@ -207,27 +206,41 @@ mod tests {
             .into_rgba8();
         assert_eq!(decoded.dimensions(), (192, 192));
         assert_eq!(decoded.as_raw(), frame.pixels());
-        assert_eq!(
-            encoded.retire_previous(),
-            b"\x1b[?2026h\x1b_Ga=d,d=I,i=73,q=2\x1b\\\x1b[?2026l"
-        );
         assert_eq!(encoded.token(), frame.token());
+        assert_eq!(encoded.image_id(), 41);
     }
 
     #[test]
     fn complete_frames_preserve_large_scenes_and_reject_displayed_slot_reuse() {
         let small = frame(1, 1);
         assert!(KittyFrame::encode(&small, 41, Some(41), 120, 40).is_err());
+        assert!(KittyFrame::encode(&small, 0, Some(41), 120, 40).is_err());
+        assert!(KittyFrame::encode(&small, 41, Some(0), 120, 40).is_err());
+        assert!(KittyFrame::encode(&small, 41, None, 0, 40).is_err());
+        assert!(KittyFrame::encode(&small, 41, None, 120, 0).is_err());
         let first = KittyFrame::encode(&small, 41, None, 120, 40).unwrap();
-        assert!(first.retire_previous().is_empty());
-        assert!(first.upload().ends_with(b"\x1b\\"));
+        let first_payload = std::str::from_utf8(first.wire())
+            .unwrap()
+            .strip_prefix("\x1b[H\x1b_Ga=T,t=d,f=100,s=1,v=1,i=41,p=1,C=1,c=120,r=40,q=1,m=0;")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap();
+        let png = STANDARD.decode(first_payload).unwrap();
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(decoded.dimensions(), (1, 1));
+        assert_eq!(decoded.as_raw(), small.pixels());
         let large = frame(1800, 1200);
         let encoded = KittyFrame::encode(&large, 41, None, 120, 40).unwrap();
-        assert!(encoded.upload().len() > 8 * 1024 * 1024);
-        let payload: String = std::str::from_utf8(encoded.upload())
+        assert!(encoded.wire().len() > 8 * 1024 * 1024);
+        let payload: String = std::str::from_utf8(encoded.wire())
+            .unwrap()
+            .strip_prefix("\x1b[H")
+            .unwrap()
+            .strip_suffix("\x1b\\")
             .unwrap()
             .split("\x1b\\")
-            .filter(|packet| !packet.is_empty())
             .map(|packet| packet.split_once(';').unwrap().1)
             .collect();
         let png = STANDARD.decode(payload).unwrap();
@@ -237,6 +250,7 @@ mod tests {
         assert_eq!(decoded.dimensions(), (1800, 1200));
         assert_eq!(decoded.as_raw(), large.pixels());
         assert_eq!(encoded.token(), large.token());
+        assert!(capability_query(0).is_err());
         assert_eq!(
             capability_query(99).unwrap(),
             b"\x1b_Ga=q,t=d,f=32,s=1,v=1,i=99;AAAAAA==\x1b\\"
@@ -245,5 +259,8 @@ mod tests {
             cleanup(41, 73).unwrap(),
             b"\x1b_Ga=d,d=I,i=41,q=2\x1b\\\x1b_Ga=d,d=I,i=73,q=2\x1b\\"
         );
+        assert!(cleanup(0, 73).is_err());
+        assert!(cleanup(41, 0).is_err());
+        assert!(cleanup(41, 41).is_err());
     }
 }

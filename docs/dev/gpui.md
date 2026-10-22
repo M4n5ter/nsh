@@ -208,6 +208,12 @@ draw's pixels. The output writer publishes the pair after its successful present
 bounded frame-token table until queued input releases each snapshot; unknown and retired tokens are rejected.
 Snapshots stay on the GPUI thread and retain native view identities and immutable hit geometry.
 
+For Kitty output, `nsh-gpui-terminal::kitty::KittyFrame::wire` contains one complete `q=1` upload followed by
+retirement of the old owned image. The sole output owner writes and flushes the whole wire indivisibly before
+publishing its native input snapshot with `mark_presented`. Success replies do not gate publication; the sole
+reader ends the graphics session on any negative reply for either owned slot, including a late error. The
+independent capability query still requires its own positive reply. A completed flush does not prove display vsync.
+
 Home and End stay on the nearest enabled Scroll containing the native focus, including when it is already at that
 edge or its content fits. Editors retain their own Home and End behavior. Arrow keys, page keys and wheels keep
 their existing scroll chaining.
