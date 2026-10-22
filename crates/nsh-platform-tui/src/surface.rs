@@ -945,6 +945,7 @@ impl Surface {
                     if focus_command {
                         if !requested_focus {
                             focus_reveal = None;
+                            self.focus_history.clear();
                         } else if self.focus != old_focus || self.focus.is_none() {
                             let target = self.node(id).map(|node| (id, node.generation));
                             if focus_reveal.as_ref().map(|reveal| reveal.target) != target {
