@@ -108,6 +108,25 @@ pub(crate) struct TerminalLayout {
     metrics: CellMetrics,
 }
 
+impl TerminalLayout {
+    /// Visible attachments keep their original UTF-16 placeholder identity.
+    pub(crate) fn attachment_rects<'a>(
+        &'a self,
+        text: &'a AttributedText,
+    ) -> impl Iterator<Item = (u32, Bounds<Points>)> + 'a {
+        text.attachments
+            .iter()
+            .zip(&self.attachments)
+            .filter_map(|(attachment, at)| {
+                let at = (*at)?;
+                (attachment.width > Points::ZERO && attachment.height > Points::ZERO).then_some((
+                    attachment.index,
+                    Bounds::new(at, Size::new(attachment.width, attachment.height)),
+                ))
+            })
+    }
+}
+
 #[derive(Debug)]
 struct Line {
     start: usize,

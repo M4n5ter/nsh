@@ -143,7 +143,7 @@ impl Surface {
     ) -> Option<(NodeId, nsh_core::Bounds<nsh_core::Points>)> {
         let (owner, link) = self.text_link(id)?;
         let node = self.node(owner)?;
-        let (_, layout, content) = node.text.as_ref()?;
+        let (text, layout, content) = node.text.as_ref()?;
         let layout = layout.downcast::<crate::text::TerminalLayout>()?;
         let frame = self.presentation_frame(owner)?;
         let sx = if node.frame.size.width.0 > 0.0 {
@@ -156,19 +156,36 @@ impl Surface {
         } else {
             1.0
         };
-        let mut bounds: Option<nsh_core::Bounds<nsh_core::Points>> = None;
-        for run in layout
+        let runs = layout
             .runs
             .iter()
             .filter(|run| run.width > 0 && run.start < link.end && run.end > link.start)
-        {
-            let rect = nsh_core::Bounds::new(
-                nsh_core::Point::new(content.origin.x * sx + run.x, content.origin.y * sy + run.y),
-                nsh_core::Size::new(
-                    f32::from(run.width) * self.metrics.width(),
-                    self.metrics.height(),
-                ),
-            );
+            .map(|run| {
+                nsh_core::Bounds::new(
+                    nsh_core::Point::new(
+                        content.origin.x * sx + run.x,
+                        content.origin.y * sy + run.y,
+                    ),
+                    nsh_core::Size::new(
+                        f32::from(run.width) * self.metrics.width(),
+                        self.metrics.height(),
+                    ),
+                )
+            });
+        let attachments = layout
+            .attachment_rects(text)
+            .filter(|(index, _)| *index >= link.start && *index < link.end)
+            .map(|(_, rect)| {
+                nsh_core::Bounds::new(
+                    nsh_core::Point::new(
+                        content.origin.x + rect.origin.x,
+                        content.origin.y + rect.origin.y,
+                    ),
+                    rect.size,
+                )
+            });
+        let mut bounds: Option<nsh_core::Bounds<nsh_core::Points>> = None;
+        for rect in runs.chain(attachments) {
             bounds = Some(match bounds {
                 None => rect,
                 Some(old) => {
@@ -2353,16 +2370,32 @@ impl Surface {
     }
 
     fn text_link_at(&self, id: NodeId, x: f32, y: f32) -> Option<NodeId> {
-        let (run, x, y) = self.text_run_at(id, x, y)?;
-        if x < run.x.0
-            || x >= run.x.0 + run.width as f32 * self.metrics.width().0
-            || y < run.y.0
-            || y >= run.y.0 + self.metrics.height().0
-        {
-            return None;
-        }
-        let (text, _, _) = self.node(id)?.text.as_ref()?;
-        text.link_at(run.start)
+        let (text, layout, content) = self.node(id)?.text.as_ref()?;
+        let attachment = (!text.attachments.is_empty())
+            .then(|| {
+                let layout = layout.downcast::<crate::text::TerminalLayout>()?;
+                let (x, y) = self.surface_to_local(id, x, y)?;
+                layout.attachment_rects(text).find_map(|(index, rect)| {
+                    crate::surface::contains(rect, x - content.origin.x.0, y - content.origin.y.0)
+                        .then_some(index)
+                })
+            })
+            .flatten();
+        let index = match attachment {
+            Some(index) => index,
+            None => {
+                let (run, x, y) = self.text_run_at(id, x, y)?;
+                if x < run.x.0
+                    || x >= run.x.0 + run.width as f32 * self.metrics.width().0
+                    || y < run.y.0
+                    || y >= run.y.0 + self.metrics.height().0
+                {
+                    return None;
+                }
+                run.start
+            }
+        };
+        text.link_at(index)
             .filter(|link| link.is_enabled())
             .map(|link| link.node)
     }
@@ -5826,6 +5859,129 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, SurfaceEvent::Event(12, EventKind::Press, _)))
         );
+
+        // A pure image link has no TerminalRun. It wraps after CJK and a
+        // surrogate pair, then occupies two rows at its real attachment size.
+        // The transparent attachment root lets the paragraph own the contact.
+        let mut surface = Surface::new(12, 8, crate::CellMetrics::default());
+        let style = ResolvedTextStyle::default();
+        let mut text = AttributedText {
+            selectable: Some(true),
+            ..Default::default()
+        };
+        text.push("中😀", style);
+        text.push_attachment(Size::new(px(16.0), px(32.0)), style);
+        text.push("!", style);
+        let mut props = nsh_core::ViewProps::default();
+        props.focusable = Some(true);
+        props.accessibility.role = Some(nsh_core::AccessibilityRole::Link);
+        props.accessibility.label = Some("Photo".into());
+        text.links.push(TextLink {
+            start: 3,
+            end: 4,
+            node: 10,
+            events: mask(&[EventKind::Press]),
+            props: Arc::new(props),
+        });
+        let content = Bounds::new(Point::new(px(8.0), px(16.0)), Size::new(px(32.0), px(64.0)));
+        let layout = engine.layout(&engine.prepare(&text), content.size);
+        let mut items = create(2, ViewKind::Text, ROOT_ID, 0.0);
+        items.push(MountItem::Frame {
+            id: 2,
+            frame: Bounds::new(Point::new(px(8.0), px(16.0)), Size::new(px(48.0), px(80.0))),
+        });
+        items.push(MountItem::Text {
+            id: 2,
+            text: Arc::new(text.clone()),
+            layout: layout.clone(),
+            content,
+        });
+        items.extend(create(4, ViewKind::View, 2, 0.0));
+        items.push(MountItem::Frame {
+            id: 4,
+            frame: Bounds::new(Point::new(px(8.0), px(32.0)), Size::new(px(16.0), px(32.0))),
+        });
+        let mut props = nsh_core::ViewProps::default();
+        props.pointer_events = PointerEvents::None;
+        items.push(MountItem::ViewProps {
+            id: 4,
+            props: Box::new(props),
+        });
+        items.extend(create(6, ViewKind::Image, 4, 0.0));
+        items.push(MountItem::Frame {
+            id: 6,
+            frame: Bounds::new(Point::default(), Size::new(px(16.0), px(32.0))),
+        });
+        surface.apply(MountBatch { items });
+        let mouse = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let presses = |surface: &Surface| {
+            surface
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    SurfaceEvent::Event(id, EventKind::Press, _) => Some(*id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        surface.events.clear();
+        surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 2, 3));
+        assert_eq!(presses(&surface), [10]);
+        surface.set_focus(Some(2));
+        key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(surface.focused(), Some(10));
+        let semantics = surface.accessibility_snapshot();
+        let image_link = semantics.iter().find(|node| node.id == 10).unwrap();
+        assert_eq!(image_link.role, nsh_core::AccessibilityRole::Link);
+        assert_eq!(image_link.label, "Photo");
+        assert!(image_link.focused);
+        assert_eq!(
+            image_link.frame,
+            Bounds::new(
+                Point::new(px(16.0), px(48.0)),
+                Size::new(px(16.0), px(32.0))
+            )
+        );
+        key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut surface, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(presses(&surface), [10, 10, 10]);
+
+        surface.events.clear();
+        surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        surface.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 4));
+        surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 5, 4));
+        assert_eq!(presses(&surface), []);
+
+        surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        surface.apply(MountBatch {
+            items: vec![MountItem::Command {
+                id: 10,
+                command: nsh_core::Command::Focus,
+            }],
+        });
+        assert_eq!(surface.focused(), Some(10));
+        text.links.clear();
+        surface.apply(MountBatch {
+            items: vec![MountItem::Text {
+                id: 2,
+                text: Arc::new(text),
+                layout,
+                content,
+            }],
+        });
+        assert_eq!(surface.focused(), Some(2));
+        assert!(surface.pointer.is_none());
+        surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 2, 3));
+        key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(presses(&surface), []);
     }
 
     #[test]
