@@ -159,8 +159,6 @@ impl Node {
 /// paint it into the host's buffer, then forward [`Self::drain_events`] to
 /// the engine. [`crate::AppView`] combines these steps with an engine.
 pub struct Surface {
-    pub(crate) input_instance: Arc<()>,
-    pub(crate) presented_press: Option<crate::PressLease>,
     pub(crate) nodes: Vec<Option<Node>>,
     pub(crate) metrics: CellMetrics,
     pub(crate) columns: u16,
@@ -223,8 +221,6 @@ impl Surface {
     pub fn new(columns: u16, rows: u16, metrics: CellMetrics) -> Self {
         let fonts = crate::fonts::FontCatalog::default();
         let mut surface = Self {
-            input_instance: Arc::new(()),
-            presented_press: None,
             nodes: vec![None, Some(Node::new(ViewKind::View))],
             metrics,
             columns,
@@ -871,7 +867,6 @@ impl Surface {
                     }) == nsh_core::platform::ColorScheme::Dark
                 }
                 MountItem::Animation(op) => {
-                    self.presented_animation_changed(&op);
                     self.animation.apply(op, &mut finished);
                 }
                 MountItem::AnimationBindings { id, bindings } => {

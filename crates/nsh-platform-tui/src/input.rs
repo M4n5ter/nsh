@@ -1449,7 +1449,7 @@ impl Surface {
                 .filter(|node| node.kind == ViewKind::Scroll && node.scroll.enabled)
                 .map(|node| node.scroll.horizontal)
         };
-        // Detents retain their owner at content edges, including published leases.
+        // Detents retain their owner at content edges.
         nsh_core::input::scroll_target(
             path,
             px(if horizontal { 1.0 } else { 0.0 }),
@@ -1462,7 +1462,7 @@ impl Surface {
     /// Handles consecutive identical wheel detents against one hit-tested target.
     ///
     /// The host groups only events with the same coordinates, direction and
-    /// modifiers from one presented frame. Native scrolling applies their total
+    /// modifiers. Native scrolling applies their total
     /// delta once, so moving content cannot retarget later detents to a nested
     /// scroll view. Returns the number consumed; zero steps and non-wheel events
     /// do nothing. Host components accept only one detent per call, allowing the
@@ -2373,49 +2373,7 @@ impl Surface {
         }
     }
 
-    pub(crate) fn sealed_pointer_owner(&self) -> Option<NodeId> {
-        let pointer = self.pointer.as_ref()?;
-        if pointer.native.is_some()
-            || pointer.scroll.is_some()
-            || pointer.pan.is_some()
-            || pointer.link.is_some()
-            || pointer.navigation
-            || self.drag_input.is_some()
-        {
-            return None;
-        }
-        pointer.pressable
-    }
-
-    pub(crate) fn native_pan_owner(&self) -> Option<NodeId> {
-        let pointer = self.pointer.as_ref()?;
-        if pointer.native.is_some()
-            || pointer.scroll.is_some()
-            || pointer.pressable.is_some()
-            || pointer.link.is_some()
-            || pointer.navigation
-            || self.drag_input.is_some()
-        {
-            return None;
-        }
-        pointer.pan.or(pointer.pan_candidate)
-    }
-
-    pub(crate) fn clear_sealed_pointer(&mut self) {
-        self.pointer = None;
-        self.presented_press = None;
-        self.drag_input = None;
-        self.set_pressed(None);
-    }
-
     fn cancel_pointer(&mut self) {
-        if self.presented_press.is_some() {
-            // An id may now denote another sealed action. Clear capture
-            // without dispatching an old PressUp, TouchCancel or PanEnd into
-            // that replacement binding.
-            self.clear_sealed_pointer();
-            return;
-        }
         if let Some(pointer) = self.pointer.as_ref().filter(|pointer| {
             pointer.scroll.is_none() && pointer.native.is_none() && !pointer.navigation_claimed
         }) {
@@ -2447,9 +2405,6 @@ impl Surface {
     }
 
     pub(crate) fn input_pending(&self) -> bool {
-        if self.presented_press.is_some() {
-            return false;
-        }
         self.pointer.as_ref().is_some_and(|pointer| {
             !pointer.moved
                 && !pointer.long_fired
@@ -2461,11 +2416,6 @@ impl Surface {
     }
 
     pub(crate) fn input_tick(&mut self) -> bool {
-        if self.presented_press.is_some() {
-            // A sealed ordinary press never owns a LongPress callback,
-            // including one subsequently installed on a recycled node id.
-            return false;
-        }
         let Some(pointer) = self.pointer.as_ref() else {
             return false;
         };
@@ -3969,7 +3919,8 @@ mod tests {
         assert_eq!(surface.node(4).unwrap().scroll.y.0, 48.0);
     }
 
-    fn assert_nested_wheel_axes(presented: bool) {
+    #[test]
+    fn nested_wheels_keep_vertical_motion_outside_horizontal_readers() {
         use nsh_core::{MountBatch, MountItem};
 
         for (width, kind, modifiers, expected_x, expected_y) in [
@@ -4031,12 +3982,7 @@ mod tests {
                 row: 0,
                 modifiers,
             };
-            if presented {
-                let lease = surface.input_snapshot().wheel_at(mouse).unwrap();
-                assert_eq!(surface.handle_presented_wheel(mouse, 1, &lease), Some(1));
-            } else {
-                assert_eq!(surface.handle_wheel(mouse, 1), 1);
-            }
+            assert_eq!(surface.handle_wheel(mouse, 1), 1);
             assert_eq!(
                 (
                     surface.node(4).unwrap().scroll.x.0,
@@ -4045,19 +3991,9 @@ mod tests {
                     surface.node(2).unwrap().scroll.y.0,
                 ),
                 (expected_x, 0.0, 0.0, expected_y),
-                "presented={presented} width={width} kind={kind:?}"
+                "width={width} kind={kind:?}"
             );
         }
-    }
-
-    #[test]
-    fn nested_wheels_keep_vertical_motion_outside_horizontal_readers() {
-        assert_nested_wheel_axes(false);
-    }
-
-    #[test]
-    fn presented_nested_wheels_keep_vertical_motion_outside_horizontal_readers() {
-        assert_nested_wheel_axes(true);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use nsh_core::{
     geometry::{REM_SIZE, Radians, px},
 };
 
-use crate::{scroll::ScrollbarGeometry, surface::Surface};
+use crate::surface::Surface;
 
 #[derive(Default)]
 pub(crate) struct GeometryCache {
@@ -78,7 +78,7 @@ pub(crate) fn unproject(matrix: &Matrix, x: f32, y: f32) -> Option<(f32, f32)> {
     (point.0.is_finite() && point.1.is_finite()).then_some(point)
 }
 
-/// One immutable scene sample shared by live and queued pointer hit testing.
+/// One immutable geometry sample for live pointer hit testing.
 /// Only visible nodes are candidates; their ancestors are retained once for
 /// pointer gates and exact rounded clipping, without cloning a chain per hit.
 #[derive(Clone, Debug)]
@@ -99,18 +99,12 @@ struct HitRecord {
     modal: bool,
     hit_slop: EdgeInsets,
     clip: Bounds<Points>,
-    scrollbar: Option<ScrollbarGeometry>,
 }
 
 impl HitSnapshot {
     fn record(&self, id: NodeId) -> Option<&HitRecord> {
         let index = self.index_by_id.get(id as usize).copied().flatten()?;
         self.records.get(index)
-    }
-
-    /// Visible nodes in paint order, before pointer and clip filtering.
-    pub(crate) fn visible_ids(&self) -> &[NodeId] {
-        &self.order
     }
 
     /// The same reverse paint order, pointer gates and clip tests as live input.
@@ -168,37 +162,6 @@ impl HitSnapshot {
         })
     }
 
-    /// The composed transform and local size at the instant this sample was made.
-    pub(crate) fn geometry(&self, id: NodeId) -> Option<(Matrix, Size<Points>)> {
-        self.record(id)?.geometry
-    }
-
-    /// The viewport and ancestor rectangle intersection used by hit testing.
-    /// Rounded ancestor masks are also checked by [`Self::hit_test`].
-    pub(crate) fn clip_rect(&self, id: NodeId) -> Option<Bounds<Points>> {
-        Some(self.record(id)?.clip)
-    }
-
-    /// Uses the same native scrollbar geometry that takes pointer capture live.
-    pub(crate) fn scrollbar_hit(&self, id: NodeId, x: f32, y: f32) -> bool {
-        self.record(id)
-            .and_then(|node| node.scrollbar.as_ref())
-            .is_some_and(|scrollbar| scrollbar.contains(x, y))
-    }
-
-    /// Includes the node itself and its ancestors, matching input's owner lookup.
-    pub(crate) fn ancestors(&self, id: NodeId) -> Vec<NodeId> {
-        let mut result = Vec::new();
-        let mut next = Some(id);
-        while let Some(id) = next {
-            if result.contains(&id) {
-                break;
-            }
-            result.push(id);
-            next = self.record(id).and_then(|node| node.parent);
-        }
-        result
-    }
 }
 
 impl Surface {
@@ -238,7 +201,6 @@ impl Surface {
                 modal: node.kind == ViewKind::Modal,
                 hit_slop: node.props.hit_slop,
                 clip: self.clip_rect(id),
-                scrollbar: self.scrollbar_geometry(id),
             });
             if let Some(parent) = node.parent {
                 pending.push(parent);

@@ -413,13 +413,7 @@ runners remain console applications.
 | `Surface::input_context() -> Option<InputContext>` | Snapshot editing hints and generation; secure text is omitted |
 | `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
 | `Surface::handle_event(Event)`; `drain_events()` | Accept input and forward ordered `SurfaceEvent`s |
-| `Surface::input_snapshot() -> InputSnapshot` | Sample immutable native hit geometry, sealed press bindings and scroll owners |
-| `InputSnapshot::press_at(u16, u16) -> Option<PressLease>` | Resolve a cell in the published presentation to an ordinary left press |
-| `InputSnapshot::wheel_at(u16, u16) -> Option<WheelLease>` | Resolve a cell to its original native scroll owner |
-| `Surface::handle_presented_wheel(MouseEvent, u16, &WheelLease) -> Option<u16>` | Validate that scroll owner and return the number of consumed detents, or `None` for a rejected route |
-| `Surface::handle_presented_mouse(MouseEvent, &PressLease) -> Option<bool>` | Validate and deliver Down, Drag or Up using the same original lease |
-| `PressLease::target() -> NodeId`; `binding() -> u64` | Identify the native activation owner and VM-local binding for engine validation |
-| `Surface::handle_wheel(MouseEvent, u16) -> u16` | Apply identical frame-local wheel detents to one hit-tested owner and report consumed detents |
+| `Surface::handle_wheel(MouseEvent, u16) -> u16` | Apply consecutive identical wheel detents to one live hit-tested owner and report consumed detents |
 | `Surface::set_host_services_enabled(bool)` | Route service requests to the embedding host without terminal IO |
 | `Surface::complete_clipboard(u32, bool, Result<ClipboardContent, String>)` | Complete a host clipboard read with the current capability check |
 | `Surface::complete_paste(InputEdit, Result<ClipboardContent, String>)` | Complete a paste while its focused input, selection and edit count still match |
@@ -450,13 +444,13 @@ backend swaps buffers. The host owns whole-frame admission and retry ordering;
 this method does not roll back earlier protocol state or terminal output and
 cannot restore a Kitty upload already consumed by `render`.
 
-Hosts driving a `Surface` with `nsh_engine::LocalEngine` retain an
-exact-presentation path for input. They deliver presented input through
-`LocalEngine::dispatch_event_now(NodeId, EventKind, EventPayload)` before
-`pump()`, then apply every produced mount batch in order. The host keeps
-both the VM and surface at that presentation until its terminal output
-completes; freezing the surface alone would leave recycled list callbacks
-pointing at newer items. During otherwise idle probes,
+Hosts driving a `Surface` with `nsh_engine::LocalEngine` route input through
+`Surface::handle_event` or `Surface::handle_wheel` against the current mounted
+scene. The surface owns native pointer capture, selection, gestures and focus.
+They forward each resulting `SurfaceEvent` in order through the engine's
+`EngineControl`, using `dispatch_event(NodeId, EventKind, EventPayload)` for
+application events before `pump()`, then apply every produced mount batch in order. Engine work
+and native input continue while terminal output completes. During idle probes,
 `LocalEngine::needs_pump() -> bool` reads queued messages and due deadlines
 without running app code; native input and synchronous dispatch still
 require a pump.
@@ -471,39 +465,11 @@ it runs no JS, pumps no work and advances no timers. `AppView` forwards the
 surface's path automatically. Empty paths clear the snapshot, so no focus
 and removed scopes cannot keep a terminal binding eligible.
 
-Ordinary left presses using [`inputAction`](js-modules.md#captured-input-actions)
-can instead use a presentation lease. Sample `Surface::input_snapshot()`
-with the rendered frame and publish that snapshot only after its terminal
-bytes have flushed successfully. Resolve Down with `InputSnapshot::press_at`
-and keep the resulting `PressLease` unchanged for Down, Drag and Up.
-`Surface::handle_presented_mouse` validates the native route; before any
-resulting callback enters JS, the host must also use
-`LocalEngine::dispatch_bound_event_now(NodeId, EventKind, EventPayload, u64)`
-with the lease's binding. Revoke the presentation's remaining admitted
-inputs on the first application callback. A stale native or engine lease
-is rejected rather than retargeted. An absent lease uses the existing
-exact-presentation path, as do keyboard, selection, gestures and opaque
-callbacks. The snapshot owns geometry and binding data, not an
-engine or mutable scene.
-
-For ordinary wheel input, resolve `InputSnapshot::wheel_at(column, row)`
-and pass its `WheelLease` to `Surface::handle_presented_wheel`. The lease
-keeps the original native scroll owner even if its content or offset changes.
-A changed view incarnation, ancestry, viewport, modal scope, geometry or
-scroll policy rejects the route; it never retargets to a newly hit nested
-scroll view. `None` rejects a stale or unsupported route, while `Some(n)`
-reports consumed detents. Queued scroll events report the owner's current
-offset, not a captured application callback. Ctrl+wheel zoom, immediate
-application callbacks and events without a wheel lease keep the host's
-exact-presentation path.
-
 `Surface::handle_wheel` accepts consecutive wheel detents
-with identical coordinates, direction and modifiers from one presented
-frame. It hit-tests once and applies the accumulated scroll delta once;
+with identical coordinates, direction and modifiers. It hit-tests the current
+scene once and applies the accumulated scroll delta once;
 a host component receives at most one detent before the host dispatches
-its callbacks and admits another frame. This entry point does not freeze values read by
-multiple callbacks, so the host must validate the whole physical input's
-target sequence before dispatch. Raw `Surface` hosts opt into service
+its callbacks and delivers more input. Raw `Surface` hosts opt into service
 requests explicitly with `set_host_services_enabled`; clipboard reads and
 pastes are completed through the checked methods above.
 
