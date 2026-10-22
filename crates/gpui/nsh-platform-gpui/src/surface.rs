@@ -981,7 +981,7 @@ mod tests {
             }
             view.with_children(|children| children.iter().find_map(|view| target(view, label)))
         }
-        fn wait(surface: &Rc<Surface>, ready: impl Fn() -> bool) {
+        fn wait(surface: &Rc<Surface>, stage: &str, ready: impl Fn() -> bool) {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let (tx, rx) = crossbeam_channel::bounded(1);
@@ -990,10 +990,15 @@ mod tests {
                 });
                 rx.recv_timeout(Duration::from_secs(5)).unwrap();
                 surface.drain();
+                // A native frame also settles scroll extents after content shrinks.
+                surface.tick();
                 if ready() {
                     return;
                 }
-                assert!(Instant::now() < deadline, "native list did not settle");
+                assert!(
+                    Instant::now() < deadline,
+                    "native list did not settle: {stage}"
+                );
             }
         }
         fn press(surface: &Rc<Surface>, label: &str) {
@@ -1040,9 +1045,13 @@ mod tests {
             );
             (surface, app)
         });
-        wait(&surface, || target(&surface.root, "row 0").is_some());
+        wait(&surface, "initial rows", || {
+            target(&surface.root, "row 0").is_some()
+        });
         press(&surface, "Scroll to twelve");
-        wait(&surface, || target(&surface.root, "row 20").is_some());
+        wait(&surface, "scroll to twelve", || {
+            target(&surface.root, "row 20").is_some()
+        });
         let retained = target(&surface.root, "row 12").unwrap();
         assert!(crate::input::focus_view(&surface, &retained));
         tab(&surface, false);
@@ -1051,14 +1060,18 @@ mod tests {
         assert_eq!(focused(&surface).as_deref(), Some("row 12"));
 
         press(&surface, "Scroll to thirteen");
-        wait(&surface, || target(&surface.root, "row 21").is_some());
+        wait(&surface, "scroll to thirteen", || {
+            target(&surface.root, "row 21").is_some()
+        });
         assert_eq!(target(&surface.root, "row 12"), Some(retained));
         assert_eq!(focused(&surface).as_deref(), Some("row 12"));
 
         let replaced = target(&surface.root, "row 20").unwrap();
         assert!(crate::input::focus_view(&surface, &replaced));
         press(&surface, "Filter rows");
-        wait(&surface, || target(&surface.root, "match beta").is_some());
+        wait(&surface, "filtered rows", || {
+            target(&surface.root, "match beta").is_some()
+        });
         assert_ne!(focused(&surface).as_deref(), Some("match alpha"));
         assert_ne!(focused(&surface).as_deref(), Some("match beta"));
         assert!(crate::input::focus_view(
