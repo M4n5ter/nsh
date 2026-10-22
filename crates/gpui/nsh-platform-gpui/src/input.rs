@@ -1103,17 +1103,140 @@ pub(crate) fn focusable(surface: &Surface, view: &NshView) -> bool {
             || has_press(s.events))
 }
 
-/// A removed recycling slot cannot transfer focus to a new row inserted
-/// in the same batch. A sibling reorder uses Insert and keeps its owner.
+/// Ends one existing native contact without firing its application press.
+/// Both explicit physical cancellation and subtree removal use this path.
+fn cancel_contact(surface: &Rc<Surface>, mut pointer: Pointer) {
+    if let Some(item) = pointer.item.take() {
+        item.send(
+            surface,
+            PointerKind::Cancel,
+            (pointer.x, pointer.y),
+            1,
+            pointer.modifiers,
+        );
+    }
+    release_pressed(surface, &mut pointer);
+    if let Mode::Thumb(view, _) | Mode::Scroll(view, _) = &pointer.mode {
+        crate::scroll::cancel_pointer(surface, view);
+    }
+    if pointer.reporting {
+        surface.control(|control| control.cancel_touch(pointer.id));
+    }
+    if pointer.key == Key::Mouse {
+        surface.input_pressed.set(surface.input_pressed.get() & !1);
+    }
+}
+
+/// Retire this subtree's native contacts and focus before real removal.
+/// Insert-only moves preserve the current contact and editor caret.
 pub(crate) fn retire_focus_within(surface: &Rc<Surface>, root: &NshView) {
-    let contains = |view: NshView| {
-        std::iter::successors(Some(view), NshView::parent_view).any(|view| &view == root)
-    };
+    let contains = |view: &NshView| chain(view).contains(root);
+    let input = &surface.input;
+    let keys = input
+        .pointers
+        .borrow()
+        .iter()
+        .filter(|pointer| {
+            contains(&pointer.target)
+                || pointer
+                    .press
+                    .as_ref()
+                    .is_some_and(|press| contains(&press.view))
+                || pointer
+                    .item
+                    .as_ref()
+                    .is_some_and(|item| contains(item.view()))
+                || match &pointer.mode {
+                    Mode::Pan(view) | Mode::Scroll(view, _) | Mode::Thumb(view, _) => {
+                        contains(view)
+                    }
+                    Mode::Idle | Mode::Free | Mode::TwoFinger => false,
+                }
+                || pointer.candidates.iter().any(|(view, _)| contains(view))
+                || pointer.pressed.iter().any(contains)
+                || pointer.pinch.as_ref().is_some_and(contains)
+        })
+        .map(|pointer| pointer.key)
+        .collect::<Vec<_>>();
+    for key in keys {
+        let Some(pointer) = take(surface, key) else {
+            continue;
+        };
+        cancel_contact(surface, pointer);
+    }
+    if input
+        .zoom
+        .borrow()
+        .as_ref()
+        .is_some_and(|(transform, _)| contains(&transform.view))
+    {
+        input.zoom.borrow_mut().take();
+    }
+    if input
+        .pinch
+        .borrow()
+        .as_ref()
+        .is_some_and(|(transform, _)| contains(&transform.view))
+    {
+        input.pinch.borrow_mut().take();
+    }
+    if input
+        .two
+        .borrow()
+        .as_ref()
+        .is_some_and(|two| contains(&two.transform.view))
+    {
+        let two = input.two.borrow_mut().take().unwrap();
+        for pointer in input.pointers.borrow_mut().iter_mut() {
+            if two.keys.contains(&pointer.key) {
+                pointer.mode = Mode::Free;
+            }
+        }
+    }
+    if input
+        .wheel
+        .borrow()
+        .as_ref()
+        .is_some_and(|wheel| contains(&wheel.view))
+    {
+        let wheel = input.wheel.borrow_mut().take().unwrap();
+        crate::scroll::cancel_pointer(surface, &wheel.view);
+    }
+    if input
+        .latch
+        .borrow()
+        .as_ref()
+        .is_some_and(|(view, _, _)| contains(view))
+    {
+        input.latch.borrow_mut().take();
+    }
+    let hovered = input.hovered.take();
+    for view in hovered {
+        if contains(&view) {
+            set_state(surface, &view, HOVERED, false);
+        } else {
+            input.hovered.borrow_mut().push(view);
+        }
+    }
+    if input
+        .hover_item
+        .borrow()
+        .as_ref()
+        .is_some_and(|item| contains(item.view()))
+    {
+        let item = input.hover_item.borrow_mut().take().unwrap();
+        if let Some(at) = input.last.get() {
+            item.send(surface, PointerKind::Leave, at, 0, Modifiers::default());
+        }
+    }
     let native = crate::native::requested_focus(surface)
         .or_else(|| crate::native::focused_component(surface))
         .and_then(|id| surface.view(id))
+        .as_ref()
         .is_some_and(contains);
-    let nsh = crate::text_input::focused_view(surface).is_some_and(contains);
+    let nsh = crate::text_input::focused_view(surface)
+        .as_ref()
+        .is_some_and(contains);
     if native {
         crate::native::focus_surface(surface);
     }

@@ -294,6 +294,22 @@ impl FocusReturns {
             }
         }
 
+        // A retained popup can be removed and reinserted in one batch.
+        // Its old focused control was retired, but its original opener and
+        // logical scope survived. Resume inside that final active popup.
+        if !explicit
+            && now.is_none()
+            && before.focused.is_none()
+            && let Some(popup) = self
+                .popups
+                .iter()
+                .find(|popup| Some(&popup.view) == before.owner.as_ref())
+            && contains(&crate::navigation::focus_scope(surface), &popup.view)
+            && let Some(target) = crate::input::first_focus_stop(surface, &popup.view)
+        {
+            return Some(target);
+        }
+
         // A pointer press outside may have moved focus before the app's
         // close batch. Only the departing owner can give focus back.
         if blurred && now.is_none() {
@@ -304,6 +320,35 @@ impl FocusReturns {
             None => previous_owner,
         };
         restore_target(surface, &self.popups, &closing, returning, eligible)
+    }
+}
+
+fn retire_target(root: &NshView, target: &mut Option<NshView>) {
+    if target.as_ref().is_some_and(|view| contains(root, view)) {
+        target.take();
+    }
+}
+
+/// Revoke saved targets while the removed root still has its old ancestry.
+/// Logical scope parents remain available to unwind a popup/modal chain.
+pub(crate) fn retiring(surface: &Surface, root: &NshView) {
+    for popup in &mut surface.focus_returns.borrow_mut().popups {
+        retire_target(root, &mut popup.restore);
+    }
+    for (view, target) in crate::navigation::focus_returns(surface) {
+        if target.as_ref().is_some_and(|target| contains(root, target)) {
+            crate::navigation::set_focus_return(surface, &view, None);
+        }
+    }
+}
+
+/// A batch's captured targets follow the same real-removal boundary.
+pub(crate) fn retire_before(before: Option<&mut BeforeBatch>, root: &NshView) {
+    if let Some(before) = before {
+        retire_target(root, &mut before.focused);
+        for modal in &mut before.modals {
+            retire_target(root, &mut modal.restore);
+        }
     }
 }
 

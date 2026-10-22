@@ -149,6 +149,7 @@ impl Mounter {
             }
             MountItem::Remove { id } => {
                 if let Some(view) = &self.get(*id) {
+                    crate::focus_return::retiring(surface, view);
                     crate::input::retire_focus_within(surface, view);
                     crate::navigation::removing(surface, view);
                     // A removal animation detaches the view when it ends.
