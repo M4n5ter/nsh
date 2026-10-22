@@ -4,6 +4,17 @@ Performance is the project's first priority; the rules are in `AGENTS.md`. Chang
 after `nsh test --trace` timings and item counts (`nsh trace` before it, in the records below). Current baselines
 (Apple Silicon):
 
+List source publication on the updated pin (macOS Apple Silicon, unoptimized without debug info,
+five alternating pairs, `2f971948` → `28c011ed`): counter first/press work stays at 56/10 ops and
+49/7 mount items. Gallery `Bench.tsx` stays at 1226 ops / 1029 items initially and 1064 ops /
+961 items over a 3000 pt scroll. Full-scroll median core time was 151.91 → 164.81 ms, with ranges
+145.23–155.71 / 141.13–169.76 ms; initial core time was 4.73 → 5.21 ms. List-binding prepend
+stays at 19 ops / 22 items (median 1.19 → 1.18 ms), while removal changes 7 ops / 9 items to
+6 ops / 8 items (0.76 → 0.64 ms). All five pairs preserve the selected row after both splices.
+Timing ranges overlap: these traces establish bounded work and ordinary owner retention, not a
+latency improvement or production input behavior. The earlier comparison below used another base
+and build setup; its timings are not directly comparable with these.
+
 List source publication (macOS Apple Silicon, debug headless CLI, five alternating pairs against
 `36c0fa75`): `nsh test --trace` keeps counter first/press work at 56/10 ops and 49/7 mount items.
 Gallery `Bench.tsx` keeps 1226 ops / 1029 items initially and 1064 ops / 961 items over a 3000 pt
