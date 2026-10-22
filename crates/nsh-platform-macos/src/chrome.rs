@@ -46,7 +46,7 @@ use nsh_core::{
         DesktopCommand, Key, MenuAction, MenuItem, MenuRole, Shortcut, TitleBarStyle, WindowFrame,
         WindowLevel,
     },
-    platform::Insets,
+    geometry::{Edges, Points},
 };
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
@@ -57,7 +57,7 @@ use objc2::{
 use objc2_app_kit::{
     NSApplication, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel, NSMenu, NSMenuItem,
     NSNormalWindowLevel, NSRunningApplication, NSToolbar, NSWindow, NSWindowButton,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 use objc2_core_graphics::kCGDesktopIconWindowLevel;
 use objc2_foundation::{
@@ -192,18 +192,18 @@ pub(crate) fn update_area(surface: &Surface) {
                 })
                 .filter(|w| *w > 8.0)
                 .unwrap_or(TRAFFIC_LIGHTS_WIDTH);
-            Insets {
-                top: if height > 0.0 {
+            Edges {
+                top: Points(if height > 0.0 {
                     height
                 } else {
                     TITLE_BAR_HEIGHT
-                },
-                left,
-                right: 0.0,
-                bottom: 0.0,
+                }),
+                left: Points(left),
+                right: Points(0.0),
+                bottom: Points(0.0),
             }
         }
-        _ => Insets::default(),
+        _ => Edges::default(),
     };
     let mut env = surface.environment.get();
     if env.title_bar != area {
@@ -268,7 +268,7 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             }
         }
         DesktopCommand::SetTitleBar { style, height } => {
-            surface.chrome.height.set(*height);
+            surface.chrome.height.set(height.map(|h| h.0));
             surface.chrome.style.set(*style);
             apply_title_bar(surface);
         }
@@ -299,6 +299,27 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
                     WindowLevel::Floating => NSFloatingWindowLevel,
                     WindowLevel::DesktopIcon => kCGDesktopIconWindowLevel as isize,
                 });
+                // A desktop widget is a part of the desktop, not a window:
+                // it sits on every space, Mission Control does not list it
+                // (it could never be raised above normal windows anyway)
+                // and Cmd+` cycles past it. Ordinary levels stay managed.
+                window.setCollectionBehavior(match level {
+                    WindowLevel::DesktopIcon => {
+                        NSWindowCollectionBehavior::Stationary
+                            | NSWindowCollectionBehavior::CanJoinAllSpaces
+                            | NSWindowCollectionBehavior::IgnoresCycle
+                    }
+                    _ => NSWindowCollectionBehavior::MoveToActiveSpace,
+                });
+            }
+        }
+        DesktopCommand::OrderFront => {
+            if let (Some(window), Some(mtm)) = (window(surface), MainThreadMarker::new()) {
+                window.deminiaturize(None);
+                // activate() first: ordering a window front in an inactive
+                // app leaves it behind the front app's windows.
+                NSApplication::sharedApplication(mtm).activate();
+                window.makeKeyAndOrderFront(None);
             }
         }
         DesktopCommand::Close => {
@@ -309,15 +330,25 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         DesktopCommand::SetMenu(items) => set_menu(surface, items.as_deref()),
         DesktopCommand::PopupMenu { items, at } => {
             // The menu tracks the mouse in a loop of its own: not while the
-            // batch is applied.
+            // batch is applied. From the run loop, not the main queue: a
+            // main-queue block would hold the queue while the menu tracks,
+            // and the app's batches (which come through it) would wait.
             let key = surface.key();
             let items = items.clone();
-            let at = *at;
-            DispatchQueue::main().exec_async(move || {
+            let at = at.map(|p| (p.x.0, p.y.0));
+            let block = block2::RcBlock::new(move || {
                 if let Some(surface) = Surface::with_key(key) {
                     popup(&surface, &items, at);
                 }
             });
+            // SAFETY: the common modes' name is a constant of Foundation's.
+            let modes = objc2_foundation::NSArray::from_slice(&[unsafe {
+                objc2_foundation::NSRunLoopCommonModes
+            }]);
+            // SAFETY: the block runs on the main thread, where it was made.
+            unsafe {
+                objc2_foundation::NSRunLoop::mainRunLoop().performInModes_block(&modes, &block)
+            };
         }
     }
 }
@@ -326,14 +357,25 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
 /// (`setFrame`'s screen coordinates are the bottom left corner's).
 fn set_frame(window: &NSWindow, frame: &WindowFrame) {
     let current = window.frame();
-    let point = NSPoint::new(
-        frame.x.map_or(current.origin.x, f64::from),
-        frame.y.map_or(current.origin.y, f64::from),
-    );
+    let points = |v: nsh_core::Points| f64::from(v.0);
     let size = NSSize::new(
-        frame.width.map_or(current.size.width, f64::from),
-        frame.height.map_or(current.size.height, f64::from),
+        frame.width.map_or(current.size.width, points),
+        frame.height.map_or(current.size.height, points),
     );
+    // `anchorTop` keeps the top edge where it is: the bottom left origin
+    // would otherwise pin the bottom edge, and a content-height window
+    // resized around its middle.
+    let y = frame.y.map_or_else(
+        || {
+            if frame.anchor_top == Some(true) {
+                current.origin.y + current.size.height - size.height
+            } else {
+                current.origin.y
+            }
+        },
+        points,
+    );
+    let point = NSPoint::new(frame.x.map_or(current.origin.x, points), y);
     window.setFrame_display_animate(
         NSRect::new(point, size),
         true,
@@ -679,6 +721,51 @@ fn restore_menu(app: &NSApplication) {
     }
 }
 
+#[cfg(feature = "dev")]
+thread_local! {
+    /// The context menu tracking now, for the test agent to choose from
+    /// ([`choose_open_menu`]).
+    static OPEN_MENU: std::cell::RefCell<Option<Retained<NSMenu>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Chooses the item of the open context menu at the end of `path` (the
+/// labels of the submenus on the way, then its own), as a click on it
+/// does, and closes the menu (`nsh test --target macos`).
+#[cfg(feature = "dev")]
+pub(crate) fn choose_open_menu(path: &[String]) -> Result<(), String> {
+    let root = OPEN_MENU
+        .with(|open| open.borrow().clone())
+        .ok_or("no context menu is open")?;
+    let mut menu = root.clone();
+    for (n, label) in path.iter().enumerate() {
+        let index = menu.indexOfItemWithTitle(&NSString::from_str(label));
+        if index < 0 {
+            return Err(format!("the menu has no item {label:?}"));
+        }
+        if n + 1 == path.len() {
+            menu.performActionForItemAtIndex(index);
+        } else {
+            menu = menu
+                .itemAtIndex(index)
+                .and_then(|item| item.submenu())
+                .ok_or_else(|| format!("{label:?} opens no submenu"))?;
+        }
+    }
+    root.cancelTracking();
+    Ok(())
+}
+
+/// Closes the open context menu with nothing chosen.
+#[cfg(feature = "dev")]
+pub(crate) fn close_open_menu() -> Result<(), String> {
+    let root = OPEN_MENU
+        .with(|open| open.borrow().clone())
+        .ok_or("no context menu is open")?;
+    root.cancelTracking();
+    Ok(())
+}
+
 /// Shows a context menu at `at` (root coordinates) or at the mouse.
 fn popup(surface: &Rc<Surface>, items: &Arc<[MenuItem]>, at: Option<(f32, f32)>) {
     let root = surface.root.ns();
@@ -692,9 +779,13 @@ fn popup(surface: &Rc<Surface>, items: &Arc<[MenuItem]>, at: Option<(f32, f32)>)
             root.convertPoint_fromView(in_window, None)
         }
     };
+    #[cfg(feature = "dev")]
+    OPEN_MENU.with(|open| *open.borrow_mut() = Some(menu.clone()));
     // Returns once the menu closed (the chosen item's action sent).
     menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(root));
-    // A menu opened during a press (`onPressIn`, a long press) took its
+    #[cfg(feature = "dev")]
+    OPEN_MENU.with(|open| open.borrow_mut().take());
+    // A menu opened during a press (`onPressDown`, a long press) took its
     // release: the press ends here, or the view would stay pressed.
     crate::input::cancel_pointer(surface);
     // The app's `Menu.popup` promise settles.

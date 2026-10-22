@@ -8,10 +8,11 @@
 //! covering it, and work with transparent backgrounds.
 
 use nsh_core::{
-    BorderStyle, BoxShadow, Color, CornerRadii, Filter, Gradient, GradientKind, GradientSize,
-    ViewStyle,
+    BackdropMaterial, BorderStyle, BoxShadow, Color, CornerRadii, Filter, GlassEffect, Gradient,
+    GradientKind, GradientSize, ViewStyle,
+    geometry::{Points, px},
 };
-use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
+use objc2::{MainThreadMarker, MainThreadOnly, msg_send, rc::Retained, runtime::AnyClass};
 use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGMutablePath;
 use objc2_foundation::{NSArray, NSNumber};
@@ -21,7 +22,7 @@ use objc2_quartz_core::{
 };
 use objc2_ui_kit::{
     UIBlurEffect, UIBlurEffectStyle, UIView, UIViewAnimating, UIViewAnimationCurve,
-    UIViewPropertyAnimator, UIVisualEffectView,
+    UIViewPropertyAnimator, UIVisualEffect, UIVisualEffectView,
 };
 
 use crate::decor::{cg_color, inset, rounded};
@@ -46,22 +47,98 @@ pub(crate) struct Visual {
     outline: Option<Retained<CAShapeLayer>>,
     veil: Option<Retained<CALayer>>,
     backdrop: Option<Backdrop>,
+    /// `maskImage`'s layer, held so it is not rebuilt every frame.
+    mask_image: Option<Retained<CAGradientLayer>>,
+}
+
+/// What a backdrop draws: the blur's radius, which material draws it,
+/// whether that material takes the dark variant, and the glass that takes
+/// the blur's place where UIKit has it.
+#[derive(Clone, Copy, PartialEq)]
+struct BackdropSpec {
+    radius: f32,
+    material: BackdropMaterial,
+    dark: bool,
+    glass: GlassEffect,
 }
 
 struct Backdrop {
     view: Retained<UIVisualEffectView>,
-    /// Holds the blur at a fraction of the material's strength.
-    animator: Retained<UIViewPropertyAnimator>,
-    radius: f32,
-    dark: bool,
+    /// Holds the blur at a fraction of the material's strength. Glass is
+    /// drawn at its own, so glass keeps no animator.
+    animator: Option<Retained<UIViewPropertyAnimator>>,
+    spec: BackdropSpec,
 }
 
 impl Drop for Backdrop {
     fn drop(&mut self) {
         // A paused animator must be stopped before it is released.
-        self.animator.stopAnimation(true);
+        if let Some(animator) = &self.animator {
+            animator.stopAnimation(true);
+        }
         self.view.removeFromSuperview();
     }
+}
+
+/// The `UIBlurEffectStyle` of a material, in the light or dark variant.
+fn blur_style(material: BackdropMaterial, dark: bool) -> UIBlurEffectStyle {
+    match (material, dark) {
+        (BackdropMaterial::UltraThin, false) => UIBlurEffectStyle::SystemUltraThinMaterialLight,
+        (BackdropMaterial::UltraThin, true) => UIBlurEffectStyle::SystemUltraThinMaterialDark,
+        (BackdropMaterial::Thin, false) => UIBlurEffectStyle::SystemThinMaterialLight,
+        (BackdropMaterial::Thin, true) => UIBlurEffectStyle::SystemThinMaterialDark,
+        (BackdropMaterial::Regular, false) => UIBlurEffectStyle::SystemMaterialLight,
+        (BackdropMaterial::Regular, true) => UIBlurEffectStyle::SystemMaterialDark,
+        (BackdropMaterial::Thick, false) => UIBlurEffectStyle::SystemThickMaterialLight,
+        (BackdropMaterial::Thick, true) => UIBlurEffectStyle::SystemThickMaterialDark,
+        (BackdropMaterial::Chrome, false) => UIBlurEffectStyle::SystemChromeMaterialLight,
+        (BackdropMaterial::Chrome, true) => UIBlurEffectStyle::SystemChromeMaterialDark,
+    }
+}
+
+/// A `UIGlassEffect` of `style`, or `None` where UIKit has no such class
+/// (before iOS 26) or no glass was asked for.
+///
+/// The class is looked up at runtime, the way `input.rs` looks up
+/// `UIKeyCommand`, rather than bound by `extern_class!`: that binds a
+/// class by its link-time symbol, which a system without the class fails
+/// to resolve when the app launches, and Rust cannot weakly link one yet
+/// (rust-lang/rust#29603).
+fn glass_effect(style: GlassEffect) -> Option<Retained<UIVisualEffect>> {
+    let raw: isize = match style {
+        GlassEffect::None => return None,
+        // UIGlassEffectStyle, whose cases are regular and clear.
+        GlassEffect::Regular => 0,
+        GlassEffect::Clear => 1,
+    };
+    let class = AnyClass::get(c"UIGlassEffect")?;
+    // SAFETY: UIGlassEffect's documented factory, on the class just found,
+    // which answers a UIVisualEffect. The caller holds a MainThreadMarker.
+    unsafe { Some(msg_send![class, effectWithStyle: raw]) }
+}
+
+/// Holds `target`'s blur at `spec.radius`'s fraction of its material's
+/// strength: UIKit gives no way to set it outright.
+fn blur_animator(
+    target: Retained<UIVisualEffectView>,
+    spec: BackdropSpec,
+    mtm: MainThreadMarker,
+) -> Retained<UIViewPropertyAnimator> {
+    let style = blur_style(spec.material, spec.dark);
+    let block = block2::RcBlock::new(move || {
+        let blur = UIBlurEffect::effectWithStyle(style, mtm);
+        target.setEffect(Some(&blur));
+    });
+    let animator = UIViewPropertyAnimator::initWithDuration_curve_animations(
+        UIViewPropertyAnimator::alloc(mtm),
+        1.0,
+        UIViewAnimationCurve::Linear,
+        Some(&block),
+    );
+    animator.setPausesOnCompletion(true);
+    // The material blurs by about 30 points at full strength.
+    animator.setFractionComplete((spec.radius / 30.0).clamp(0.05, 1.0) as CGFloat);
+    animator
 }
 
 /// Whether `style` has effects that draw outside the box (they need an
@@ -87,7 +164,7 @@ pub(crate) fn drop_shadow(style: &ViewStyle) -> Option<(f32, f32, f32, Color)> {
                 offset_y,
                 blur,
                 color,
-            } => Some((offset_x, offset_y, blur, color)),
+            } => Some((offset_x.0, offset_y.0, blur.0, color)),
             _ => None,
         })
 }
@@ -133,7 +210,7 @@ impl Visual {
         // Text draws in the layer's own contents, below every sublayer:
         // effects inside the box would cover it.
         let inner: &[&BoxShadow] = if text { &[] } else { &inner };
-        let border = style.borders.uniform().map_or(0.0, |(w, _)| w);
+        let border = style.borders.uniform().map_or(0.0, |(w, _)| w.0);
         self.set_insets(&layer, inner, local, radii, border);
         let gradients = if text {
             &[][..]
@@ -156,7 +233,7 @@ impl Visual {
             e.backdrop_filters
                 .iter()
                 .map(|f| match *f {
-                    Filter::Blur(r) => r,
+                    Filter::Blur(r) => r.0,
                     _ => 0.0,
                 })
                 .sum::<f32>()
@@ -165,7 +242,19 @@ impl Visual {
         // blurs; the background color tints): light unless it is dark.
         let (r, g, b, a) = style.background_color.to_f64();
         let dark = a > 0.0 && 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5;
-        self.set_backdrop(view, blur, dark, local, radii, mtm);
+        let spec = BackdropSpec {
+            radius: blur,
+            material: style.backdrop_material,
+            dark,
+            glass: style.glass_effect,
+        };
+        self.set_backdrop(view, spec, local, radii, mtm);
+        // Last: the mask covers everything above, the backdrop's view included.
+        self.set_mask_image(
+            &layer,
+            effects.map_or(&[][..], |e| &e.mask_images[..]),
+            local,
+        );
     }
 
     fn set_shadows(
@@ -183,20 +272,24 @@ impl Visual {
         let box_path = rounded(local, radii);
         // CSS order is top first; later sublayers draw on top.
         for (l, s) in self.shadows.iter().zip(shadows.iter().rev()) {
-            let spread = s.spread as CGFloat;
+            let spread = s.spread.0 as CGFloat;
             let shape = grow(local, spread);
             l.setFrame(local);
             l.setShadowPath(Some(&rounded(shape, grown(radii, s.spread))));
             l.setShadowColor(cg_color(Color(s.color.0 | 0xff)).as_deref());
             l.setShadowOpacity((s.color.0 & 0xff) as f32 / 255.0);
-            l.setShadowOffset(CGSize::new(s.offset_x as CGFloat, s.offset_y as CGFloat));
+            l.setShadowOffset(CGSize::new(
+                s.offset_x.0 as CGFloat,
+                s.offset_y.0 as CGFloat,
+            ));
             // CSS blur is twice the Gaussian's deviation; Core Animation's
             // radius is close to the deviation.
-            l.setShadowRadius(s.blur as CGFloat / 2.0);
+            l.setShadowRadius(s.blur.0 as CGFloat / 2.0);
             // Everything but the box.
-            let reach =
-                (s.offset_x.abs().max(s.offset_y.abs()) + s.spread.abs() + s.blur * 2.0 + 4.0)
-                    as CGFloat;
+            let reach = (s.offset_x.0.abs().max(s.offset_y.0.abs())
+                + s.spread.0.abs()
+                + s.blur.0 * 2.0
+                + 4.0) as CGFloat;
             let mask = mask_layer(l);
             let around = grow(local, reach);
             let path = CGMutablePath::new();
@@ -232,22 +325,23 @@ impl Visual {
         });
         // Inside the padding box.
         let padding = inset(local, border as CGFloat);
-        let inner_radii = radii.inset(border);
+        let inner_radii = radii.inset(px(border));
         holder.setFrame(local);
         let mask = mask_layer(holder);
         mask.setFrame(local);
         mask.setPath(Some(&rounded(padding, inner_radii)));
         resize(shapes, shadows.len(), holder, CAShapeLayer::new);
         for (l, s) in shapes.iter().zip(shadows.iter().rev()) {
-            let reach =
-                (s.offset_x.abs().max(s.offset_y.abs()) + s.spread.abs() + s.blur * 2.0 + 4.0)
-                    as CGFloat;
+            let reach = (s.offset_x.0.abs().max(s.offset_y.0.abs())
+                + s.spread.0.abs()
+                + s.blur.0 * 2.0
+                + 4.0) as CGFloat;
             // The frame around the shifted, shrunk inner shape casts its
             // shadow inwards (non-zero winding: the hole runs backwards).
             let hole = offset(
-                grow(padding, -(s.spread as CGFloat)),
-                s.offset_x,
-                s.offset_y,
+                grow(padding, -(s.spread.0 as CGFloat)),
+                s.offset_x.0,
+                s.offset_y.0,
             );
             let path = CGMutablePath::new();
             // SAFETY: valid mutable paths, a null transform.
@@ -260,7 +354,7 @@ impl Visual {
             l.setShadowColor(cg_color(Color(s.color.0 | 0xff)).as_deref());
             l.setShadowOpacity((s.color.0 & 0xff) as f32 / 255.0);
             l.setShadowOffset(CGSize::ZERO);
-            l.setShadowRadius(s.blur as CGFloat / 2.0);
+            l.setShadowRadius(s.blur.0 as CGFloat / 2.0);
         }
     }
 
@@ -276,7 +370,7 @@ impl Visual {
             g.setZPosition(GRADIENT_Z);
             g
         });
-        let shared = radii.shared();
+        let shared = radii.shared().map(|r| r.0);
         // CSS order is top first.
         for (g, gradient) in self.gradients.iter().zip(gradients.iter().rev()) {
             g.setFrame(local);
@@ -334,10 +428,10 @@ impl Visual {
             grown(radii, d)
         };
         l.setFrame(local);
-        l.setPath(Some(&rounded(grow(local, d as CGFloat), radii)));
-        l.setLineWidth(o.width as CGFloat);
+        l.setPath(Some(&rounded(grow(local, d.0 as CGFloat), radii)));
+        l.setLineWidth(o.width.0 as CGFloat);
         l.setStrokeColor(cg_color(o.color).as_deref());
-        let w = o.width as f64;
+        let w = o.width.0 as f64;
         let pattern: Option<Retained<NSArray<NSNumber>>> = match o.style {
             BorderStyle::Solid => None,
             BorderStyle::Dashed => Some(NSArray::from_retained_slice(&[
@@ -383,61 +477,74 @@ impl Visual {
         mask.setPath(Some(&rounded(local, radii)));
     }
 
+    /// `mask-image`: a gradient whose alpha decides how much of the view is
+    /// drawn. Set on the view's own layer, so it masks the content, the
+    /// background, the shadows and the backdrop's view alike.
+    ///
+    /// CSS composites several mask layers; this draws the topmost one, which
+    /// is what a fade along one edge needs.
+    fn set_mask_image(&mut self, layer: &CALayer, masks: &[Gradient], local: CGRect) {
+        let Some(mask) = masks.first() else {
+            if self.mask_image.take().is_some() {
+                // SAFETY: clearing the mask.
+                unsafe { layer.setMask(None) };
+            }
+            return;
+        };
+        let g = self.mask_image.get_or_insert_with(CAGradientLayer::new);
+        g.setFrame(local);
+        shape_gradient(g, mask, local.size);
+        // SAFETY: the layer owns the mask, which has no superlayer of its own.
+        unsafe { layer.setMask(Some(g)) };
+    }
+
     /// `backdrop-filter: blur()`: a system blur behind the content, its
-    /// strength set by holding a property animator at a fraction.
+    /// material from `backdropMaterial` and its strength set by holding a
+    /// property animator at a fraction; or, for `glassEffect`, a glass
+    /// material in the blur's place.
     fn set_backdrop(
         &mut self,
         view: &UIView,
-        radius: f32,
-        dark: bool,
+        spec: BackdropSpec,
         local: CGRect,
         radii: CornerRadii,
         mtm: MainThreadMarker,
     ) {
-        if radius <= 0.0 {
+        // A blur needs a radius to draw; glass draws without one.
+        if spec.radius <= 0.0 && spec.glass == GlassEffect::None {
             self.backdrop = None;
             return;
         }
-        if self
-            .backdrop
-            .as_ref()
-            .is_none_or(|b| b.radius != radius || b.dark != dark)
-        {
+        if self.backdrop.as_ref().is_none_or(|b| b.spec != spec) {
             self.backdrop = None;
+            // Glass wherever UIKit has it. Where it does not (before iOS
+            // 26), the view falls back to its blur, and one that asked for
+            // glass alone draws nothing.
+            let effect = glass_effect(spec.glass);
+            if effect.is_none() && spec.radius <= 0.0 {
+                return;
+            }
             let effect_view =
                 UIVisualEffectView::initWithEffect(UIVisualEffectView::alloc(mtm), None);
             effect_view.setUserInteractionEnabled(false);
-            let target = effect_view.clone();
-            let material = if dark {
-                UIBlurEffectStyle::SystemUltraThinMaterialDark
-            } else {
-                UIBlurEffectStyle::SystemUltraThinMaterialLight
+            let animator = match effect {
+                Some(glass) => {
+                    effect_view.setEffect(Some(&glass));
+                    None
+                }
+                None => Some(blur_animator(effect_view.clone(), spec, mtm)),
             };
-            let block = block2::RcBlock::new(move || {
-                let blur = UIBlurEffect::effectWithStyle(material, mtm);
-                target.setEffect(Some(&blur));
-            });
-            let animator = UIViewPropertyAnimator::initWithDuration_curve_animations(
-                UIViewPropertyAnimator::alloc(mtm),
-                1.0,
-                UIViewAnimationCurve::Linear,
-                Some(&block),
-            );
-            animator.setPausesOnCompletion(true);
-            // The material blurs by about 30 points at full strength.
-            animator.setFractionComplete((radius / 30.0).clamp(0.05, 1.0) as CGFloat);
             view.insertSubview_atIndex(&effect_view, 0);
             self.backdrop = Some(Backdrop {
                 view: effect_view,
                 animator,
-                radius,
-                dark,
+                spec,
             });
         }
         if let Some(b) = &self.backdrop {
             b.view.setFrame(local);
             let layer = b.view.layer();
-            match radii.shared() {
+            match radii.shared().map(|r| r.0) {
                 Some(r) => {
                     crate::decor::set_corners(
                         &layer,
@@ -513,8 +620,14 @@ fn offset(rect: CGRect, x: f32, y: f32) -> CGRect {
 
 /// Radii grown by `d` (shrunk when negative), corners without a radius
 /// staying square.
-fn grown(radii: CornerRadii, d: f32) -> CornerRadii {
-    let g = |r: f32| if r > 0.0 { (r + d).max(0.0) } else { 0.0 };
+fn grown(radii: CornerRadii, d: Points) -> CornerRadii {
+    let g = |r: Points| {
+        if r > Points::ZERO {
+            (r + d).max(Points::ZERO)
+        } else {
+            Points::ZERO
+        }
+    };
     CornerRadii {
         top_left: g(radii.top_left),
         top_right: g(radii.top_right),
@@ -533,7 +646,10 @@ fn add_reversed(path: &CFRetained<CGMutablePath>, rect: CGRect, radii: CornerRad
 /// Configures `g` to draw `gradient` over a `size` box.
 fn shape_gradient(g: &CAGradientLayer, gradient: &Gradient, size: CGSize) {
     let (w, h) = (size.width.max(1.0), size.height.max(1.0));
-    let stops = gradient.resolved_stops();
+    let stops = gradient.resolved_stops(nsh_core::Size::new(
+        nsh_core::Points(w as f32),
+        nsh_core::Points(h as f32),
+    ));
     // A transparent stop takes its neighbor's hue (as CSS's premultiplied
     // mixing does), so fades to transparent do not darken.
     let colors: Vec<Retained<objc2::runtime::AnyObject>> = (0..stops.len())
@@ -559,7 +675,7 @@ fn shape_gradient(g: &CAGradientLayer, gradient: &Gradient, size: CGSize) {
         .collect();
     let locations: Vec<Retained<NSNumber>> = stops
         .iter()
-        .map(|(_, p)| NSNumber::new_f64(*p as f64))
+        .map(|(_, p)| NSNumber::new_f64(p.0 as f64))
         .collect();
     // SAFETY: an array of CGColors, as `colors` documents.
     unsafe { g.setColors(Some(&NSArray::from_retained_slice(&colors))) };
@@ -573,7 +689,7 @@ fn shape_gradient(g: &CAGradientLayer, gradient: &Gradient, size: CGSize) {
         } => {
             // SAFETY: an immutable Core Animation constant.
             g.setType(unsafe { kCAGradientLayerRadial });
-            let (cx, cy) = (x as CGFloat * w, y as CGFloat * h);
+            let (cx, cy) = (x.0 as CGFloat * w, y.0 as CGFloat * h);
             let (dx, dy) = match extent {
                 GradientSize::ClosestSide => (cx.min(w - cx), cy.min(h - cy)),
                 GradientSize::FarthestSide => (cx.max(w - cx), cy.max(h - cy)),
@@ -605,22 +721,24 @@ fn shape_gradient(g: &CAGradientLayer, gradient: &Gradient, size: CGSize) {
         GradientKind::Conic { from, x, y } => {
             // SAFETY: an immutable Core Animation constant.
             g.setType(unsafe { kCAGradientLayerConic });
-            g.setStartPoint(CGPoint::new(x as CGFloat, y as CGFloat));
+            let (x, y) = (x.0 as CGFloat, y.0 as CGFloat);
+            g.setStartPoint(CGPoint::new(x, y));
             // Core Animation starts at the end point's direction, clockwise
             // from the right; CSS starts up.
-            let a = ((from as f64) - 90.0).to_radians();
-            g.setEndPoint(CGPoint::new(
-                x as CGFloat + a.cos() / 2.0,
-                y as CGFloat + a.sin() / 2.0,
-            ));
+            let a = from.0 as f64 - std::f64::consts::FRAC_PI_2;
+            g.setEndPoint(CGPoint::new(x + a.cos() / 2.0, y + a.sin() / 2.0));
         }
         kind => {
             // SAFETY: an immutable Core Animation constant.
             g.setType(unsafe { kCAGradientLayerAxial });
-            let angle = kind.linear_angle(w as f32, h as f32).unwrap_or(180.0) as f64;
+            let box_size =
+                nsh_core::Size::new(nsh_core::Points(w as f32), nsh_core::Points(h as f32));
+            let angle = kind
+                .linear_angle(box_size)
+                .unwrap_or(nsh_core::geometry::deg(180.0));
             // CSS: the gradient line through the center at `angle` (0 up,
             // clockwise), long enough that corners get the end colors.
-            let (s, c) = angle.to_radians().sin_cos();
+            let (s, c) = (angle.0 as f64).sin_cos();
             let len = (w * s).abs() + (h * c).abs();
             let (dx, dy) = (s * len / 2.0, -c * len / 2.0);
             let (cx, cy) = (w / 2.0, h / 2.0);

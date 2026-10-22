@@ -10,9 +10,10 @@ use super::{
     style::{StyleRefinement, Styled, Variant},
 };
 use crate::{
-    AccessibilityProp, AccessibilityRole, AccessibilityState, EdgeInsets, EventKind, EventPayload,
-    ImageSource, ListContentStyle, NativeProp, NodeId, PointerEvents, Prop, Rect, Size, Tag,
-    TouchEvent, style::Color,
+    AccessibilityProp, AccessibilityRole, AccessibilityState, AccessibilityValue, Bounds,
+    ContextMenuEvent, EdgeInsets, EventKind, EventPayload, HoverEvent, Hsla, ImageSource,
+    ListContentStyle, NativeProp, NodeId, PointerEvents, Points, Prop, Size, Tag, TouchEvent,
+    geometry::Radians, style::Color,
 };
 
 /// A handler of `E` on an element: a closure (`move |e: &E| ..`) that
@@ -36,6 +37,19 @@ impl<E: ?Sized + 'static> Listener<E> {
             f,
             owner: super::Owner::current_or_detached(),
         }
+    }
+
+    pub(super) fn forward(host: NodeId, event: Rc<dyn AnyEvent>) -> Listener<()> {
+        let name = event.name();
+        Listener::new(Rc::new(move |_: &()| {
+            super::reactive::emit(
+                host,
+                Box::new(SharedEvent {
+                    event: event.clone(),
+                    name,
+                }),
+            );
+        }))
     }
 
     /// Calls it with `event`, under its owner; not once that owner is
@@ -73,7 +87,7 @@ impl<E: ?Sized + 'static, F: Fn(&E) + 'static> From<F> for Listener<E> {
     }
 }
 
-/// What a listener method takes (`on_press`, `on_change_text`,
+/// What a listener method takes (`on_press`, `on_change`,
 /// `on_event`, ...): a closure of the event, `move |text: &str| ..`; for an
 /// event without data also one without arguments, `move || ..` (or
 /// `move |_: &()| ..`); or a [`Listener`]. `M` tells them apart: it is
@@ -139,11 +153,38 @@ impl<E: Event> super::EventToJs for E {
     fn data_js<'a>(&self, host: &'a dyn super::JsHost) -> Result<super::JsOwned<'a>, PropError> {
         Event::data_js(self, host)
     }
+
+    fn spread(&self) -> bool {
+        Event::spread(self)
+    }
 }
 
 impl<E: Event> AnyEvent for E {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// A closed forwarder shares the original event without invoking its `Clone`.
+struct SharedEvent {
+    event: Rc<dyn AnyEvent>,
+    name: &'static str,
+}
+
+impl super::EventToJs for SharedEvent {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn data_js<'a>(&self, host: &'a dyn super::JsHost) -> Result<super::JsOwned<'a>, PropError> {
+        self.event.data_js(host)
+    }
+}
+
+impl AnyEvent for SharedEvent {
+    fn as_any(&self) -> &dyn Any {
+        // Select the event's method, not `AnyProps` on the `Rc` wrapper.
+        self.event.as_ref().as_any()
     }
 }
 
@@ -157,8 +198,8 @@ pub struct Attrs {
     pub(crate) hint: Option<SharedString>,
     pub(crate) role: AccessibilityRole,
     pub(crate) state: AccessibilityState,
+    pub(crate) value: Option<AccessibilityValue>,
     pub(crate) pointer_events: PointerEvents,
-    pub(crate) active_opacity: Option<f32>,
     pub(crate) number_of_lines: u32,
     pub(crate) src: Option<super::ImageSrc>,
     pub(crate) inset_padding: Option<EdgeInsets>,
@@ -178,6 +219,17 @@ pub struct Attrs {
     pub(crate) animated: Vec<(crate::StyleDecl, super::LiveNode)>,
     /// Animated nodes host props read (drags, scroll offsets), held.
     pub(crate) bound: Vec<super::LiveNode>,
+    /// Tailwind classes the app gave through a prop (a component's part),
+    /// after the element's own styles.
+    pub(crate) class: Option<SharedString>,
+    /// The view is a selection area ([`crate::selection`]).
+    pub(crate) selection_area: bool,
+    /// The states it shows as its control's part
+    /// ([`Interactive::project_checked`]).
+    pub(crate) projected_states: u8,
+    /// Where a JS renderer's content goes (the element is its
+    /// placeholder: [`super::Renderer::render`]).
+    pub(crate) render: Option<super::renderer::RenderAt>,
 }
 
 impl Attrs {
@@ -206,11 +258,11 @@ impl Attrs {
         if self.state != old.state {
             out.push(Prop::Accessibility(A::State(self.state)));
         }
+        if self.value != old.value {
+            out.push(Prop::Accessibility(A::Value(self.value.clone())));
+        }
         if self.pointer_events != old.pointer_events {
             out.push(Prop::PointerEvents(self.pointer_events));
-        }
-        if self.active_opacity != old.active_opacity {
-            out.push(Prop::ActiveOpacity(self.active_opacity));
         }
         if self.number_of_lines != old.number_of_lines {
             out.push(Prop::NumberOfLines(self.number_of_lines));
@@ -218,7 +270,9 @@ impl Attrs {
         if self.src != old.src {
             out.push(Prop::Source(self.src.as_ref().map(|src| ImageSource {
                 uri: src.uri.to_arc(),
-                size: src.size,
+                size: src.size.map(|(w, h)| crate::geometry::size_pt(w, h)),
+                scales: src.scales,
+                data: None,
             })));
         }
         if self.inset_padding != old.inset_padding {
@@ -226,6 +280,12 @@ impl Attrs {
         }
         if self.inset_margin != old.inset_margin {
             out.push(Prop::InsetMargin(self.inset_margin.unwrap_or_default()));
+        }
+        if self.selection_area != old.selection_area {
+            out.push(Prop::SelectionArea(self.selection_area));
+        }
+        if self.projected_states != old.projected_states {
+            out.push(Prop::ProjectedStates(self.projected_states));
         }
         // Host props: the ones no longer set go back to their defaults,
         // then the new and changed ones.
@@ -247,11 +307,16 @@ impl Attrs {
 /// A nested component's props, with their type erased.
 pub(crate) trait AnyProps {
     fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
     fn clone_box(&self) -> Box<dyn AnyProps>;
 }
 
 impl<P: Clone + 'static> AnyProps for P {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 
@@ -352,16 +417,19 @@ pub struct ListConfig {
     pub(crate) columns: Option<u32>,
     pub(crate) horizontal: Option<bool>,
     pub(crate) inverted: Option<bool>,
-    pub(crate) shows_indicator: Option<bool>,
+    pub(crate) scrollbar_visible: Option<bool>,
     pub(crate) content: Option<ListContentStyle>,
     pub(crate) follow_end: Option<f32>,
+    pub(crate) viewport: Option<crate::ListViewport>,
 }
 
 impl ListConfig {
     /// The props of the fields that differ from `old`.
     pub(crate) fn changes(&self, old: &ListConfig, out: &mut Vec<Prop>) {
         if self.estimated != old.estimated {
-            out.push(Prop::EstimatedItemSize(self.estimated.unwrap_or(50.0)));
+            out.push(Prop::EstimatedItemSize(Points(
+                self.estimated.unwrap_or(50.0),
+            )));
         }
         if self.columns != old.columns {
             out.push(Prop::Columns(self.columns.unwrap_or(1)));
@@ -372,14 +440,17 @@ impl ListConfig {
         if self.inverted != old.inverted {
             out.push(Prop::Inverted(self.inverted.unwrap_or(false)));
         }
-        if self.shows_indicator != old.shows_indicator {
-            out.push(Prop::ShowsIndicator(self.shows_indicator.unwrap_or(true)));
+        if self.scrollbar_visible != old.scrollbar_visible {
+            out.push(Prop::Scrollbar(self.scrollbar_visible.unwrap_or(true)));
         }
         if self.content != old.content {
             out.push(Prop::ListContent(self.content.unwrap_or_default()));
         }
         if self.follow_end != old.follow_end {
-            out.push(Prop::FollowEnd(self.follow_end));
+            out.push(Prop::FollowEnd(self.follow_end.map(Points)));
+        }
+        if self.viewport != old.viewport {
+            out.push(Prop::ListViewport(self.viewport.unwrap_or_default()));
         }
     }
 }
@@ -624,7 +695,9 @@ where
     }
 }
 
-/// Conditional building.
+/// Conditional building, as GPUI's `FluentBuilder` (`gpui::prelude`): decided
+/// once, as the element is made. What must follow a signal is a region
+/// ([`super::when`], [`super::dynamic`]).
 pub trait FluentBuilder: Sized {
     /// `then(self)` when `condition` holds.
     fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self {
@@ -663,43 +736,43 @@ pub trait Element: IntoElement + Sized {
 
     /// Binds `opacity` to an animated value (it moves natively).
     fn bind_opacity(self, value: &impl super::Animated) -> Self {
-        self.bind(nsh_animation::AnimationProp::Opacity, value)
+        self.bind(crate::animation::AnimationProp::Opacity, value)
     }
 
     /// Binds the background color to a node of colors
     /// ([`super::AnimatedNode::interpolate_colors`]).
     fn bind_background(self, value: &impl super::Animated) -> Self {
-        self.bind(nsh_animation::AnimationProp::BackgroundColor, value)
+        self.bind(crate::animation::AnimationProp::BackgroundColor, value)
     }
 
     /// Binds the color of every border side to a node of colors.
     fn bind_border_color(self, value: &impl super::Animated) -> Self {
-        self.bind(nsh_animation::AnimationProp::BorderColor, value)
+        self.bind(crate::animation::AnimationProp::BorderColor, value)
     }
 
     /// Binds a text's color (the whole text) to a node of colors.
     fn bind_color(self, value: &impl super::Animated) -> Self {
-        self.bind(nsh_animation::AnimationProp::Color, value)
+        self.bind(crate::animation::AnimationProp::Color, value)
     }
 
     /// Binds the shadow's color to a node of colors (TS: `shadowColor`).
     fn bind_shadow_color(self, value: &impl super::Animated) -> Self {
-        self.bind(nsh_animation::AnimationProp::ShadowColor, value)
+        self.bind(crate::animation::AnimationProp::ShadowColor, value)
     }
 
     /// Binds the shadow's opacity, 0..1 (TS: `shadowOpacity`).
     fn bind_shadow_opacity(self, value: &impl super::Animated) -> Self {
-        self.bind(nsh_animation::AnimationProp::ShadowOpacity, value)
+        self.bind(crate::animation::AnimationProp::ShadowOpacity, value)
     }
 
     /// Binds the shadow's blur radius, in points (TS: `shadowRadius`).
     fn bind_shadow_radius(self, value: &impl super::Animated) -> Self {
-        self.bind(nsh_animation::AnimationProp::ShadowRadius, value)
+        self.bind(crate::animation::AnimationProp::ShadowRadius, value)
     }
 
     /// Binds `prop` (anything but a transform step or a canvas argument)
     /// to an animated value (nothing once the value's owner is gone).
-    fn bind(mut self, prop: nsh_animation::AnimationProp, value: &impl super::Animated) -> Self {
+    fn bind(mut self, prop: crate::animation::AnimationProp, value: &impl super::Animated) -> Self {
         if let Some(node) = value.animated_node().live() {
             let decl = crate::StyleDecl::Animated(prop, node.id());
             self.node().attrs.animated.push((decl, node));
@@ -762,7 +835,27 @@ pub trait Element: IntoElement + Sized {
     /// An inline style the app passed (a prop of type `Style`, React
     /// Native's names), over the element's styles.
     fn inline_style(mut self, style: impl IntoReactive<Style>) -> Self {
-        self.node().bind_attr(style, |a, style| a.inline = style.0);
+        Style::apply(self.node(), style, Variant::default(), |a, patch| {
+            a.inline = patch
+        });
+        self
+    }
+
+    /// Makes the view a selection area (`SelectionArea` of `nsh/base`):
+    /// the texts in it that are not `selectable={false}` share one
+    /// selection, from text to text ([`crate::selection`]).
+    fn selection_area(mut self, area: impl IntoReactive<bool>) -> Self {
+        self.node()
+            .bind_attr(area, |a, area| a.selection_area = area);
+        self
+    }
+
+    /// Tailwind classes the app passed (a prop naming the classes of one
+    /// of the component's parts: `classes={{ heading: "text-2xl" }}`),
+    /// after the element's own styles, as the app's `class` on a
+    /// component's root is: at equal rank they win.
+    fn app_class(mut self, class: impl IntoReactive<Option<SharedString>>) -> Self {
+        self.node().bind_attr(class, |a, class| a.class = class);
         self
     }
 }
@@ -771,42 +864,100 @@ pub trait Element: IntoElement + Sized {
 /// object, an array of them, or nothing), decoded when JS sets it as a host
 /// element's `style` is (transforms, shadow offsets, native animated
 /// values included), and applied with [`Element::inline_style`]. Rust
-/// makes one from declarations ([`Style::from_decls`], [`Style::with`]).
+/// makes one with the typed styles (`From<StyleRefinement>`: what a style
+/// prop's setter does with its closure, `.selected_style(|s| s.bg(..))`),
+/// theme colors following the appearance and bound parts their signals,
+/// as in `.active(|s| ..)`; or from declarations ([`Style::from_decls`],
+/// [`Style::with`]).
 /// Its native animated values are node ids, valid while the style is the
 /// prop's current value (JS keeps the values alive with it, as a host
 /// element's `style` does); a component that keeps an older `Style`
 /// beyond that may hold ids of values JS has collected.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Style(pub(crate) Option<Arc<crate::StylePatch>>);
+pub struct Style(
+    pub(crate) Option<Arc<crate::StylePatch>>,
+    /// The typed styles it was made of (Rust's), applied as the element's
+    /// own are.
+    pub(crate) StyleRefinement,
+);
 
 impl Style {
     /// A style of `decls`, applied in order; one that does not apply (a
-    /// value of the wrong type) is left out, as on a host element.
+    /// value of the wrong type or format) is left out and logged, as on a
+    /// host element.
     pub fn from_decls(decls: impl IntoIterator<Item = crate::StyleDecl>) -> Self {
         let mut style = crate::Style::default();
         let mut patch = crate::StylePatch::default();
         for decl in decls {
-            let _ = patch.push(&mut style, decl);
+            let key = match &decl {
+                crate::StyleDecl::Set(key, _) => Some(*key),
+                _ => None,
+            };
+            if patch.push(&mut style, decl).is_err()
+                && let Some(key) = key
+            {
+                log::warn!("invalid value for style `{}`", key.name());
+            }
         }
-        Self(Some(Arc::new(patch)))
+        Self(Some(Arc::new(patch)), StyleRefinement::default())
     }
 
     /// This style with property `key` set to `value` after the rest
     /// (`Style::default().with(StyleKey::Flex, PatchValue::Number(1.0))`).
     pub fn with(self, key: crate::StyleKey, value: crate::PatchValue) -> Self {
         let decls = self.0.iter().flat_map(|p| p.decls().iter().cloned());
-        Self::from_decls(decls.chain([crate::StyleDecl::Set(key, value)]))
+        let mut style = Self::from_decls(decls.chain([crate::StyleDecl::Set(key, value)]));
+        style.1 = self.1;
+        style
     }
 
-    /// Its declarations, in order.
+    /// Its declarations, in order (not its typed styles').
     pub fn decls(&self) -> &[crate::StyleDecl] {
         self.0.as_deref().map_or(&[], crate::StylePatch::decls)
+    }
+
+    /// Applies it to `node` in `variant`: the declarations with `attr`, the
+    /// typed styles as part of the node's own. A bound style adds its
+    /// typed styles as a bound part only when it has some as the element
+    /// is made (they are set with the element; JS's styles have none), so
+    /// a style prop left unset costs what a style of declarations does.
+    pub(crate) fn apply(
+        node: &mut ElNode,
+        style: impl IntoReactive<Style>,
+        variant: Variant,
+        attr: impl Fn(&mut Attrs, Option<Arc<crate::StylePatch>>) + 'static,
+    ) {
+        match style.into_reactive() {
+            Reactive::Static(Style(patch, typed)) => {
+                attr(&mut node.attrs, patch);
+                if !typed.is_empty() {
+                    node.style.extend_as(variant, typed);
+                }
+            }
+            Reactive::Bound(f) => {
+                let typed = super::untracked(|| !f().1.is_empty());
+                let patch = f.clone();
+                node.bind_attr(move || patch().0, attr);
+                if typed {
+                    // Resolved here: the bound parts of what it adds would
+                    // not run in this resolution.
+                    node.style
+                        .bind(move |s| s.extend_as(variant, f().1.resolved()));
+                }
+            }
+        }
     }
 }
 
 impl From<crate::StylePatch> for Style {
     fn from(patch: crate::StylePatch) -> Self {
-        Self(Some(Arc::new(patch)))
+        Self(Some(Arc::new(patch)), StyleRefinement::default())
+    }
+}
+
+impl From<StyleRefinement> for Style {
+    fn from(style: StyleRefinement) -> Self {
+        Self(None, style)
     }
 }
 
@@ -819,9 +970,9 @@ impl JsValue for Style {
     /// what it does not take is logged, as there.
     fn from_js(value: super::JsIn<'_>) -> Result<Self, PropError> {
         if value.is_nullish() {
-            return Ok(Self(None));
+            return Ok(Self::default());
         }
-        Ok(Self(Some(Arc::new(value.host().style(value.raw())?))))
+        Ok(Self::from(value.host().style(value.raw())?))
     }
 
     /// A style is JS's to give, not to get back.
@@ -916,6 +1067,13 @@ pub trait Accessible: Element {
         self
     }
 
+    /// What screen readers say, while it is set (`None`: what its
+    /// content says).
+    fn optional_label(mut self, label: impl IntoReactive<Option<SharedString>>) -> Self {
+        self.node().bind_attr(label, |a, label| a.label = label);
+        self
+    }
+
     /// What happens when activated, for screen readers.
     fn hint(mut self, hint: impl IntoReactive<SharedString>) -> Self {
         self.node().bind_attr(hint, |a, hint| a.hint = Some(hint));
@@ -923,8 +1081,8 @@ pub trait Accessible: Element {
     }
 
     /// What it is (a button, a header, ...).
-    fn role(mut self, role: AccessibilityRole) -> Self {
-        self.node().attrs.role = role;
+    fn role(mut self, role: impl IntoReactive<AccessibilityRole>) -> Self {
+        self.node().bind_attr(role, |a, role| a.role = role);
         self
     }
 
@@ -939,10 +1097,109 @@ pub trait Accessible: Element {
         });
         self
     }
+
+    /// Its value for screen readers, for a range (a progress bar, a
+    /// slider: `min`, `max` and `now`) or as a text; `None` has none (an
+    /// indeterminate progress bar keeps its range and leaves out `now`).
+    fn accessibility_value(mut self, value: impl IntoReactive<Option<AccessibilityValue>>) -> Self {
+        self.node().bind_attr(value, |a, value| a.value = value);
+        self
+    }
+
+    /// The actions assistive technologies offer on it (TS:
+    /// `accessibilityActions`): `increment` and `decrement` for an
+    /// adjustable element, `activate`, `longpress`, or the app's own with
+    /// a label; [`Interactive::on_accessibility_action`] hears them.
+    fn accessibility_actions(mut self, actions: Vec<crate::AccessibilityActionDef>) -> Self {
+        super::host::set(
+            self.node(),
+            Prop::Accessibility(AccessibilityProp::Actions(actions)),
+        );
+        self
+    }
+}
+
+/// What an element's tooltip can be ([`Interactive::tooltip`]): a text,
+/// in a minimal bubble drawn with the theme's `popover` tokens, or an
+/// element, shown as it is.
+pub trait IntoTooltip {
+    #[doc(hidden)]
+    fn apply_tooltip(self, node: &mut ElNode);
+}
+
+impl IntoTooltip for &'static str {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        SharedString::from(self).apply_tooltip(node);
+    }
+}
+
+impl IntoTooltip for String {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        SharedString::from(self).apply_tooltip(node);
+    }
+}
+
+impl IntoTooltip for SharedString {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        let content = if self.is_empty() {
+            crate::overlay::TooltipContent::None
+        } else {
+            crate::overlay::TooltipContent::Text(Arc::from(self.as_str()))
+        };
+        super::host::set(node, Prop::Tooltip(content));
+    }
+}
+
+impl IntoTooltip for AnyElement {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        // A hint overlay inside the element, as the core makes for a text.
+        let mut hint = ElNode::new(Tag::Overlay);
+        hint.key = Some("tooltip".into());
+        hint.attrs.pointer_events = PointerEvents::None;
+        let gap = Points(4.0);
+        for prop in [
+            crate::OverlayProp::Hint(Some(crate::overlay::HINT_DELAY)),
+            crate::OverlayProp::Placement(crate::overlay::Placement::Top),
+            crate::OverlayProp::Offset(gap),
+            crate::OverlayProp::Margin(gap),
+        ] {
+            super::host::set(&mut hint, Prop::Overlay(prop));
+        }
+        hint.children.push(self.0);
+        node.children.push(hint);
+    }
+}
+
+impl<C: Component> IntoTooltip for ComponentElement<C> {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        self.into_element().apply_tooltip(node);
+    }
+}
+
+/// Makes `hint`, an element whose root is a hint overlay
+/// ([`super::Overlay::hint`]: `nsh_base`'s `Tooltip`), the tooltip of
+/// `node` as it is, with no overlay of the core's around it (its
+/// [`IntoTooltip`]).
+#[doc(hidden)]
+pub fn __hint_tooltip(node: &mut ElNode, hint: AnyElement) {
+    let mut hint = hint.0;
+    hint.key = Some("tooltip".into());
+    node.children.push(hint);
 }
 
 /// Elements that take touches.
 pub trait Interactive: Element {
+    /// A hint about it, shown above it on the desktops while the pointer
+    /// rests on it (after half a second), until the pointer leaves or
+    /// presses it; never on touch screens, and it never takes the pointer.
+    /// A text shows in a minimal bubble drawn with the theme's `popover`
+    /// tokens; an element is shown as it is. `nsh_base`'s `Tooltip` places
+    /// one, delays it and reports it.
+    fn tooltip(mut self, tooltip: impl IntoTooltip) -> Self {
+        tooltip.apply_tooltip(self.node());
+        self
+    }
+
     /// A local file drag entered this desktop drop destination.
     fn on_file_drag_enter<M>(self, listener: impl IntoListener<(), M>) -> Self {
         self.on(
@@ -967,6 +1224,51 @@ pub trait Interactive: Element {
         )
     }
 
+    /// The mouse came over it or an element inside it (never on touches).
+    fn on_hover_in<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.on(
+            EventKind::HoverIn,
+            events::typed(listener.into_listener(), events::unit),
+        )
+    }
+
+    /// The mouse left it and the elements inside it, or the window.
+    fn on_hover_out<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.on(
+            EventKind::HoverOut,
+            events::typed(listener.into_listener(), events::unit),
+        )
+    }
+
+    /// The mouse moved over it (or an element inside it) with no button
+    /// down: where, in it and in its root view, at most once per frame.
+    fn on_hover_move<M>(self, listener: impl IntoListener<HoverEvent, M>) -> Self {
+        self.on(
+            EventKind::HoverMove,
+            events::typed(listener.into_listener(), events::hover),
+        )
+    }
+
+    /// The mouse moved inside it, including while dragging: local coordinates
+    /// in points, at most once per frame (desktops and web).
+    fn on_mouse_move<M>(self, listener: impl IntoListener<crate::Point<crate::Points>, M>) -> Self {
+        self.on(
+            EventKind::MouseMove,
+            events::typed(listener.into_listener(), events::offset),
+        )
+    }
+
+    /// The secondary button was pressed over it (a right click,
+    /// Control-click on Apple platforms): where, to open a menu at
+    /// (`page_x`, `page_y`). The nearest element that listens hears it;
+    /// a text input or selectable text nearer shows its own menu instead.
+    fn on_context_menu<M>(self, listener: impl IntoListener<ContextMenuEvent, M>) -> Self {
+        self.on(
+            EventKind::ContextMenu,
+            events::typed(listener.into_listener(), events::context_menu),
+        )
+    }
+
     /// Handles presses.
     fn on_press<M>(self, listener: impl IntoListener<(), M>) -> Self {
         self.on(
@@ -984,23 +1286,23 @@ pub trait Interactive: Element {
     }
 
     /// A finger went down on the element.
-    fn on_press_in<M>(self, listener: impl IntoListener<(), M>) -> Self {
+    fn on_press_down<M>(self, listener: impl IntoListener<(), M>) -> Self {
         self.on(
-            EventKind::PressIn,
+            EventKind::PressDown,
             events::typed(listener.into_listener(), events::unit),
         )
     }
 
     /// The press ended, inside or outside the element.
-    fn on_press_out<M>(self, listener: impl IntoListener<(), M>) -> Self {
+    fn on_press_up<M>(self, listener: impl IntoListener<(), M>) -> Self {
         self.on(
-            EventKind::PressOut,
+            EventKind::PressUp,
             events::typed(listener.into_listener(), events::unit),
         )
     }
 
     /// Its frame changed (relative to its parent).
-    fn on_layout<M>(self, listener: impl IntoListener<Rect, M>) -> Self {
+    fn on_layout<M>(self, listener: impl IntoListener<Bounds<Points>, M>) -> Self {
         self.on(
             EventKind::Layout,
             events::typed(listener.into_listener(), events::layout),
@@ -1179,8 +1481,8 @@ pub trait Interactive: Element {
         )
     }
 
-    /// A two-finger rotation started (radians).
-    fn on_rotation_start<M>(self, listener: impl IntoListener<GestureEvent, M>) -> Self {
+    /// A two-finger rotation started (its angle).
+    fn on_rotation_start<M>(self, listener: impl IntoListener<GestureEvent<Radians>, M>) -> Self {
         self.on(
             EventKind::RotationStart,
             events::typed(listener.into_listener(), events::rotation),
@@ -1188,7 +1490,7 @@ pub trait Interactive: Element {
     }
 
     /// The rotation ended.
-    fn on_rotation_end<M>(self, listener: impl IntoListener<GestureEvent, M>) -> Self {
+    fn on_rotation_end<M>(self, listener: impl IntoListener<GestureEvent<Radians>, M>) -> Self {
         self.on(
             EventKind::RotationEnd,
             events::typed(listener.into_listener(), events::rotation),
@@ -1222,14 +1524,6 @@ pub trait Interactive: Element {
         self
     }
 
-    /// Shows `color` as the background while pressed, fading the children
-    /// to `opacity`.
-    fn underlay(mut self, color: impl IntoReactive<Color>, opacity: f32) -> Self {
-        super::host::bind_prop(self.node(), color, |c| Prop::UnderlayColor(Some(c)));
-        super::host::set(self.node(), Prop::UnderlayOpacity(opacity));
-        self
-    }
-
     /// The press ripple (Android).
     fn ripple(mut self, ripple: crate::props::Ripple) -> Self {
         super::host::set(self.node(), Prop::Ripple(Some(ripple)));
@@ -1237,8 +1531,14 @@ pub trait Interactive: Element {
     }
 
     /// The elevation shadow (Android).
-    fn elevation(mut self, elevation: f32) -> Self {
-        super::host::set(self.node(), Prop::Elevation(elevation));
+    fn elevation(mut self, elevation: impl Into<Points>) -> Self {
+        super::host::set(self.node(), Prop::Elevation(elevation.into()));
+        self
+    }
+
+    /// The system material of a backdrop blur (iOS).
+    fn backdrop_material(mut self, material: crate::BackdropMaterial) -> Self {
+        super::host::set(self.node(), Prop::BackdropMaterial(material));
         self
     }
 
@@ -1255,6 +1555,16 @@ pub trait Interactive: Element {
     fn window_drag(mut self, enabled: impl IntoReactive<bool>) -> Self {
         super::host::bind_prop(self.node(), enabled, |enabled| {
             Prop::WindowDrag(Some(enabled))
+        });
+        self
+    }
+
+    /// Whether a view that takes presses is a stop of the keyboard focus
+    /// (Tab; default true): false leaves it to the pointer, as a backdrop
+    /// that closes a popover is.
+    fn focusable(mut self, focusable: impl IntoReactive<bool>) -> Self {
+        super::host::bind_prop(self.node(), focusable, |focusable| {
+            Prop::Focusable(Some(focusable))
         });
         self
     }
@@ -1309,10 +1619,77 @@ pub trait Interactive: Element {
         self
     }
 
-    /// The opacity while pressed (a fade instead of `.active(…)` styles).
-    fn active_opacity(mut self, opacity: f32) -> Self {
-        self.node().attrs.active_opacity = Some(opacity);
+    /// An app's style while selected (`accessibility_state` `selected`;
+    /// TS: a `Button`'s `selectedStyle`), as `selected:` classes apply.
+    fn selected_style(mut self, style: impl IntoReactive<Style>) -> Self {
+        Style::apply(self.node(), style, Variant::SELECTED, |a, patch| {
+            super::host::set_in(&mut a.props, Prop::SelectedStyle(patch))
+        });
         self
+    }
+
+    /// An app's style while checked (`accessibility_state` `checked`, not
+    /// mixed: a checkbox's, a switch's, a radio's), as `checked:` classes
+    /// apply.
+    fn checked_style(mut self, style: impl IntoReactive<Style>) -> Self {
+        Style::apply(self.node(), style, Variant::CHECKED, |a, patch| {
+            super::host::set_in(&mut a.props, Prop::CheckedStyle(patch))
+        });
+        self
+    }
+
+    /// An app's style while indeterminate (`accessibility_state` `checked`
+    /// mixed: a checkbox's `indeterminate`), as `indeterminate:` classes
+    /// apply.
+    fn indeterminate_style(mut self, style: impl IntoReactive<Style>) -> Self {
+        Style::apply(self.node(), style, Variant::INDETERMINATE, |a, patch| {
+            super::host::set_in(&mut a.props, Prop::IndeterminateStyle(patch))
+        });
+        self
+    }
+
+    /// Styles it as checked while `checked` holds (its `checked:` classes
+    /// and [`Self::checked_style`]), as a part of a control that is: a
+    /// switch's track and thumb, a checkbox's mark (`gpui-base`'s
+    /// `SwitchThumb::new(checked)`). Screen readers hear it from the
+    /// control alone, so the part is no second checkable element.
+    fn project_checked(mut self, checked: impl IntoReactive<bool>) -> Self {
+        self.node().bind_attr(checked, |a, checked| {
+            project(a, crate::tailwind::state::CHECKED, checked)
+        });
+        self
+    }
+
+    /// Styles it as indeterminate while `indeterminate` holds (its
+    /// `indeterminate:` classes and [`Self::indeterminate_style`]), as a
+    /// part of a control that is: a checkbox's indicator (`gpui-base`'s
+    /// `CheckboxIndicator::state(CheckboxState::Indeterminate)`). Screen
+    /// readers hear it from the control alone.
+    fn project_indeterminate(mut self, indeterminate: impl IntoReactive<bool>) -> Self {
+        self.node().bind_attr(indeterminate, |a, indeterminate| {
+            project(a, crate::tailwind::state::INDETERMINATE, indeterminate)
+        });
+        self
+    }
+
+    /// Styles it as disabled while `disabled` holds (its `disabled:`
+    /// classes and [`Self::disabled_style`]), as a part of a disabled
+    /// control (`gpui-base`'s `SwitchThumb::disabled`). The control takes
+    /// no presses and tells screen readers; the part keeps its own.
+    fn project_disabled(mut self, disabled: impl IntoReactive<bool>) -> Self {
+        self.node().bind_attr(disabled, |a, disabled| {
+            project(a, crate::tailwind::state::DISABLED, disabled)
+        });
+        self
+    }
+}
+
+/// Sets or clears `bit` of the states an element shows as a part.
+fn project(a: &mut Attrs, bit: u8, on: bool) {
+    if on {
+        a.projected_states |= bit;
+    } else {
+        a.projected_states &= !bit;
     }
 }
 
@@ -1335,6 +1712,12 @@ macro_rules! element {
         }
 
         impl Accessible for $name {}
+
+        impl IntoTooltip for $name {
+            fn apply_tooltip(self, node: &mut ElNode) {
+                self.into_element().apply_tooltip(node);
+            }
+        }
     };
 }
 
@@ -1411,99 +1794,109 @@ fn span(mut el: ElNode) -> ElNode {
 
 impl Text {
     /// At most `lines` lines (0: no limit), the last one truncated.
-    pub fn number_of_lines(mut self, lines: u32) -> Self {
-        self.0.attrs.number_of_lines = lines;
+    pub fn number_of_lines(mut self, lines: impl IntoReactive<u32>) -> Self {
+        self.0
+            .bind_attr(lines, |a, lines| a.number_of_lines = lines);
         self
     }
 
     /// Where a truncated line is cut.
-    pub fn ellipsize_mode(mut self, mode: crate::EllipsizeMode) -> Self {
-        super::host::set(&mut self.0, Prop::EllipsizeMode(mode));
+    pub fn ellipsize_mode(mut self, mode: impl IntoReactive<crate::EllipsizeMode>) -> Self {
+        super::host::bind_prop(&mut self.0, mode, Prop::EllipsizeMode);
         self
     }
 
     /// The user can select and copy it.
-    pub fn selectable(mut self, selectable: bool) -> Self {
-        super::host::set(&mut self.0, Prop::Selectable(Some(selectable)));
+    pub fn selectable(mut self, selectable: impl IntoReactive<bool>) -> Self {
+        super::host::bind_prop(&mut self.0, selectable, |s| Prop::Selectable(Some(s)));
+        self
+    }
+
+    /// The original source of this text, with local UTF-16 ranges mapped to
+    /// absolute UTF-8 byte offsets. `None` clears the source mapping.
+    pub fn text_source(
+        mut self,
+        source: impl IntoReactive<Option<Arc<crate::TextSource>>>,
+    ) -> Self {
+        super::host::bind_prop(&mut self.0, source, Prop::TextSource);
         self
     }
 
     /// The highlight of its selection, when it is selectable.
-    pub fn selection_color(mut self, color: Color) -> Self {
-        super::host::set(&mut self.0, Prop::SelectionColor(Some(color)));
+    pub fn selection_color(mut self, color: impl IntoReactive<Hsla>) -> Self {
+        super::host::bind_prop(&mut self.0, color, |c: Hsla| {
+            Prop::SelectionColor(Some(Color::from(c)))
+        });
         self
     }
 
     /// Shrinks the font, down to `min_scale` of it, to fit its lines.
-    pub fn shrink_to_fit(mut self, min_scale: f32) -> Self {
+    pub fn shrink_to_fit(mut self, min_scale: impl IntoReactive<f32>) -> Self {
         super::host::set(&mut self.0, Prop::AdjustsFontSizeToFit(true));
-        super::host::set(&mut self.0, Prop::MinimumFontScale(min_scale));
+        super::host::bind_prop(&mut self.0, min_scale, Prop::MinimumFontScale);
         self
     }
 
     /// Whether its fonts follow the system's text size (true by default;
     /// TS: `allowFontScaling`).
-    pub fn allow_font_scaling(mut self, allow: bool) -> Self {
-        super::host::set(&mut self.0, Prop::AllowFontScaling(allow));
+    pub fn allow_font_scaling(mut self, allow: impl IntoReactive<bool>) -> Self {
+        super::host::bind_prop(&mut self.0, allow, Prop::AllowFontScaling);
         self
     }
 
     /// At most this multiple of its fonts' sizes with the system's text
     /// size (TS: `maxFontSizeMultiplier`; 0: no limit).
-    pub fn max_font_size_multiplier(mut self, multiplier: f32) -> Self {
-        super::host::set(&mut self.0, Prop::MaxFontSizeMultiplier(multiplier));
+    pub fn max_font_size_multiplier(mut self, multiplier: impl IntoReactive<f32>) -> Self {
+        super::host::bind_prop(&mut self.0, multiplier, Prop::MaxFontSizeMultiplier);
         self
     }
 }
 
 impl Image {
     /// How it fits its box (default: cover).
-    pub fn resize_mode(mut self, mode: crate::ResizeMode) -> Self {
-        super::host::set(&mut self.0, Prop::ResizeMode(mode));
+    pub fn resize_mode(mut self, mode: impl IntoReactive<crate::ResizeMode>) -> Self {
+        super::host::bind_prop(&mut self.0, mode, Prop::ResizeMode);
         self
     }
 
     /// Shown until it loads (a URL, an `asset:/` URI or an
     /// [`super::ImageAsset`]).
-    pub fn placeholder(mut self, src: impl Into<super::ImageSrc>) -> Self {
-        let src = src.into();
-        super::host::set(
-            &mut self.0,
-            Prop::Image(crate::ImageProp::DefaultSource(Some(ImageSource {
+    pub fn placeholder(mut self, src: impl IntoReactive<super::ImageSrc>) -> Self {
+        super::host::bind_prop(&mut self.0, src, |src: super::ImageSrc| {
+            Prop::Image(crate::ImageProp::Placeholder(Some(ImageSource {
                 uri: src.uri.to_arc(),
-                size: src.size,
-            }))),
-        );
+                size: src.size.map(|(w, h)| crate::geometry::size_pt(w, h)),
+                scales: src.scales,
+                data: None,
+            })))
+        });
         self
     }
 
     /// Draws its opaque pixels in `color` (a template image, an icon).
-    pub fn tint_color(mut self, color: impl Into<super::AdaptiveColor>) -> Self {
-        self.style()
-            .color(&[crate::StyleKey::TintColor], color.into());
-        self
+    pub fn tint_color(self, color: impl IntoReactive<super::AdaptiveColor>) -> Self {
+        Styled::tint_color(self, color)
     }
 
-    /// Blurs it (points).
-    pub fn blur_radius(mut self, radius: f32) -> Self {
+    /// Blurs it.
+    pub fn blur_radius(mut self, radius: impl Into<Points>) -> Self {
         super::host::set(
             &mut self.0,
-            Prop::Image(crate::ImageProp::BlurRadius(radius)),
+            Prop::Image(crate::ImageProp::BlurRadius(radius.into())),
         );
         self
     }
 
     /// Fades it in over `ms` milliseconds once loaded.
-    pub fn fade_duration(mut self, ms: f32) -> Self {
-        super::host::set(
-            &mut self.0,
-            Prop::Image(crate::ImageProp::FadeDuration(Some(ms))),
-        );
+    pub fn fade_duration(mut self, ms: impl IntoReactive<f32>) -> Self {
+        super::host::bind_prop(&mut self.0, ms, |ms| {
+            Prop::Image(crate::ImageProp::FadeDuration(Some(ms)))
+        });
         self
     }
 
     /// It loaded: its size in pixels.
-    pub fn on_load<M>(self, listener: impl IntoListener<Size, M>) -> Self {
+    pub fn on_load<M>(self, listener: impl IntoListener<Size<Points>, M>) -> Self {
         self.on(
             EventKind::Load,
             events::typed(listener.into_listener(), events::size),
@@ -1689,14 +2082,40 @@ impl IntoElement for Children {
 /// Another component in a view ([`Component::element`]). Its styles go
 /// after the component's own, like an app's classes, and so do its inline
 /// style, animated values and insets ([`Element`]'s), on the component's
-/// root. It hears and is to assistive technologies what the component says
-/// (its events and props): it is not [`Interactive`] or [`Accessible`].
+/// root; its state styles ([`Self::active`], [`Self::hover`],
+/// [`Self::focus`], [`Self::disabled_style`], [`Styled::selected`],
+/// [`Styled::checked`]) follow the states of that root, as an app's
+/// `active:` / `hover:` classes on a TSX component do. It hears and is to
+/// assistive technologies what the component says (its events and props):
+/// it is not [`Interactive`] or [`Accessible`]. The element a
+/// `#[component]`'s constructor makes (`button()`) wraps one
+/// ([`ComponentBuilder`]).
 pub struct ComponentElement<C: Component> {
     node: ElNode,
     _component: PhantomData<fn() -> C>,
 }
 
 impl<C: Component> ComponentElement<C> {
+    /// The element of `C` given `props`: what a component's constructor
+    /// (`button()`) and [`Component::element`] start from.
+    #[doc(hidden)]
+    pub fn __new(props: C::Props) -> Self {
+        Self::new(props)
+    }
+
+    /// Its props, for the setters a `#[component]` makes on its element.
+    #[doc(hidden)]
+    pub fn __props_mut(&mut self) -> &mut C::Props {
+        match &mut self.node.kind {
+            ElKind::Component(c) => c
+                .props
+                .as_any_mut()
+                .downcast_mut::<C::Props>()
+                .expect("a component element holds its component's props"),
+            _ => unreachable!("a component element is a component's"),
+        }
+    }
+
     pub(crate) fn new(props: C::Props) -> Self {
         let mut node = ElNode::new(Tag::View);
         node.kind = ElKind::Component(ComponentEl {
@@ -1728,7 +2147,7 @@ impl<C: Component> ComponentElement<C> {
     }
 
     /// Fills its `Items` prop with rows of this view (TS: `each` and the
-    /// row renderer, `keyExtractor`, `ListHeaderComponent`, ...): the rows,
+    /// row renderer, `keyExtractor`, `header`, ...): the rows,
     /// their keys, header, footer, empty view, separators, sticky rows,
     /// viewability, the refresh and the end reached are `list`'s, rendered
     /// and handled by this component; the layout and the styles are the
@@ -1744,6 +2163,38 @@ impl<C: Component> ComponentElement<C> {
         self
     }
 
+    /// Styles while its root is pressed (Tailwind's `active:`; TS: an
+    /// `active:` class or `activeStyle` given the component), applied
+    /// natively. The root follows presses when it handles them (a
+    /// [`Interactive::on_press`] of the component's view).
+    pub fn active(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.node.style.extend_as(Variant::ACTIVE, s);
+        self
+    }
+
+    /// Styles while a pointer hovers its root (`hover:`).
+    pub fn hover(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.node.style.extend_as(Variant::HOVER, s);
+        self
+    }
+
+    /// Styles while its root has focus (`focus:`).
+    pub fn focus(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.node.style.extend_as(Variant::FOCUS, s);
+        self
+    }
+
+    /// Styles while its root is disabled (`disabled:`): the component's
+    /// view disables it ([`Interactive::disabled`], a `disabled` prop).
+    pub fn disabled_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.node.style.extend_as(Variant::DISABLED, s);
+        self
+    }
+
     /// Puts `handle` on this component: its updates go to it.
     pub fn component_ref(mut self, handle: &super::ComponentRef<C>) -> Self {
         self.node.attrs.element_ref = handle.element().target();
@@ -1751,7 +2202,10 @@ impl<C: Component> ComponentElement<C> {
     }
 
     /// Handles its events (they then do not reach the app). Given several
-    /// times, every listener hears them, in order.
+    /// times, every listener hears them, in order. The element a
+    /// `#[component]`'s constructor makes has a listener method per event
+    /// instead (`.on_press(..)`: [`ComponentBuilder`]); this stays for
+    /// components implemented by hand.
     pub fn on_event<M>(mut self, listener: impl IntoListener<C::Event, M>) -> Self {
         let listener = listener.into_listener();
         if let ElKind::Component(c) = &mut self.node.kind {
@@ -1761,6 +2215,141 @@ impl<C: Component> ComponentElement<C> {
                 }
             }));
         }
+        self
+    }
+
+    /// Handles the events `pick` picks, with the data it gives: the listener
+    /// method of one event (`on_press`) that `#[derive(Event)]` generates
+    /// calls it.
+    #[doc(hidden)]
+    pub fn __on_variant<T: ?Sized + 'static, M>(
+        self,
+        pick: fn(&C::Event) -> Option<&T>,
+        listener: impl IntoListener<T, M>,
+    ) -> Self {
+        let listener = listener.into_listener();
+        self.on_event(listener.wrap(move |inner, event: &C::Event| {
+            if let Some(data) = pick(event) {
+                inner(data);
+            }
+        }))
+    }
+}
+
+/// The element of a `#[component]`, as its constructor makes it: a
+/// component is made and set up in Rust as a primitive is (`view()`),
+/// as JSX does in TSX. `#[component] fn Picker` makes `picker()` (the
+/// function's name in snake case), which returns a `PickerElement` with
+/// each prop at its default and
+///
+/// - a setter per prop, named as its field (`.disabled(..)`): a value, a
+///   signal, a memo or a prop of the field's type, or a closure returning
+///   one (bound); an `Option<T>` prop takes a `T` (`.label("Pick one")`),
+///   a slot the content to fill it with (`.header(text(..))`), the
+///   children are its [`ParentElement::child`]ren;
+/// - a listener method per event, named as its TSX handler in snake case
+///   (`onSelect` is `.on_select(..)`): a unit variant's takes
+///   `move || ..`, a one-field variant's `move |value: &T| ..`, a
+///   named-field variant's the event itself;
+/// - styles ([`Styled`]: they go on the component's root), with this
+///   trait's for the root's states, and a
+///   [`ComponentRef`](super::ComponentRef).
+///
+/// A prop's setter comes before an element method of the same name (a
+/// component's `selected` prop before [`Styled::selected`], its `size`
+/// before [`Styled::size`]; call those as `Styled::selected(element, ..)`).
+///
+/// ```
+/// use nsh_core::ui::prelude::*;
+///
+/// /// The props of [`Picker`].
+/// #[derive(Clone, PartialEq, Props)]
+/// pub struct PickerProps {
+///     /// The options.
+///     pub options: Prop<Vec<SharedString>>,
+///     /// No presses.
+///     #[prop(default)]
+///     pub disabled: Prop<bool>,
+///     /// What screen readers say.
+///     pub label: Prop<Option<SharedString>>,
+/// }
+///
+/// /// What a [`Picker`] reports.
+/// #[derive(Event)]
+/// pub enum PickerEvent {
+///     /// Pressed.
+///     Press,
+///     /// An option was picked: its index.
+///     Select(u32),
+/// }
+///
+/// /// Picks an option.
+/// #[component]
+/// pub fn Picker(props: PickerProps, cx: Scope<PickerEvent>) -> impl IntoElement {
+///     view()
+///         .disabled(props.disabled)
+///         .on_press(move || cx.emit(PickerEvent::Select(0)))
+/// }
+///
+/// #[component]
+/// pub fn Form() -> impl IntoElement {
+///     let busy = signal(false);
+///     let picked = signal(None::<u32>);
+///     view().child(
+///         picker()
+///             .options(vec![SharedString::from("Tea"), "Coffee".into()])
+///             .disabled(move || busy.get())
+///             .label("Drink")
+///             .on_press(move || log::info!("pressed"))
+///             .on_select(move |&index: &u32| picked.set(Some(index)))
+///             .px_4()
+///             .active(|s| s.opacity(0.6)),
+///     )
+/// }
+/// ```
+pub trait ComponentBuilder: Element {
+    /// Its component.
+    type Component: Component;
+
+    /// The element it builds.
+    #[doc(hidden)]
+    fn __element(&mut self) -> &mut ComponentElement<Self::Component>;
+
+    /// Styles while its root is pressed (Tailwind's `active:`; TS: an
+    /// `active:` class or `activeStyle` given the component), applied
+    /// natively. The root follows presses when it handles them (a
+    /// [`Interactive::on_press`] of the component's view).
+    fn active(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.node().style.extend_as(Variant::ACTIVE, s);
+        self
+    }
+
+    /// Styles while a pointer hovers its root (`hover:`).
+    fn hover(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.node().style.extend_as(Variant::HOVER, s);
+        self
+    }
+
+    /// Styles while its root has focus (`focus:`).
+    fn focus(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.node().style.extend_as(Variant::FOCUS, s);
+        self
+    }
+
+    /// Styles while its root is disabled (`disabled:`): the component's
+    /// view disables it ([`Interactive::disabled`], a `disabled` prop).
+    fn disabled_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.node().style.extend_as(Variant::DISABLED, s);
+        self
+    }
+
+    /// Puts `handle` on this component: its updates go to it.
+    fn component_ref(mut self, handle: &super::ComponentRef<Self::Component>) -> Self {
+        self.__element().node.attrs.element_ref = handle.element().target();
         self
     }
 }
@@ -1779,5 +2368,30 @@ impl<C: Component> ParentElement for ComponentElement<C> {}
 impl<C: Component> IntoElement for ComponentElement<C> {
     fn into_element(self) -> AnyElement {
         AnyElement(self.node)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnyEvent, Rc, SharedEvent};
+    use crate::ui::{Event, EventToJs};
+
+    #[derive(Debug, PartialEq, Event)]
+    enum ForwardedEvent {
+        Value(u32),
+    }
+
+    #[test]
+    fn a_shared_event_preserves_its_rust_type_and_data() {
+        let event: Rc<dyn AnyEvent> = Rc::new(ForwardedEvent::Value(42));
+        let shared = SharedEvent {
+            name: event.name(),
+            event,
+        };
+        assert_eq!(shared.name(), "value");
+        assert_eq!(
+            shared.as_any().downcast_ref::<ForwardedEvent>(),
+            Some(&ForwardedEvent::Value(42))
+        );
     }
 }

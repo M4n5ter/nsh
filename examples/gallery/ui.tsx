@@ -1,18 +1,22 @@
-import type { JSX, ScrollProps, ViewStyle } from "nsh";
-import { computed, effect, Scroll, signal, Text, View } from "nsh";
+import type { JSX, ScrollProps, Tokens, ViewStyle } from "nsh";
+import { computed, effect, Image, Scroll, signal, Text, token, View } from "nsh";
+import { reduceMotion } from "nsh/accessibility";
 import { createAnimatedValue, Easing } from "nsh/animated";
-import { colorScheme, Platform, windowSize } from "nsh/device";
+import { colorScheme, platform, setColorScheme, windowSize } from "nsh/device";
 import { keymap } from "nsh/keymap";
+import { Button as BaseButton, Sheet as BaseSheet, safeArea, Switch, Tab, Tabs } from "nsh/base";
+import { nav } from "./nav";
 import { Icon, type IconName } from "./icons";
+import logoDark from "./logo-dark.svg";
+import logoLight from "./logo-light.svg";
 
 /** Whether the gallery shows its dark palette (reactive: reading it subscribes). */
 export const isDark = () => colorScheme() !== "light";
 
 /**
  * An object with `dark`'s keys whose getters read `dark` or `light` by the
- * appearance shown: every read in a reactive scope (JSX, a `draw`, an
- * effect) follows appearance changes, and spreads into components keep the
- * getters.
+ * appearance shown, for the finishes below: shadows and gradients are no
+ * design tokens, so they stay here while every color is the theme's.
  */
 function themed<T extends object>(dark: T, light: T): T {
   const out = {} as T;
@@ -32,6 +36,10 @@ export interface Palette {
   inset: string;
   /** A control on a card (buttons, fields, tracks). */
   raised: string;
+  /** An input's well: below the card and the insets it sits on. */
+  field: string;
+  /** An input's edge. */
+  fieldBorder: string;
   border: string;
   /** Hairlines inside insets. */
   line: string;
@@ -61,89 +69,64 @@ export interface Palette {
   down: string;
 }
 
+/** An object whose getters read the theme's tokens: reads in a reactive
+ * scope (JSX, a `draw`, an effect) follow the appearance and the theme. */
+function tokens<K extends string>(names: Record<K, keyof Tokens>): Record<K, string> {
+  const out = {} as Record<K, string>;
+  for (const key of Object.keys(names) as K[]) {
+    Object.defineProperty(out, key, { enumerable: true, get: () => token(names[key]) });
+  }
+  return out;
+}
+
 /**
  * The gallery's look: a graphite page (or a paper one in light
  * appearance), cards with an inset surface, tabular numbers and one citrus
- * accent. Sizes are for phones: 16 pt gutters, 44 pt touch targets, 15 pt
- * body text. The desktop layout (`desktop`) keeps them and puts more side by
- * side.
+ * accent, its colors the tokens of `theme.json`. Sizes are for phones:
+ * 16 pt gutters, 44 pt touch targets, 15 pt body text. The desktop layout
+ * (`desktop`) keeps them and puts more side by side.
  */
-export const colors: Palette = themed<Palette>(
-  {
-    background: "#101113",
-    surface: "#18191c",
-    inset: "#0c0d0f",
-    raised: "#24262a",
-    border: "#2c2e33",
-    line: "#1f2124",
-    text: "#eceef1",
-    muted: "#8d9198",
-    faint: "#5a5e65",
-    accent: "#c8f26d",
-    accentFill: "#c8f26d",
-    onAccent: "#13160c",
-    light: "#eef0f2",
-    onLight: "#111214",
-    track: "#24262a",
-    knob: "#8d9198",
-    code: "#d9dde3",
-    info: "#7ea8ff",
-    warn: "#ffb547",
-    danger: "#ff6170",
-    up: "#45d49a",
-    down: "#ff6170",
-  },
-  {
-    background: "#f4f4f2",
-    surface: "#ffffff",
-    inset: "#f0f0ec",
-    raised: "#fbfbf9",
-    border: "#e2e2dd",
-    line: "#ecece8",
-    text: "#16171a",
-    muted: "#5f636a",
-    faint: "#9a9ea4",
-    accent: "#4f6e0c",
-    accentFill: "#c8f26d",
-    onAccent: "#13160c",
-    light: "#16171a",
-    onLight: "#ffffff",
-    track: "#e2e2dd",
-    knob: "#ffffff",
-    code: "#2a2d33",
-    info: "#3d63d1",
-    warn: "#b26a00",
-    danger: "#d43a4a",
-    up: "#138a5a",
-    down: "#d43a4a",
-  },
-);
+export const colors: Palette = tokens<keyof Palette>({
+  background: "background",
+  surface: "card",
+  inset: "inset",
+  raised: "raised",
+  field: "field",
+  fieldBorder: "input",
+  border: "border",
+  line: "line",
+  text: "foreground",
+  muted: "muted-foreground",
+  faint: "faint",
+  accent: "brand",
+  accentFill: "brand-fill",
+  onAccent: "on-brand",
+  light: "primary",
+  onLight: "primary-foreground",
+  track: "track",
+  knob: "knob",
+  code: "code",
+  info: "info",
+  warn: "warn",
+  danger: "destructive",
+  up: "up",
+  down: "down",
+});
 
-/** `rgba()` of a `#rrggbb` color. */
-export function alpha(hex: string, a: number) {
-  const n = parseInt(hex.slice(1), 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+/** `color` at opacity `a`. */
+export function alpha(color: string, a: number) {
+  return `color-mix(in srgb, ${color} ${a * 100}%, transparent)`;
 }
 
 /** Translucent tints of the tones, for fills behind text. */
-export const tints = themed(
-  {
-    accent: "rgba(200,242,109,0.14)",
-    info: "rgba(126,168,255,0.16)",
-    warn: "rgba(255,181,71,0.16)",
-    danger: "rgba(255,97,112,0.16)",
-    up: "rgba(69,212,154,0.16)",
-    down: "rgba(255,97,112,0.16)",
-  },
-  {
-    accent: "rgba(124,170,20,0.14)",
-    info: "rgba(61,99,209,0.10)",
-    warn: "rgba(178,106,0,0.11)",
-    danger: "rgba(212,58,74,0.10)",
-    up: "rgba(19,138,90,0.10)",
-    down: "rgba(212,58,74,0.10)",
-  },
-);
+export const tints = tokens({
+  accent: "brand-tint",
+  info: "info-tint",
+  warn: "warn-tint",
+  danger: "destructive-tint",
+  up: "up-tint",
+  down: "down-tint",
+});
 
 /** A surface's finish: a gradient over its color and its shadows. */
 export interface Finish {
@@ -158,26 +141,27 @@ export interface Finish {
  * Light and depth: gentle top-to-bottom gradients, a highlight along top
  * edges and soft shadows, so cards, controls and buttons read as surfaces.
  */
-export const finish = themed<Record<"card" | "inset" | "raised" | "light" | "accent" | "track" | "knob" | "pill" | "chip" | "glass" | "menu", Finish>>(
+export const finish = themed<Record<"card" | "inset" | "field" | "raised" | "light" | "accent" | "track" | "knob" | "pill" | "chip" | "glass" | "menu", Finish>>(
   {
     card: {
-      backgroundImage: "linear-gradient(180deg, #1d1e22 0%, #17181b 100%)",
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06), 0 10px 28px rgba(0,0,0,0.38)",
+      backgroundImage: "linear-gradient(180deg, #1b1c20 0%, #191a1d 100%)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04), 0 16px 36px -20px rgba(0,0,0,0.75)",
     },
     inset: { boxShadow: "inset 0 1px 3px rgba(0,0,0,0.55)" },
+    field: { boxShadow: "inset 0 1px 2px rgba(0,0,0,0.55)" },
     raised: {
-      backgroundImage: "linear-gradient(180deg, #2d2f34 0%, #222428 100%)",
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 2px rgba(0,0,0,0.45)",
+      backgroundImage: "linear-gradient(180deg, #2b2d32 0%, #24262a 100%)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.07), 0 1px 1px rgba(0,0,0,0.4), 0 6px 14px -7px rgba(0,0,0,0.7)",
     },
     light: {
-      backgroundImage: "linear-gradient(180deg, #fbfbfc 0%, #d4d6d9 100%)",
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.9), 0 3px 10px rgba(0,0,0,0.4)",
+      backgroundImage: "linear-gradient(180deg, #fbfbfc 0%, #e3e5e8 100%)",
+      boxShadow: "inset 0 1px 0 #ffffff, 0 1px 1px rgba(0,0,0,0.4), 0 8px 18px -8px rgba(0,0,0,0.75)",
     },
     accent: {
-      backgroundImage: "linear-gradient(180deg, #dbf893 0%, #b3dd4e 100%)",
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.45), 0 3px 12px rgba(200,242,109,0.22)",
+      backgroundImage: "linear-gradient(180deg, #d6f78a 0%, #c1ea5c 100%)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.55), 0 1px 1px rgba(0,0,0,0.4), 0 8px 20px -9px rgba(200,242,109,0.4)",
     },
-    track: { boxShadow: "inset 0 1px 3px rgba(0,0,0,0.6)" },
+    track: { boxShadow: "inset 0 1px 2px rgba(0,0,0,0.5)" },
     /** A knob or handle over a track. */
     knob: { boxShadow: "inset 0 1px 0 rgba(255,255,255,0.35), 0 2px 6px rgba(0,0,0,0.45)" },
     /**
@@ -185,17 +169,17 @@ export const finish = themed<Record<"card" | "inset" | "raised" | "light" | "acc
      * small round button), a specular top, a faint inner edge, a lower rim.
      */
     pill: {
-      backgroundColor: "#2a2c31",
-      backgroundImage: "linear-gradient(180deg, #383a40 0%, #2a2c31 52%, #24262a 100%)",
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.16), inset 0 0 0 1px rgba(255,255,255,0.03), inset 0 -1px 0 rgba(0,0,0,0.28), 0 2px 6px rgba(0,0,0,0.35)",
-      borderColor: "rgba(255,255,255,0.07)",
+      backgroundColor: "#2b2d32",
+      backgroundImage: "linear-gradient(180deg, #2f3136 0%, #2a2c30 100%)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 1px rgba(0,0,0,0.4), 0 6px 14px -7px rgba(0,0,0,0.7)",
+      borderColor: "rgba(255,255,255,0.08)",
     },
     /** A tinted capsule's rim and highlight (badges). */
     chip: { boxShadow: "inset 0 1px 0 rgba(255,255,255,0.07), inset 0 -1px 0 rgba(0,0,0,0.18)" },
     /** A bar floating over content: translucent, blurred, rimmed. */
     glass: {
       backgroundColor: "rgba(22,23,26,0.62)",
-      backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0) 60%)",
+      backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.019) 60%)",
       boxShadow: "inset 0 1px 0 rgba(255,255,255,0.09), 0 -8px 24px rgba(0,0,0,0.28)",
       borderColor: "rgba(255,255,255,0.07)",
       backdropFilter: "blur(20px)",
@@ -203,7 +187,7 @@ export const finish = themed<Record<"card" | "inset" | "raised" | "light" | "acc
     /** A floating panel (menus, the composer): glass, denser for reading. */
     menu: {
       backgroundColor: "rgba(30,32,36,0.82)",
-      backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0.015) 40%, rgba(255,255,255,0) 100%)",
+      backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.043) 0%, rgba(255,255,255,0.024) 40%, rgba(255,255,255,0.018) 100%)",
       boxShadow: "inset 0 1px 0 rgba(255,255,255,0.11), inset 0 -1px 0 rgba(0,0,0,0.25), 0 12px 32px rgba(0,0,0,0.42)",
       borderColor: "rgba(255,255,255,0.08)",
       backdropFilter: "blur(24px)",
@@ -211,41 +195,42 @@ export const finish = themed<Record<"card" | "inset" | "raised" | "light" | "acc
   },
   {
     card: {
-      backgroundImage: "linear-gradient(180deg, #ffffff 0%, #fafaf8 100%)",
-      boxShadow: "inset 0 1px 0 #ffffff, 0 6px 20px rgba(20,20,10,0.08)",
+      backgroundImage: "linear-gradient(180deg, #ffffff 0%, #fdfdfc 100%)",
+      boxShadow: "inset 0 1px 0 #ffffff, 0 1px 1px rgba(20,20,10,0.04), 0 14px 32px -18px rgba(20,20,10,0.2)",
     },
     inset: { boxShadow: "inset 0 1px 2px rgba(20,20,10,0.07)" },
+    field: { boxShadow: "inset 0 1px 2px rgba(20,20,10,0.09)" },
     raised: {
-      backgroundImage: "linear-gradient(180deg, #ffffff 0%, #f2f2ee 100%)",
-      boxShadow: "inset 0 1px 0 #ffffff, 0 1px 2px rgba(20,20,10,0.12)",
+      backgroundImage: "linear-gradient(180deg, #ffffff 0%, #f6f6f2 100%)",
+      boxShadow: "inset 0 1px 0 #ffffff, 0 1px 1px rgba(20,20,10,0.06), 0 5px 12px -6px rgba(20,20,10,0.18)",
     },
     light: {
-      backgroundImage: "linear-gradient(180deg, #2c2e33 0%, #16171a 100%)",
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.14), 0 3px 10px rgba(20,20,10,0.22)",
+      backgroundImage: "linear-gradient(180deg, #2e3035 0%, #1b1c20 100%)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.16), 0 1px 1px rgba(20,20,10,0.2), 0 7px 14px -7px rgba(20,20,10,0.5)",
     },
     accent: {
-      backgroundImage: "linear-gradient(180deg, #d8f88f 0%, #bde65a 100%)",
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6), 0 3px 10px rgba(110,150,20,0.25)",
+      backgroundImage: "linear-gradient(180deg, #d6f78a 0%, #c1ea5c 100%)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6), 0 1px 1px rgba(80,110,10,0.2), 0 7px 14px -7px rgba(110,150,20,0.55)",
     },
-    track: { boxShadow: "inset 0 1px 2px rgba(20,20,10,0.10)" },
+    track: { boxShadow: "inset 0 1px 2px rgba(20,20,10,0.08)" },
     knob: { boxShadow: "inset 0 1px 0 #ffffff, 0 1px 4px rgba(20,20,10,0.28)" },
     pill: {
       backgroundColor: "#ffffff",
-      backgroundImage: "linear-gradient(180deg, #ffffff 0%, #fcfcfa 52%, #f3f3ef 100%)",
-      boxShadow: "inset 0 1px 0 #ffffff, inset 0 0 0 1px rgba(255,255,255,0.7), inset 0 -1px 0 rgba(20,20,10,0.06), 0 1px 3px rgba(20,20,10,0.12), 0 4px 10px rgba(20,20,10,0.05)",
-      borderColor: "rgba(20,20,10,0.08)",
+      backgroundImage: "linear-gradient(180deg, #ffffff 0%, #f6f6f2 100%)",
+      boxShadow: "inset 0 1px 0 #ffffff, 0 1px 1px rgba(20,20,10,0.06), 0 5px 12px -6px rgba(20,20,10,0.18)",
+      borderColor: "rgba(20,20,10,0.14)",
     },
     chip: { boxShadow: "inset 0 1px 0 rgba(255,255,255,0.65), inset 0 -1px 0 rgba(20,20,10,0.04)" },
     glass: {
       backgroundColor: "rgba(250,250,248,0.66)",
-      backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.7) 0%, rgba(255,255,255,0) 60%)",
+      backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.472) 0%, rgba(255,255,255,0.227) 60%)",
       boxShadow: "inset 0 1px 0 rgba(255,255,255,0.9), 0 -6px 20px rgba(20,20,10,0.06)",
       borderColor: "rgba(20,20,10,0.07)",
       backdropFilter: "blur(20px)",
     },
     menu: {
       backgroundColor: "rgba(255,255,255,0.84)",
-      backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.2) 40%, rgba(255,255,255,0) 100%)",
+      backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.497) 0%, rgba(255,255,255,0.287) 40%, rgba(255,255,255,0.217) 100%)",
       boxShadow: "inset 0 1px 0 #ffffff, inset 0 -1px 0 rgba(20,20,10,0.05), 0 12px 32px rgba(20,20,10,0.12)",
       borderColor: "rgba(20,20,10,0.08)",
       backdropFilter: "blur(24px)",
@@ -263,26 +248,104 @@ export const toneTint = (tone: Tone) => (tone === "neutral" ? colors.raised : ti
 /** The monospaced family, for code (API names, identifiers). Figures use
  * the system font with tabular numbers instead. */
 export const mono = "monospace";
-export const radius = { card: 16, inset: 12, control: 10 } as const;
-
-/** Header props of every screen. */
-export const header = {
-  get headerBackgroundColor() {
-    return colors.background;
+/** Corner radii (`theme.json`'s `radius-card`, `radius`, `radius-control`). */
+export const radius = {
+  get card() {
+    return token("radius-card");
   },
-  get headerTitleColor() {
-    return colors.text;
+  get inset() {
+    return token("radius");
   },
-  get headerTintColor() {
-    return colors.accent;
+  get control() {
+    return token("radius-control");
   },
 };
+
+/** The system header's colors on every page (iOS, Android). */
+export const header = {
+  get headerStyle() {
+    return { backgroundColor: colors.background, color: colors.text, tintColor: colors.accent };
+  },
+};
+
+/**
+ * A page's header where the app draws it (desktops, the web: `<NavPage
+ * header>`): a back button while the page is above another, the title, and
+ * `right`. Phones show their system header with the page's `title` instead.
+ */
+export function PageHeader(props: {
+  title: string;
+  /** The bottom page of its stack: no back button. */
+  root?: boolean;
+  /** What back does (default: pop the page). */
+  onBack?: () => void;
+  /** Replaces the back button. */
+  left?: JSX.Element;
+  /** Replaces the title. */
+  center?: JSX.Element;
+  right?: JSX.Element;
+  /** The bar's fill (default the page's background). */
+  background?: string;
+  /** The back button's color (default the accent). */
+  tint?: string;
+  /** Over the content (a transparent header): no fill, no hairline. */
+  transparent?: boolean;
+}) {
+  const back = () => !props.left && !props.root && nav.routes().length > 1;
+  const tint = () => props.tint ?? colors.accent;
+  return (
+    <View
+      style={{
+        height: 52,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+        paddingHorizontal: 12,
+        backgroundColor: props.transparent ? "transparent" : (props.background ?? colors.background),
+        borderBottomWidth: props.transparent || props.background ? 0 : 1,
+        borderBottomColor: colors.line,
+      }}
+    >
+      {props.left}
+      <If when={back()}>
+        <View
+          onPress={() => (props.onBack ? props.onBack() : nav.pop())}
+          role="button"
+          accessibilityLabel="Back"
+          hitSlop={6}
+          class="hover:bg-hover active:bg-accent"
+          style={{ height: 32, flexDirection: "row", alignItems: "center", gap: 2, paddingLeft: 4, paddingRight: 10, borderRadius: radius.control, cursor: "pointer" }}
+        >
+          <Icon name="back" size={18} tint={tint()} />
+          <Text style={{ fontSize: 14, fontWeight: "500", color: tint() }}>Back</Text>
+        </View>
+      </If>
+      <View style={{ flex: 1, flexDirection: "row", alignItems: "center", paddingHorizontal: back() || props.left ? 0 : 4 }}>
+        {props.center ?? (
+          <Text numberOfLines={1} style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>
+            {props.title}
+          </Text>
+        )}
+      </View>
+      {props.right}
+    </View>
+  );
+}
+
+/**
+ * The thumb of a resize handle (`handleThumbClass`), as gpui-component
+ * draws it: none at rest, so the hairlines stay quiet; a faint pill
+ * grows in under the pointer, and a long solid one while pressed or
+ * dragged.
+ */
+export const handleThumb =
+  "h-11 w-[3px] rounded-full bg-muted-foreground opacity-0 scale-y-0 transition duration-150 ease-out group-hover:opacity-40 group-hover:scale-y-[0.45] group-active:opacity-90 group-active:scale-y-100";
 
 /**
  * Instructions for the device's input: `touch` on phones and tablets,
  * `pointer` on desktops (a mouse, a touchpad, a keyboard).
  */
-export const hint = (touch: string, pointer: string) => (Platform.isDesktop ? pointer : touch);
+export const hint = (touch: string, pointer: string) => (platform.idiom === "desktop" ? pointer : touch);
 
 /**
  * Desktops' way to refresh what phones pull down (the mouse does not drag
@@ -292,7 +355,7 @@ export const hint = (touch: string, pointer: string) => (Platform.isDesktop ? po
  * key's label for the hint, or null where it is not bound.
  */
 export function bindRefresh(refresh: () => void): string | null {
-  if (!Platform.isDesktop || Platform.OS === "web") return null;
+  if (platform.idiom !== "desktop" || platform.os === "web") return null;
   keymap.bind("mod+r", refresh);
   return keymap.label("mod+r");
 }
@@ -307,10 +370,14 @@ export const SIDEBAR = 264;
  * Mac Catalyst window); phones never do. Below that it is the phone layout,
  * unchanged. The shell remounts when it changes, so demos read it once.
  */
-export const desktop = computed(() => windowSize().width >= (Platform.isDesktop ? 700 : 900));
+export const desktop = computed(() => windowSize().width >= (platform.idiom === "desktop" ? 700 : 900));
+
+/** Whether the desktop layout shows its sidebar (the toggle in the demo's
+ * toolbar and Ctrl+B / Cmd+B hide and show it; kept while the app runs). */
+export const sidebarOpen = signal(true);
 
 /** The width of the desktop layout's content pane, right of the sidebar. */
-export const paneWidth = () => windowSize().width - SIDEBAR;
+export const paneWidth = () => windowSize().width - (sidebarOpen() ? SIDEBAR : 0);
 
 /** How many columns at least `min` pt wide fit in `width` (the content
  * pane by default), with `gap` between them and 24 pt gutters: 1 to `max`. */
@@ -325,6 +392,20 @@ export const motion = {
 } as const;
 
 /**
+ * A pressable under the pointer (`hoverStyle`): a whisper of the text color
+ * over its surface, quieter than pressed and than selected. Leave it off a
+ * disabled control and off a selected one, whose own fill shows.
+ */
+export const hovered = (): ViewStyle => ({ backgroundColor: alpha(colors.text, 0.05) });
+
+/**
+ * The keyboard focus (`focusStyle`): a 2-point ring of `info` inside the
+ * view's edge, so a card's rounded clip does not cut it (`offset` 2 puts it
+ * outside, around a filled button).
+ */
+export const focusRing = (offset = -2): ViewStyle => ({ outlineStyle: "solid", outlineWidth: 2, outlineColor: colors.info, outlineOffset: offset });
+
+/**
  * A pressable that sinks a little under the finger and springs back (the
  * spring runs natively; only press in / out reach JS).
  */
@@ -335,7 +416,7 @@ export function Press(props: {
   /** How far it shrinks (default 0.97). */
   scale?: number;
   style?: ViewStyle;
-  accessibilityRole?: "button" | "tab" | "switch" | "link";
+  role?: "button" | "tab" | "switch" | "link";
   accessibilityLabel?: string;
   accessibilityState?: { selected?: boolean; checked?: boolean; disabled?: boolean };
   hitSlop?: number;
@@ -347,9 +428,9 @@ export function Press(props: {
       onPress={props.onPress}
       onLongPress={props.onLongPress}
       disabled={props.disabled}
-      onPressIn={() => s.spring(props.scale ?? 0.97, motion.press)}
-      onPressOut={() => s.spring(1, motion.press)}
-      accessibilityRole={props.accessibilityRole ?? "button"}
+      onPressDown={() => s.spring(props.scale ?? 0.97, motion.press)}
+      onPressUp={() => s.spring(1, motion.press)}
+      role={props.role ?? "button"}
       accessibilityLabel={props.accessibilityLabel}
       accessibilityState={props.accessibilityState}
       hitSlop={props.hitSlop}
@@ -359,6 +440,17 @@ export function Press(props: {
     </View>
   );
 }
+
+/**
+ * `Press`'s feedback for a `Tab` of `nsh/base`, which reports no press down
+ * to spring with: it sinks a little while pressed and eases back, and takes
+ * presses 4 pt around it without taking more room (a hit slop). Spread
+ * `style` and `activeStyle` into the tab's.
+ */
+export const tabPress = {
+  style: { margin: -4, padding: 4, transitionProperty: "transform", transitionDuration: 150, transitionTimingFunction: "ease-out" },
+  activeStyle: { transform: [{ scale: 0.97 }] },
+} satisfies { style: ViewStyle; activeStyle: ViewStyle };
 
 /**
  * Fades and lifts its content in once mounted; `index` staggers siblings
@@ -549,7 +641,7 @@ export function Row(props: { first?: boolean; onPress?: () => void; children: JS
   return (
     <View
       onPress={props.onPress}
-      underlayColor={props.onPress ? colors.raised : undefined}
+      activeStyle={props.onPress ? { backgroundColor: colors.raised } : undefined}
       style={{
         minHeight: 48,
         flexDirection: "row",
@@ -567,8 +659,9 @@ export function Row(props: { first?: boolean; onPress?: () => void; children: JS
 export type ButtonVariant = "primary" | "secondary" | "accent" | "ghost";
 
 /**
- * A button, 44 pt tall: `primary` is light (the main action), `secondary`
- * dark, `accent` citrus. A `color` fills it with that color instead.
+ * A button, 44 pt tall (32 pt `small`, for pointer-sized surfaces):
+ * `primary` is light (the main action), `secondary` dark, `accent` citrus
+ * (the theme's `brand-fill`). A `color` fills it with that color instead.
  */
 export function Button(props: {
   label: string;
@@ -578,24 +671,38 @@ export function Button(props: {
   disabled?: boolean;
   /** Grows to share a row with its siblings. */
   flex?: number;
+  size?: "small" | "regular";
   onPress: () => void;
 }) {
+  const small = () => props.size === "small";
+  // `nsh/base`'s Button gives the behavior (presses, disabled, the button
+  // role); the look below is the gallery's own.
+  const scale = createAnimatedValue(1);
   const variant = () => props.variant ?? "primary";
   const bg = () =>
     props.color ?? (variant() === "primary" ? colors.light : variant() === "accent" ? colors.accentFill : variant() === "ghost" ? "transparent" : colors.raised);
   const fg = () => (props.color ? "#ffffff" : variant() === "primary" ? colors.onLight : variant() === "accent" ? colors.onAccent : colors.text);
   return (
-    <Press onPress={props.onPress} disabled={props.disabled} accessibilityLabel={props.label} style={props.flex ? { flex: props.flex } : undefined}>
+    <BaseButton
+      onPress={props.onPress}
+      onPressDown={() => scale.spring(0.97, motion.press)}
+      onPressUp={() => scale.spring(1, motion.press)}
+      disabled={props.disabled}
+      accessibilityLabel={props.label}
+      hoverStyle={props.disabled ? undefined : { opacity: 0.88 }}
+      focusStyle={focusRing(2)}
+      style={{ flex: props.flex, opacity: props.disabled ? 0.4 : 1, transform: [{ scale }], borderRadius: small() ? 8 : radius.control }}
+    >
       <View
         style={{
-          height: 44,
-          paddingHorizontal: 18,
-          borderRadius: radius.control,
+          height: small() ? 32 : 44,
+          paddingHorizontal: small() ? 12 : 18,
+          borderRadius: small() ? 8 : radius.control,
           borderCurve: "continuous",
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "center",
-          gap: 8,
+          gap: small() ? 6 : 8,
           backgroundColor: bg(),
           ...(props.color || variant() === "ghost"
             ? {}
@@ -609,15 +716,33 @@ export function Button(props: {
         }}
       >
         <If when={props.icon}>
-          <Icon name={props.icon!} size={16} tint={fg()} />
+          <Icon name={props.icon!} size={small() ? 14 : 16} tint={fg()} />
         </If>
-        <Text style={{ fontSize: 15, fontWeight: "600", color: fg() }}>{props.label}</Text>
+        <Text style={{ fontSize: small() ? 13 : 15, fontWeight: "600", color: fg() }}>{props.label}</Text>
       </View>
-    </Press>
+    </BaseButton>
   );
 }
 
 /** A round icon button (44 pt): light by default, `variant="secondary"` dark. */
+/** Switches the app between light and dark (`setColorScheme`), whatever the system shows. */
+export function ThemeToggle() {
+  return (
+    <RoundButton
+      icon={isDark() ? "sun" : "moon"}
+      label={isDark() ? "Light appearance" : "Dark appearance"}
+      variant="secondary"
+      size={34}
+      onPress={() => setColorScheme(isDark() ? "light" : "dark")}
+    />
+  );
+}
+
+/** NSH's mark, sharp at any size, in the appearance shown (its dot is dark on light backgrounds). */
+export function Logo(props: { size: number }) {
+  return <Image src={isDark() ? logoDark : logoLight} style={{ width: props.size, height: props.size }} />;
+}
+
 export function RoundButton(props: {
   icon: IconName;
   label: string;
@@ -677,51 +802,80 @@ export function Section(props: { title: string; note?: string; style?: ViewStyle
   );
 }
 
-/** An on / off switch: the knob springs across, the track changes color natively. */
+/**
+ * An on / off switch (`nsh/base`'s `Switch`, in the gallery's look): the
+ * knob springs across, the track changes color natively.
+ */
 export function Toggle(props: { value: boolean; onChange: (value: boolean) => void; label?: string }) {
-  const t = createAnimatedValue(props.value ? 1 : 0);
-  let last = props.value;
+  const look = switchLook(() => props.value);
   return (
-    <View
-      onPress={() => {
-        last = !props.value;
-        t.spring(last ? 1 : 0, motion.settle);
-        props.onChange(last);
-      }}
-      accessibilityRole="switch"
+    <Switch
+      checked={props.value}
+      onChange={props.onChange}
       accessibilityLabel={props.label}
-      accessibilityState={{ checked: props.value }}
-      hitSlop={8}
-      style={{
-        width: 50,
-        height: 30,
-        borderRadius: 15,
-        padding: 3,
-        backgroundColor: t.interpolate({ inputRange: [0, 1], outputRange: [colors.track, colors.accentFill] }),
-        borderWidth: 1,
-        borderColor: colors.border,
-        ...finish.track,
-      }}
-    >
-      <View
-        style={{
-          width: 22,
-          height: 22,
-          borderRadius: 11,
-          backgroundColor: props.value ? colors.onAccent : colors.knob,
-          // A drop of glass: a specular top over the knob's color.
-          backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.3) 0%, rgba(255,255,255,0) 60%)",
-          boxShadow: isDark() ? "inset 0 1px 0 rgba(255,255,255,0.2), 0 1px 3px rgba(0,0,0,0.4)" : finish.knob.boxShadow,
-          transform: [{ translateX: t.interpolate({ inputRange: [0, 1], outputRange: [0, 20] }) }],
-        }}
-      />
-    </View>
+      // 8 pt more to press on every side (the hit slop of a 30 pt track),
+      // without taking more room.
+      style={{ margin: -8, padding: 8 }}
+      trackStyle={look.trackStyle}
+      thumbStyle={look.thumbStyle}
+    />
   );
 }
 
 /**
+ * The gallery's switch, as the styles of `Switch`'s parts: a 50 × 30
+ * track that turns citrus and a knob that springs across, both natively.
+ * `on` is the value the app owns: the knob follows it, from a press or from
+ * elsewhere. `small` is 38 × 22, for pointer-sized rows. Read the styles in
+ * JSX, so the appearance is followed.
+ */
+export function switchLook(on: () => boolean, size: "small" | "regular" = "regular"): { readonly trackStyle: ViewStyle; readonly thumbStyle: ViewStyle } {
+  // The track's size and inset, and the knob: it travels what is left inside
+  // the border and the padding.
+  const [width, height, inset, knob] = size === "small" ? [38, 22, 2, 16] : [50, 30, 3, 22];
+  const t = createAnimatedValue(on() ? 1 : 0);
+  const x = t.interpolate({ inputRange: [0, 1], outputRange: [0, width - 2 - 2 * inset - knob] });
+  let shown = on();
+  effect(() => {
+    const next = on();
+    if (next === shown) return;
+    shown = next;
+    // Reduced motion: the knob and the track change in place.
+    if (reduceMotion()) t.set(next ? 1 : 0);
+    else t.spring(next ? 1 : 0, motion.settle);
+  });
+  return {
+    get trackStyle(): ViewStyle {
+      return {
+        width,
+        height,
+        borderRadius: height / 2,
+        padding: inset,
+        backgroundColor: t.interpolate({ inputRange: [0, 1], outputRange: [colors.track, colors.accentFill] }),
+        borderWidth: 1,
+        borderColor: colors.border,
+        ...finish.track,
+      };
+    },
+    get thumbStyle(): ViewStyle {
+      return {
+        width: knob,
+        height: knob,
+        borderRadius: knob / 2,
+        backgroundColor: on() ? colors.onAccent : colors.knob,
+        // A drop of glass: a specular top over the knob's color.
+        backgroundImage: "linear-gradient(180deg, rgba(255,255,255,0.202) 0%, rgba(255,255,255,0.098) 60%)",
+        boxShadow: isDark() ? "inset 0 1px 0 rgba(255,255,255,0.2), 0 1px 3px rgba(0,0,0,0.4)" : finish.knob.boxShadow,
+        transform: [{ translateX: x }],
+      };
+    },
+  };
+}
+
+/**
  * Equal segments with an indicator that springs to the selected one
- * (`count` shows a quiet number after a label).
+ * (`count` shows a quiet number after a label): `nsh/base`'s `Tabs`, a tab
+ * per segment, in the gallery's look.
  */
 export function Segmented<T extends string>(props: {
   options: readonly { value: T; label: string; count?: number }[];
@@ -732,7 +886,12 @@ export function Segmented<T extends string>(props: {
   const width = signal(0);
   const x = createAnimatedValue(0);
   const index = () => Math.max(0, props.options.findIndex((o) => o.value === props.value));
-  const segment = () => (width() - 6) / Math.max(1, props.options.length);
+  // The track's border and padding: the indicator is placed inside the
+  // border (an absolute child's containing block is the padding box), so
+  // the segments share what is left of the measured width after both.
+  const border = 1;
+  const inset = 3;
+  const segment = () => (width() - 2 * (border + inset)) / Math.max(1, props.options.length);
   const height = props.size === "small" ? 32 : 40;
   // The first placement jumps; later ones spring.
   let placed = false;
@@ -744,18 +903,16 @@ export function Segmented<T extends string>(props: {
     placed = true;
   });
   return (
-    <View
-      onLayout={(e) => width.set(e.width)}
-      accessibilityRole="tablist"
+    <Tabs
+      onLayout={(e) => width.set(e.size.width)}
       style={{
         height,
         flexDirection: "row",
-        padding: 3,
+        padding: inset,
         borderRadius: height / 2,
         backgroundColor: colors.inset,
-        // The track's glass: the sunk shadow plus a lit lower rim.
-        boxShadow: `${finish.track.boxShadow}, inset 0 -1px 0 ${isDark() ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.85)"}`,
-        borderWidth: 1,
+        boxShadow: finish.track.boxShadow,
+        borderWidth: border,
         borderColor: colors.border,
       }}
     >
@@ -763,11 +920,11 @@ export function Segmented<T extends string>(props: {
         pointerEvents="none"
         style={{
           position: "absolute",
-          top: 3,
-          left: 3,
-          bottom: 3,
+          top: inset,
+          left: inset,
+          bottom: inset,
           width: segment(),
-          borderRadius: (height - 6) / 2,
+          borderRadius: (height - 2 * (border + inset)) / 2,
           ...finish.pill,
           borderWidth: 1,
           transform: [{ translateX: x }],
@@ -775,10 +932,9 @@ export function Segmented<T extends string>(props: {
       />
       <Each of={props.options}>
         {(option) => (
-          <View
+          <Tab
+            selected={props.value === option().value}
             onPress={() => props.onChange(option().value)}
-            accessibilityRole="tab"
-            accessibilityState={{ selected: props.value === option().value }}
             style={{ flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5 }}
           >
             <Text
@@ -794,10 +950,10 @@ export function Segmented<T extends string>(props: {
             <If when={option().count !== undefined}>
               <Text style={{ fontSize: 12, color: colors.faint, fontVariant: ["tabular-nums"] }}>{option().count}</Text>
             </If>
-          </View>
+          </Tab>
         )}
       </Each>
-    </View>
+    </Tabs>
   );
 }
 
@@ -906,8 +1062,8 @@ export function lazy(load: () => Promise<() => JSX.Element>): () => JSX.Element 
       },
     ));
   function Loaded() {
-    const Screen = screen!;
-    return <Screen />;
+    const Page = screen!;
+    return <Page />;
   }
   return function Lazy() {
     start();
@@ -926,5 +1082,32 @@ function Loading(props: { failed: string }) {
         {props.failed || "Loading…"}
       </Text>
     </View>
+  );
+}
+
+/**
+ * A panel at the bottom over a dimmed backdrop while `open` (`nsh/base`'s
+ * `Sheet`, in the gallery's look); a press on the backdrop, Escape or the
+ * back button closes it (`onClose`: set `open` to false).
+ */
+export function Sheet(props: { open: boolean; onClose: () => void; children: JSX.Element }) {
+  return (
+    <BaseSheet
+      open={props.open}
+      onOpenChange={(open) => !open && props.onClose()}
+      backdropStyle={{ backgroundColor: "rgba(0,0,0,0.4)" }}
+      popupStyle={{
+        gap: 12,
+        paddingTop: 8,
+        paddingHorizontal: 16,
+        paddingBottom: safeArea().bottom + 16,
+        borderTopLeftRadius: 16,
+        borderTopRightRadius: 16,
+        backgroundColor: colors.surface,
+      }}
+    >
+      <View style={{ width: 36, height: 5, borderRadius: 3, alignSelf: "center", backgroundColor: colors.raised }} />
+      {props.children}
+    </BaseSheet>
   );
 }

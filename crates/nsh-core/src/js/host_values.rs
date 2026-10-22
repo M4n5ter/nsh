@@ -4,12 +4,15 @@
 
 use std::sync::Arc;
 
-use super::host::{HostCx, HostInput, HostValue, field};
+use super::host::{HostCx, HostInput, HostList, HostValue, field};
 use crate::{
     AccessibilityProp, AccessibilityRole, AccessibilityState, AutoFill, CellSlot, EdgeInsets,
-    ImageSource, KeyboardTaps, ListContentStyle, ModalProp, Prop, ScrollProp, Viewability,
-    WebSource,
+    ImageScales, ImageSource, KeyboardTaps, ListContentStyle, ModalProp, Prop, ScrollProp,
+    StatusBarSetting, StatusBarStyle, Viewability,
+    geometry::{Points, point, size},
     mount::ModalConfig,
+    ops::OverlayProp,
+    overlay::{OverlayAnchor, TooltipContent},
     props::{AccessibilityActionDef, AccessibilityValue, Checked, PanActivation, Ripple},
     ui::TsTypes,
 };
@@ -21,61 +24,65 @@ fn number<I: HostInput>(input: &I, key: &str) -> Option<f32> {
         .map(|n| n as f32)
 }
 
-/// `"https://…"` or a bundled asset `{ uri, width, height }`.
+/// Field `key` of `input` as a number of points.
+fn points<I: HostInput>(input: &I, key: &str) -> Option<Points> {
+    number(input, key).map(Points)
+}
+
+/// The `scales` of an image asset (its first [`crate::ops::SCALES_READ`]
+/// entries); values that are not [`crate::IMAGE_SCALES`] are left out.
+fn scales<I: HostInput>(input: &I) -> ImageScales {
+    let Some(list) = input.field("scales").and_then(|s| s.as_list()) else {
+        return ImageScales::NONE;
+    };
+    (0..list.len().min(crate::ops::SCALES_READ))
+        .filter_map(|i| list.item(i)?.as_number())
+        .map(|n| n as f32)
+        .collect()
+}
+
+/// `"https://…"` or a bundled asset `{ url, size: { width, height }, scales }`.
 impl HostValue for ImageSource {
     fn decode<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Self> {
-        if let Some(uri) = input.as_string() {
-            return (!uri.is_empty()).then(|| ImageSource {
-                uri: uri.into(),
+        if let Some(url) = input.as_string() {
+            return (!url.is_empty()).then(|| ImageSource {
+                uri: url.into(),
                 size: None,
+                scales: ImageScales::NONE,
+                data: None,
             });
         }
-        let uri = input.field("uri")?.as_string()?;
-        let size = match (number(input, "width"), number(input, "height")) {
-            (Some(w), Some(h)) => Some((w, h)),
+        let url = input.field("url")?.as_string()?;
+        let extent = input.field("size");
+        let size = match extent
+            .as_ref()
+            .map(|e| (number(e, "width"), number(e, "height")))
+        {
+            Some((Some(w), Some(h))) => Some(size(Points(w), Points(h))),
             _ => None,
         };
         Some(ImageSource {
-            uri: uri.into(),
+            uri: url.into(),
             size,
+            scales: scales(input),
+            data: None,
         })
     }
 
     fn ts_type(_: &mut TsTypes) -> String {
-        "string | ImageAsset | { uri: string }".into()
+        "string | ImageAsset".into()
     }
 }
 
-/// `"https://…"`, `{ uri }` or `{ html, baseUrl }`.
-impl HostValue for WebSource {
-    fn decode<I: HostInput>(input: &I, cx: &mut HostCx) -> Option<Self> {
-        if let Some(uri) = input.as_string() {
-            return Some(WebSource::Uri(uri.into()));
-        }
-        if let Some(html) = input.field("html").and_then(|h| h.as_string()) {
-            return Some(WebSource::Html {
-                html: html.into(),
-                base_url: field::<Arc<str>, _>(input, "baseUrl", cx),
-            });
-        }
-        let uri = input.field("uri")?.as_string()?;
-        Some(WebSource::Uri(uri.into()))
-    }
-
-    fn ts_type(_: &mut TsTypes) -> String {
-        "string | { uri: string } | { html: string; baseUrl?: string }".into()
-    }
-}
-
-/// A list's `contentContainerStyle`: the padding properties (numbers) and
+/// A list's `contentStyle`: the padding properties (numbers) and
 /// `gap` / `rowGap` / `columnGap`.
 impl HostValue for ListContentStyle {
     fn decode<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Self> {
-        let n = |key| number(input, key);
-        let all = n("padding").unwrap_or(0.0);
+        let n = |key| points(input, key);
+        let all = n("padding").unwrap_or_default();
         let horizontal = n("paddingHorizontal").unwrap_or(all);
         let vertical = n("paddingVertical").unwrap_or(all);
-        let gap = n("gap").unwrap_or(0.0);
+        let gap = n("gap").unwrap_or_default();
         Some(ListContentStyle {
             padding: EdgeInsets {
                 top: n("paddingTop").unwrap_or(vertical),
@@ -90,13 +97,37 @@ impl HostValue for ListContentStyle {
 
     fn ts_type(types: &mut TsTypes) -> String {
         types.declare("ListContentStyle", |_| {
-            "/** Padding and gaps of a list's content (`contentContainerStyle`). */\n\
+            "/** Padding and gaps of a list's content (`contentStyle`). */\n\
              export interface ListContentStyle {\n  padding?: number;\n  paddingHorizontal?: number;\n  \
              paddingVertical?: number;\n  paddingTop?: number;\n  paddingRight?: number;\n  \
              paddingBottom?: number;\n  paddingLeft?: number;\n  gap?: number;\n  rowGap?: number;\n  \
              columnGap?: number;\n}"
                 .into()
         })
+    }
+}
+
+/// A page's or dialog's `statusBar`: `{ foreground, hidden, animated }`
+/// (`StatusBar`, declared with the navigation in `nsh/base`); the fields
+/// left out keep what is below. An unknown `foreground` is left out.
+impl HostValue for StatusBarSetting {
+    fn decode<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Self> {
+        if !input.is_object() {
+            return None;
+        }
+        let flag = |key| input.field(key).and_then(|v| v.as_bool());
+        Some(StatusBarSetting {
+            style: input
+                .field("foreground")
+                .and_then(|v| v.as_string())
+                .and_then(|s| StatusBarStyle::from_name(&s)),
+            hidden: flag("hidden"),
+            animated: flag("animated"),
+        })
+    }
+
+    fn ts_type(_: &mut TsTypes) -> String {
+        "StatusBar".into()
     }
 }
 
@@ -120,7 +151,7 @@ impl HostValue for PanActivation {
         if !input.is_object() {
             return None;
         }
-        let offset = |key| number(input, key).map(f32::abs);
+        let offset = |key| points(input, key).map(Points::abs);
         Some(PanActivation {
             active_offset_x: offset("activeOffsetX"),
             active_offset_y: offset("activeOffsetY"),
@@ -311,7 +342,7 @@ impl HostValue for Ripple {
         Some(Ripple {
             color: field(input, "color", cx),
             borderless: flag("borderless"),
-            radius: number(input, "radius"),
+            radius: points(input, "radius"),
             foreground: flag("foreground"),
         })
     }
@@ -372,6 +403,72 @@ pub(crate) fn selection<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop>
     ))
 }
 
+/// `textSource`: one literal byte offset, or ordered, non-overlapping local
+/// UTF-16 ranges mapped to absolute source byte ranges. Text boundaries are
+/// checked by the core against the actual flattened text.
+pub(crate) fn text_source<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
+    fn integer<I: HostInput>(input: &I) -> Option<u64> {
+        let n = input.as_number()?;
+        (n.is_finite() && (0.0..=9_007_199_254_740_991.0).contains(&n) && n.fract() == 0.0)
+            .then_some(n as u64)
+    }
+
+    fn decode<I: HostInput>(input: &I) -> Option<crate::TextSource> {
+        let id = input.field("id")?.as_string()?;
+        if id.is_empty() {
+            return None;
+        }
+        let source = match (input.field("offset"), input.field("segments")) {
+            (Some(offset), None) => crate::TextSource::Literal {
+                id: id.into(),
+                offset: integer(&offset)?,
+            },
+            (None, Some(mapped)) => {
+                let list = mapped.as_list()?;
+                let mut segments = Vec::new();
+                let mut previous_end = 0;
+                for index in 0..list.len() {
+                    let segment = list.item(index)?;
+                    let start = u32::try_from(integer(&segment.field("start")?)?).ok()?;
+                    let end = u32::try_from(integer(&segment.field("end")?)?).ok()?;
+                    let source_start = integer(&segment.field("sourceStart")?)?;
+                    let source_end = integer(&segment.field("sourceEnd")?)?;
+                    let kind = match segment.field("kind")?.as_string()?.as_str() {
+                        "literal" => crate::TextSourceKind::Literal,
+                        "replacement" => crate::TextSourceKind::Replacement,
+                        _ => return None,
+                    };
+                    if start >= end
+                        || start < previous_end
+                        || source_start > source_end
+                        || (kind == crate::TextSourceKind::Replacement
+                            && source_start == source_end)
+                    {
+                        return None;
+                    }
+                    previous_end = end;
+                    segments.push(crate::TextSourceSegment {
+                        start,
+                        end,
+                        source_start,
+                        source_end,
+                        kind,
+                    });
+                }
+                crate::TextSource::Mapped {
+                    id: id.into(),
+                    segments,
+                }
+            }
+            _ => return None,
+        };
+        Some(source)
+    }
+    // Invalid metadata revokes the previous source identity rather than
+    // retaining it on a reused text node. Glyph content is unaffected.
+    Some(Prop::TextSource(decode(input).map(Arc::new)))
+}
+
 /// `pan`: `{ x, y }` animated values.
 pub(crate) fn pan<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     let axis = |key| input.field(key).and_then(|v| v.animated_node());
@@ -383,6 +480,33 @@ pub(crate) fn pinch<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     Some(Prop::PinchValue(
         input.field("scale").and_then(|v| v.animated_node()),
     ))
+}
+
+/// `anchor`: a host element (a ref), `{ x, y }`, or nothing.
+pub(crate) fn overlay_anchor<I: HostInput>(input: &I, _: &mut HostCx) -> Option<OverlayProp> {
+    let anchor = match (input.node(), points(input, "x"), points(input, "y")) {
+        (Some(id), ..) => OverlayAnchor::Node(id),
+        (None, Some(x), Some(y)) => OverlayAnchor::Point(point(x, y)),
+        _ => OverlayAnchor::None,
+    };
+    Some(OverlayProp::Anchor(anchor))
+}
+
+/// `hintDelay`: milliseconds before a native hint is shown.
+pub(crate) fn hint_delay<I: HostInput>(input: &I, _: &mut HostCx) -> Option<OverlayProp> {
+    let millis = input.as_number().filter(|n| n.is_finite())?;
+    let delay = std::time::Duration::try_from_secs_f64(millis.max(0.0) / 1000.0).ok()?;
+    Some(OverlayProp::Hint(Some(delay)))
+}
+
+/// `tooltip`: a string, an element (a node JS made), or nothing.
+pub(crate) fn tooltip<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
+    let content = match (input.node(), input.as_string()) {
+        (Some(id), _) => TooltipContent::Node(id),
+        (None, Some(text)) if !text.is_empty() => TooltipContent::Text(text.into()),
+        _ => TooltipContent::None,
+    };
+    Some(Prop::Tooltip(content))
 }
 
 /// `rotation`: `{ angle }`.
@@ -400,7 +524,7 @@ pub(crate) fn scroll_value<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Pr
 /// `hitSlop`: one number for every edge, or the edges.
 pub(crate) fn hit_slop<I: HostInput>(input: &I, cx: &mut HostCx) -> Option<Prop> {
     Some(Prop::HitSlop(match input.as_number() {
-        Some(n) => EdgeInsets::all(n as f32),
+        Some(n) => EdgeInsets::all(Points(n as f32)),
         None => EdgeInsets::decode(input, cx).unwrap_or_default(),
     }))
 }
@@ -427,14 +551,14 @@ pub(crate) fn ui_theme<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> 
     Some(Prop::UiTheme(input.as_string()?.into()))
 }
 
-/// `accessibilityRole`: one of the role names; others are no role (and a
+/// `role`: one of the role names; others are no role (and a
 /// warning).
 pub(crate) fn role<I: HostInput>(input: &I, cx: &mut HostCx) -> Option<AccessibilityProp> {
     let role = AccessibilityRole::decode(input, cx);
     if role.is_none()
         && let Some(name) = input.as_string().filter(|n| !n.is_empty())
     {
-        cx.warn(format!("unknown accessibilityRole `{name}`"));
+        cx.warn(format!("unknown role `{name}`"));
     }
     Some(AccessibilityProp::Role(role.unwrap_or_default()))
 }
@@ -465,14 +589,14 @@ pub(crate) fn deceleration<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Sc
 /// `maintainVisibleContentPosition`: `{ autoscrollToBottomThreshold }`.
 pub(crate) fn visible_content<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     Some(Prop::FollowEnd(
-        number(input, "autoscrollToBottomThreshold").map(|t| t.max(0.0)),
+        points(input, "autoscrollToBottomThreshold").map(|t| t.max(Points::ZERO)),
     ))
 }
 
 /// `contentOffset`: `{ x, y }`.
 pub(crate) fn content_offset<I: HostInput>(input: &I, _: &mut HostCx) -> Option<ScrollProp> {
-    let n = |key| number(input, key).unwrap_or(0.0);
-    Some(ScrollProp::ContentOffset(n("x"), n("y")))
+    let n = |key| points(input, key).unwrap_or_default();
+    Some(ScrollProp::ContentOffset(point(n("x"), n("y"))))
 }
 
 /// `keyboardShouldPersistTaps`: a boolean or `"never"` / `"always"` /

@@ -18,8 +18,9 @@
 //! Line heights follow Pango's (and so the Linux and Windows backends')
 //! model: each span is as tall as its own font's ascent and descent (a
 //! fallback font for CJK or emoji does not grow the line), an explicit
-//! `lineHeight` spreads evenly above and below it, and an attachment stands
-//! on the baseline.
+//! `lineHeight` spreads evenly above and below it, and an attachment sits
+//! where its `verticalAlign` puts it in its placeholder's font (on the
+//! baseline by default), the line holding it.
 //!
 //! The final layout ([`GpuiLayout`]) is plain data: per line its metrics,
 //! its clusters' boxes (hit testing, selections, decorations) and glyphs
@@ -48,7 +49,8 @@ use gpui::{
 };
 use nsh_core::{
     ATTACHMENT_CHAR, AttributedText, Color, DecorationStyle, EllipsizeMode, EventKind, FontFamily,
-    Rect, ResolvedTextStyle, Size, TextAlign, TextEngine, TextLayout, TextLine, TextSpan,
+    Point, Points, ResolvedTextStyle, Size, TextAlign, TextEngine, TextLayout, TextLine, TextSpan,
+    geometry::point,
 };
 use rustc_hash::FxHashMap;
 use unicode_bidi::{Level, ParagraphBidiInfo};
@@ -803,6 +805,7 @@ impl SpanBox {
 
 /// The text shaped for measuring and layout.
 pub(crate) struct Prepared {
+    alignments: nsh_core::AttachmentAlignments,
     text: AttributedText,
     /// The paragraphs' base direction is right to left.
     rtl: bool,
@@ -833,6 +836,25 @@ struct Broken {
 }
 
 impl Prepared {
+    /// How far attachment `a`'s top is above the baseline, and what its
+    /// line reserves above and below it (`TextAttachment::ascent` and
+    /// `extent` in its placeholder's font).
+    fn attachment_box(&self, a: &nsh_core::TextAttachment) -> (f32, f32, f32) {
+        let alignments = &self.alignments;
+        let font = if alignments.get(a.index) == nsh_core::VerticalAlign::Baseline {
+            nsh_core::FontExtent::default()
+        } else {
+            let i = self
+                .spans
+                .partition_point(|s| s.end <= a.index)
+                .min(self.spans.len() - 1);
+            let s = &self.spans[i];
+            nsh_core::FontExtent::new(Points(s.ascent), Points(s.descent), Points(s.x))
+        };
+        let (up, down) = a.extent(font, alignments.get(a.index));
+        (a.ascent(font, alignments.get(a.index)).0, up.0, down.0)
+    }
+
     /// The width of clusters `start..end` without trailing whitespace.
     fn width(&self, start: u32, end: u32) -> f32 {
         let mut visible = end;
@@ -942,8 +964,9 @@ impl Prepared {
             }
             for t in attachments {
                 if t.index >= start && t.index < end {
-                    ascent = ascent.max(t.height);
-                    descent = descent.max(0.0);
+                    let (_, up, down) = self.attachment_box(t);
+                    ascent = ascent.max(up);
+                    descent = descent.max(down);
                 }
             }
         }
@@ -1060,7 +1083,7 @@ impl Builder<'_> {
             .attachments
             .iter()
             .find(|a| a.index == utf16)
-            .map_or(0.0, |a| a.width);
+            .map_or(0.0, |a| a.width.0);
         let flags = ATTACHMENT | if self.allowed[p.end] { BREAK } else { 0 };
         let at = self.glyphs.len() as u32;
         self.clusters.push(Cluster {
@@ -1181,7 +1204,7 @@ impl Builder<'_> {
             let advance = match symbol {
                 Some((glyphs, width)) => {
                     self.glyphs.extend(glyphs);
-                    let spacing = self.styles[span as usize].letter_spacing;
+                    let spacing = self.styles[span as usize].letter_spacing.0;
                     self.clusters.push(Cluster {
                         utf16: self.utf16[byte],
                         advance: width + spacing,
@@ -1205,7 +1228,7 @@ impl Builder<'_> {
                     });
                 }
             }
-            let spacing = self.styles[span as usize].letter_spacing;
+            let spacing = self.styles[span as usize].letter_spacing.0;
             self.clusters.push(Cluster {
                 utf16: self.utf16[byte],
                 advance: advance + spacing,
@@ -1222,6 +1245,14 @@ impl TextEngine for GpuiTextEngine {
     type Prepared = Prepared;
 
     fn prepare(&self, t: &AttributedText) -> Prepared {
+        self.prepare_aligned(t, &nsh_core::AttachmentAlignments::default())
+    }
+
+    fn prepare_aligned(
+        &self,
+        t: &AttributedText,
+        alignments: &nsh_core::AttachmentAlignments,
+    ) -> Prepared {
         let s = t.text.as_str();
         let mut utf16 = Vec::with_capacity(s.len() + 1);
         let mut u = 0u32;
@@ -1253,7 +1284,7 @@ impl TextEngine for GpuiTextEngine {
         let mut spans = Vec::with_capacity(styles.len());
         for (i, style) in styles.iter().enumerate() {
             let face = self.face(style);
-            let size = style.font_size;
+            let size = style.font_size.0;
             let m = face.metrics;
             let (start, end) = t.spans.get(i).map_or((0, u), |sp| (sp.start, sp.end));
             spans.push(SpanBox {
@@ -1261,7 +1292,7 @@ impl TextEngine for GpuiTextEngine {
                 end,
                 ascent: m.ascent * size,
                 descent: m.descent * size,
-                line_height: style.line_height,
+                line_height: style.line_height.0,
                 size,
                 cap: m.cap * size,
                 x: m.x * size,
@@ -1327,6 +1358,7 @@ impl TextEngine for GpuiTextEngine {
             prefix.push(sum);
         }
         Prepared {
+            alignments: alignments.clone(),
             text: t.clone(),
             rtl,
             clusters: b.clusters,
@@ -1339,8 +1371,8 @@ impl TextEngine for GpuiTextEngine {
         }
     }
 
-    fn measure(&self, p: &Prepared, max_width: Option<f32>) -> Size {
-        let max = match max_width {
+    fn measure(&self, p: &Prepared, max_width: Option<Points>) -> Size<Points> {
+        let max = match max_width.map(|m| m.0) {
             Some(m) if !p.text.no_wrap => m.max(0.0),
             _ => f32::INFINITY,
         };
@@ -1377,13 +1409,13 @@ impl TextEngine for GpuiTextEngine {
         if max.is_finite() {
             width = width.min(max);
         }
-        Size::new(width.ceil(), height.ceil())
+        Size::new(Points(width.ceil()), Points(height.ceil()))
     }
 
-    fn layout(&self, p: &Prepared, size: Size) -> TextLayout {
+    fn layout(&self, p: &Prepared, size: Size<Points>) -> TextLayout {
         let t = &p.text;
-        let avail = size.width.max(0.0);
-        let max = if t.no_wrap { f32::INFINITY } else { avail };
+        let avail = size.width.max(Points(0.0));
+        let max = if t.no_wrap { f32::INFINITY } else { avail.0 };
         let limit = t.max_lines as usize;
         let mut broken: Vec<Broken> = Vec::new();
         let mut more = false;
@@ -1401,7 +1433,7 @@ impl TextEngine for GpuiTextEngine {
             Some(c)
                 if p.ellipsizes()
                     && p.cuts_inside()
-                    && p.width(c.start, c.end) > avail + EPSILON =>
+                    && p.width(c.start, c.end) > avail.0 + EPSILON =>
             {
                 Some(c)
             }
@@ -1416,7 +1448,7 @@ impl TextEngine for GpuiTextEngine {
                 last: true,
             };
             rows.push(Row {
-                items: self.cut(p, c.start, c.end, avail),
+                items: self.cut(p, c.start, c.end, avail.0),
                 range: p.line_range(&line),
                 last: true,
                 ellipsis: true,
@@ -1427,9 +1459,9 @@ impl TextEngine for GpuiTextEngine {
             for (k, line) in broken.iter().enumerate() {
                 let mut items: Vec<Item> = (line.start..line.end).map(Item::Cluster).collect();
                 let trim = p.ellipsizes()
-                    && ((k + 1 == count && more) || (t.no_wrap && line.width > avail + EPSILON));
+                    && ((k + 1 == count && more) || (t.no_wrap && line.width > avail.0 + EPSILON));
                 if trim {
-                    self.trim_tail(p, line, &mut items, avail);
+                    self.trim_tail(p, line, &mut items, avail.0);
                 }
                 rows.push(Row {
                     items,
@@ -1446,7 +1478,7 @@ impl TextEngine for GpuiTextEngine {
         };
         let mut y = 0.0;
         for row in &rows {
-            y += self.place(p, row, avail, y, &mut out);
+            y += self.place(p, row, avail.0, y, &mut out);
         }
         TextLayout(Arc::new(out))
     }
@@ -1457,10 +1489,13 @@ impl TextEngine for GpuiTextEngine {
         })
     }
 
-    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
-        layout
-            .downcast::<GpuiLayout>()
-            .map_or_else(Vec::new, |l| l.attachments.clone())
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<Point<Points>>> {
+        layout.downcast::<GpuiLayout>().map_or_else(Vec::new, |l| {
+            l.attachments
+                .iter()
+                .map(|a| a.map(|(x, y)| point(Points(x), Points(y))))
+                .collect()
+        })
     }
 
     fn register_font(&self, data: &[u8]) -> Result<(), String> {
@@ -1705,6 +1740,8 @@ impl GpuiTextEngine {
                         kind,
                         size: s.size,
                         x_height: s.x,
+                        ascent: s.ascent,
+                        descent: s.descent,
                     });
                     for g in &p.glyphs[c.glyphs.0 as usize..c.glyphs.1 as usize] {
                         out.glyphs.push(Glyph {
@@ -1730,6 +1767,8 @@ impl GpuiTextEngine {
                         kind: BoxKind::Ellipsis,
                         size: s.size,
                         x_height: s.x,
+                        ascent: s.ascent,
+                        descent: s.descent,
                     });
                     for g in &e.glyphs {
                         out.glyphs.push(Glyph {
@@ -1780,8 +1819,8 @@ impl GpuiTextEngine {
             g.x += shift;
             g.y += baseline;
         }
-        // Attachments on the baseline; cap and x height of the largest
-        // font.
+        // Attachments by their `verticalAlign`; cap and x height of the
+        // largest font.
         let mut largest: Option<&SpanBox> = None;
         for (item, b) in order
             .iter()
@@ -1792,7 +1831,8 @@ impl GpuiTextEngine {
             let c = &p.clusters[ci as usize];
             if c.flags & ATTACHMENT != 0 {
                 if let Some(k) = t.attachments.iter().position(|a| a.index == c.utf16) {
-                    out.attachments[k] = Some((b.x, baseline - t.attachments[k].height));
+                    let (top, _, _) = p.attachment_box(&t.attachments[k]);
+                    out.attachments[k] = Some((b.x, baseline - top));
                 }
                 continue;
             }
@@ -1809,14 +1849,14 @@ impl GpuiTextEngine {
                 text: String::new(),
                 start,
                 end,
-                x: x0,
-                y,
-                width,
-                height: ascent + descent,
-                ascender: ascent,
-                descender: descent,
-                cap_height: largest.cap,
-                x_height: largest.x,
+                x: Points(x0),
+                y: Points(y),
+                width: Points(width),
+                height: Points(ascent + descent),
+                ascender: Points(ascent),
+                descender: Points(descent),
+                cap_height: Points(largest.cap),
+                x_height: Points(largest.x),
             },
             baseline,
             boxes: first_box..out.boxes.len(),
@@ -1850,6 +1890,9 @@ struct CBox {
     /// Font size and x height of its span (decorations).
     size: f32,
     x_height: f32,
+    /// Its font's ascent and descent (span backgrounds).
+    ascent: f32,
+    descent: f32,
 }
 
 /// One glyph to paint.
@@ -1890,7 +1933,7 @@ impl GpuiLayout {
     fn line_at(&self, y: f32) -> Option<&Line> {
         self.lines
             .iter()
-            .find(|l| y >= l.info.y && y < l.info.y + l.info.height)
+            .find(|l| y >= l.info.y.0 && y < (l.info.y + l.info.height).0)
     }
 
     /// The UTF-16 offset of the character at `(x, y)` (content
@@ -1910,7 +1953,7 @@ impl GpuiLayout {
         let Some(line) = self
             .lines
             .iter()
-            .find(|l| y < l.info.y + l.info.height)
+            .find(|l| y < (l.info.y + l.info.height).0)
             .or(self.lines.last())
         else {
             return 0;
@@ -1938,12 +1981,51 @@ impl GpuiLayout {
         }
     }
 
+    /// Calls `f(x, y, width, height, radius, color)` with the boxes
+    /// (content coordinates) of the span backgrounds of `text`.
+    fn background_rects(
+        &self,
+        text: &AttributedText,
+        mut f: impl FnMut(f32, f32, f32, f32, f32, Color),
+    ) {
+        for line in &self.lines {
+            let pieces = self.boxes[line.boxes.clone()].iter().map(|b| match b.kind {
+                BoxKind::Attachment => nsh_core::LinePiece {
+                    x: Points(b.x),
+                    width: Points(b.w),
+                    background: text.background_at(b.style),
+                    ascent: Points::ZERO,
+                    descent: Points::ZERO,
+                },
+                _ => nsh_core::LinePiece {
+                    x: Points(b.x),
+                    width: Points(b.w),
+                    background: text.background_at(b.style),
+                    ascent: Points(b.ascent),
+                    descent: Points(b.descent),
+                },
+            });
+            let clip = (line.info.x, line.info.x + line.info.width);
+            nsh_core::BackgroundBox::join(pieces, clip, |b| {
+                let top = line.baseline - b.ascent.0;
+                f(
+                    b.x.0,
+                    top,
+                    b.width.0,
+                    (b.ascent + b.descent).0,
+                    b.radius().0,
+                    b.background.color,
+                );
+            });
+        }
+    }
+
     /// Calls `f(x, y, width, height)` with the rectangles (content
     /// coordinates) that highlight the characters of `range`: per line,
     /// the spans of selected boxes, line high.
     fn selection_rects(&self, (a, b): (u32, u32), mut f: impl FnMut(f32, f32, f32, f32)) {
         for line in &self.lines {
-            let (y, h) = (line.info.y, line.info.height);
+            let (y, h) = (line.info.y.0, line.info.height.0);
             let mut current: Option<(f32, f32)> = None;
             for bx in &self.boxes[line.boxes.clone()] {
                 if bx.kind == BoxKind::Ellipsis || bx.at < a || bx.at >= b {
@@ -1975,15 +2057,29 @@ pub(crate) struct DrawnText {
     /// The engine's layout of it.
     pub(crate) layout: TextLayout,
     /// Where the layout goes inside the view.
-    pub(crate) content: Rect,
+    pub(crate) content: nsh_core::Bounds<Points>,
     /// The selection of `selectable` text, kept across new content.
     selection: Option<Rc<Selection>>,
+    /// The part of the selection of the selection area around it that is
+    /// this text's ([`crate::selection_area`]).
+    pub(crate) area_range: Option<(u32, u32)>,
 }
 
 /// `Text`: a text view's content changed.
-pub(crate) fn set(view: &NshView, text: &Arc<AttributedText>, layout: &TextLayout, content: Rect) {
+pub(crate) fn set(
+    view: &NshView,
+    text: &Arc<AttributedText>,
+    layout: &TextLayout,
+    content: nsh_core::Bounds<Points>,
+) {
     let old = view.state_mut().text.take();
     let was = old.as_ref().is_some_and(|o| o.text.is_selectable());
+    // The area's selection is checked against the new content once the
+    // batch is applied (`selection_area::batch_applied`).
+    let area_range = old
+        .as_ref()
+        .filter(|o| o.text.text == text.text)
+        .and_then(|o| o.area_range);
     let selection = match old.and_then(|o| o.selection.map(|s| (s, o.text))) {
         Some((s, old)) if text.is_selectable() => {
             // Offsets into other text mean nothing.
@@ -2004,6 +2100,7 @@ pub(crate) fn set(view: &NshView, text: &Arc<AttributedText>, layout: &TextLayou
         layout: layout.clone(),
         content,
         selection,
+        area_range,
     });
     if was != text.is_selectable() {
         // The I-beam.
@@ -2074,18 +2171,19 @@ pub(crate) fn draw_shadow(cx: &mut DrawCx<'_>, state: &ViewState) {
         return;
     }
     let (ox, oy) = (
-        drawn.content.x + shadow.offset_x,
-        drawn.content.y + shadow.offset_y,
+        drawn.content.origin.x.0 + shadow.offset_x.0,
+        drawn.content.origin.y.0 + shadow.offset_y.0,
     );
     let k = cx.transform_scale();
     // GPUI blurs no glyphs: a blurred shadow is the glyphs painted on
     // rings out to the blur's radius, each faint, which spreads them as a
     // blur does.
     let mut offsets = vec![(0.0f32, 0.0f32)];
-    if shadow.radius > 0.0 {
+    let radius = shadow.radius.0;
+    if radius > 0.0 {
         let rings = [(0.25, 6), (0.5, 10), (0.75, 14), (1.0, 18)];
         for (r, count) in rings {
-            let r = r * shadow.radius * 0.8;
+            let r = r * radius * 0.8;
             for i in 0..count {
                 let a = (i as f32 + r) / count as f32 * std::f32::consts::TAU;
                 offsets.push((r * a.cos(), r * a.sin()));
@@ -2106,7 +2204,7 @@ pub(crate) fn draw_shadow(cx: &mut DrawCx<'_>, state: &ViewState) {
         }
     }
     paint_glyphs(cx, glyphs);
-    if shadow.radius <= 0.0 {
+    if radius <= 0.0 {
         decorate(cx, &drawn.text, layout, ox, oy, Some(shadow.color));
     }
 }
@@ -2121,8 +2219,18 @@ pub(crate) fn draw(cx: &mut DrawCx<'_>, state: &ViewState) {
         return;
     }
     let text = &drawn.text;
-    let (ox, oy) = (drawn.content.x, drawn.content.y);
-    if let Some(range) = drawn.selection.as_ref().and_then(|s| s.range.get()) {
+    let (ox, oy) = (drawn.content.origin.x.0, drawn.content.origin.y.0);
+    if text.has_backgrounds() {
+        layout.background_rects(text, |x, y, w, h, r, color| {
+            cx.fill_rect(crate::geom::rect(ox + x, oy + y, w, h), [r; 4], color);
+        });
+    }
+    if let Some(range) = drawn
+        .selection
+        .as_ref()
+        .and_then(|s| s.range.get())
+        .or(drawn.area_range)
+    {
         let tint = selection_tint(text);
         layout.selection_rects(range, |x, y, w, h| {
             cx.fill_rect(crate::geom::rect(ox + x, oy + y, w, h), [0.0; 4], tint);
@@ -2198,8 +2306,8 @@ fn decorate(
                 j += 1;
             }
             // Whitespace hanging past the line's end is not decorated.
-            let x0 = boxes[i].x.max(line.info.x);
-            let x1 = (boxes[j - 1].x + boxes[j - 1].w).min(line.info.x + line.info.width);
+            let x0 = boxes[i].x.max(line.info.x.0);
+            let x1 = (boxes[j - 1].x + boxes[j - 1].w).min((line.info.x + line.info.width).0);
             if x1 > x0
                 && let Some(s) = text.spans.get(span)
             {
@@ -2239,7 +2347,7 @@ fn stroke(
     }
     let pixels = |v: f32| (v / px1).round().max(1.0) * px1;
     // About what fonts' tables say (a twentieth of an em).
-    let t = pixels(style.decoration_thickness.unwrap_or(size / 18.0));
+    let t = pixels(style.decoration_thickness.map_or(size / 18.0, |t| t.0));
     let mut line = |top: f32| {
         let top = (top / px1).round() * px1;
         let mid = top + t / 2.0;
@@ -2300,7 +2408,7 @@ fn stroke(
     if d.underline {
         let offset = style
             .underline_offset
-            .unwrap_or_else(|| (size * 0.1).max(px1));
+            .map_or_else(|| (size * 0.1).max(px1), |o| o.0);
         line(baseline + offset);
     }
     if d.line_through {
@@ -2326,7 +2434,7 @@ pub(crate) fn draw_silhouette(
         return;
     }
     let k = cx.transform_scale();
-    let (ox, oy) = (drawn.content.x, drawn.content.y);
+    let (ox, oy) = (drawn.content.origin.x.0, drawn.content.origin.y.0);
     let tint = Some(cx.color(color));
     let mut glyphs = Vec::with_capacity(layout.glyphs.len() * offsets.len());
     // Emoji draw in their own colors: they cast no silhouette.
@@ -2339,12 +2447,85 @@ pub(crate) fn draw_silhouette(
     paint_glyphs(cx, glyphs);
 }
 
+/// The first rectangle (view coordinates: x, y, width, height) the
+/// characters `start..end` of the text view with `state` cover (the test
+/// agent's spans).
+pub(crate) fn range_rect(state: &ViewState, start: u32, end: u32) -> Option<(f32, f32, f32, f32)> {
+    let drawn = state.text.as_ref()?;
+    let layout = drawn.layout.downcast::<GpuiLayout>()?;
+    let (cx, cy) = (drawn.content.origin.x.0, drawn.content.origin.y.0);
+    let mut first = None;
+    layout.selection_rects((start, end), |x, y, w, h| {
+        first.get_or_insert((cx + x, cy + y, w, h));
+    });
+    first
+}
+
+/// Draws every visual fragment of the native inline keyboard target.
+pub(crate) fn draw_focus(cx: &mut DrawCx<'_>, view: &NshView, state: &ViewState) {
+    let Some(link) = crate::text_input::focused_link(view) else {
+        return;
+    };
+    let Some(drawn) = &state.text else { return };
+    let Some(layout) = drawn.layout.downcast::<GpuiLayout>() else {
+        return;
+    };
+    let (ox, oy) = (drawn.content.origin.x.0, drawn.content.origin.y.0);
+    let color = drawn
+        .text
+        .span_at(link.start)
+        .map_or(ResolvedTextStyle::default().color, |span| span.style.color);
+    layout.selection_rects((link.start, link.end), |x, y, w, h| {
+        for (x, y, w, h) in [
+            (ox + x, oy + y, w, 1.0),
+            (ox + x, oy + y + h - 1.0, w, 1.0),
+            (ox + x, oy + y, 1.0, h),
+            (ox + x + w - 1.0, oy + y, 1.0, h),
+        ] {
+            cx.fill_rect(crate::geom::rect(x, y, w, h), [0.0; 4], color);
+        }
+    });
+}
+
+/// Union of all visual fragments of a span, in its view's coordinates.
+pub(crate) fn range_bounds(
+    state: &ViewState,
+    start: u32,
+    end: u32,
+) -> Option<(f32, f32, f32, f32)> {
+    let drawn = state.text.as_ref()?;
+    let layout = drawn.layout.downcast::<GpuiLayout>()?;
+    let mut bounds: Option<(f32, f32, f32, f32)> = None;
+    layout.selection_rects((start, end), |x, y, w, h| {
+        bounds = Some(match bounds {
+            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x + w), y1.max(y + h)),
+            None => (x, y, x + w, y + h),
+        });
+    });
+    bounds.map(|(x0, y0, x1, y1)| {
+        (
+            drawn.content.origin.x.0 + x0,
+            drawn.content.origin.y.0 + y0,
+            x1 - x0,
+            y1 - y0,
+        )
+    })
+}
+
 /// The UTF-16 offset of the character at `(x, y)` (view coordinates), if
 /// any (presses on nested text links).
 pub(crate) fn char_at(state: &ViewState, x: f32, y: f32) -> Option<u32> {
     let drawn = state.text.as_ref()?;
     let layout = drawn.layout.downcast::<GpuiLayout>()?;
-    layout.char_at(x - drawn.content.x, y - drawn.content.y)
+    layout.char_at(x - drawn.content.origin.x.0, y - drawn.content.origin.y.0)
+}
+
+/// The caret position (UTF-16 offset) nearest `(x, y)` (view
+/// coordinates): where a click there puts it.
+pub(crate) fn caret_at(state: &ViewState, x: f32, y: f32) -> Option<u32> {
+    let drawn = state.text.as_ref()?;
+    let layout = drawn.layout.downcast::<GpuiLayout>()?;
+    Some(layout.caret_at(x - drawn.content.origin.x.0, y - drawn.content.origin.y.0))
 }
 
 // --- Selection ----------------------------------------------------------------------
@@ -2352,9 +2533,9 @@ pub(crate) fn char_at(state: &ViewState, x: f32, y: f32) -> Option<u32> {
 /// How far (points) the mouse moves on selectable text before a drag
 /// selects: past input's press slop where the press would fire (a link, an
 /// `onPress`), so a click never does both.
-const SELECT_SLOP: f32 = 3.0;
+pub(crate) const SELECT_SLOP: f32 = 3.0;
 /// The same over a press target.
-const SELECT_SLOP_PRESS: f32 = 10.0;
+pub(crate) const SELECT_SLOP_PRESS: f32 = 10.0;
 
 /// What a drag extends the selection by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2416,6 +2597,9 @@ fn select(surface: u64, view: &NshView, range: Option<(u32, u32)>) {
         return;
     }
     view.changed();
+    if range.is_some() {
+        crate::selection_area::clear_all();
+    }
     let previous = SELECTED.with_borrow_mut(|selected| match range {
         Some(_) => selected.replace((surface, view.clone())),
         None => {
@@ -2432,6 +2616,19 @@ fn select(surface: u64, view: &NshView, range: Option<(u32, u32)>) {
         && s.range.take().is_some()
     {
         other.changed();
+    }
+}
+
+/// Clears the selection of a single text, if there is one (a selection
+/// area selects: one selection at a time).
+pub(crate) fn clear_selection() {
+    let Some((_, view)) = SELECTED.with_borrow_mut(Option::take) else {
+        return;
+    };
+    if let Some(s) = view_selection(&view)
+        && s.range.take().is_some()
+    {
+        view.changed();
     }
 }
 
@@ -2455,7 +2652,7 @@ pub(crate) fn window_pressed(surface: &crate::surface::Surface, x: f32, y: f32) 
         .and_then(|m| m.unproject(x, y))
         .is_some_and(|(lx, ly)| {
             let s = view.state();
-            lx >= 0.0 && ly >= 0.0 && lx < s.frame.width && ly < s.frame.height
+            lx >= 0.0 && ly >= 0.0 && lx < s.frame.size.width.0 && ly < s.frame.size.height.0
         });
     if !inside {
         select(surface.key(), &view, None);
@@ -2516,9 +2713,9 @@ fn pressed(key: u64, view: &NshView, s: &Selection, clicks: u32, x: f32, y: f32,
         let Some(layout) = drawn.layout.downcast::<GpuiLayout>() else {
             return;
         };
-        let (lx, ly) = (x - drawn.content.x, y - drawn.content.y);
+        let (lx, ly) = (x - drawn.content.origin.x.0, y - drawn.content.origin.y.0);
         let char_index = layout.char_at(lx, ly);
-        let press = [EventKind::Press, EventKind::LongPress, EventKind::PressIn];
+        let press = [EventKind::Press, EventKind::LongPress, EventKind::PressDown];
         let over_press = press.iter().any(|&k| state.events.contains(k))
             || char_index
                 .and_then(|i| drawn.text.link_at(i))
@@ -2585,7 +2782,7 @@ fn dragged(key: u64, view: &NshView, s: &Selection, dx: f32, dy: f32, x: f32, y:
         let Some(layout) = drawn.layout.downcast::<GpuiLayout>() else {
             return;
         };
-        let caret = layout.caret_at(x - drawn.content.x, y - drawn.content.y);
+        let caret = layout.caret_at(x - drawn.content.origin.x.0, y - drawn.content.origin.y.0);
         extend(&drawn.text.text, s.anchor.get(), caret, s.unit.get())
     };
     select(key, view, Some(range));
@@ -2648,6 +2845,16 @@ fn select_all(surface: u64, view: &NshView) {
     select(surface, view, Some((0, len)));
 }
 
+/// The retained text selection owner, independent of its changing range.
+pub(crate) fn keyboard_owner(surface: &crate::surface::Surface) -> Option<NshView> {
+    SELECTED.with_borrow(|selected| {
+        selected
+            .as_ref()
+            .filter(|(key, view)| *key == surface.key() && view.attached())
+            .map(|(_, view)| view.clone())
+    })
+}
+
 /// Keys for the text selection (Ctrl+C or Ctrl+Insert, Ctrl+A, Escape;
 /// Cmd on macOS); true when handled.
 pub(crate) fn key(surface: &Rc<crate::surface::Surface>, event: &crate::input::KeyEvent) -> bool {
@@ -2658,15 +2865,11 @@ pub(crate) fn key(surface: &Rc<crate::surface::Surface>, event: &crate::input::K
     if !event.down {
         return false;
     }
-    let Some(view) = SELECTED.with_borrow(|s| {
-        s.as_ref()
-            .filter(|(key, v)| *key == surface.key() && v.attached())
-            .map(|(_, v)| v.clone())
-    }) else {
+    let Some(view) = keyboard_owner(surface) else {
         return false;
     };
     let m = event.modifiers;
-    let command = if cfg!(target_os = "macos") {
+    let command = if surface.environment.get().uses_apple_keys() {
         m.meta && !m.ctrl
     } else {
         m.ctrl
@@ -2864,7 +3067,7 @@ mod tests {
 
     fn plain(size: f32) -> ResolvedTextStyle {
         ResolvedTextStyle {
-            font_size: size,
+            font_size: Points(size),
             ..Default::default()
         }
     }
@@ -2873,9 +3076,9 @@ mod tests {
         engine: &GpuiTextEngine,
         t: &AttributedText,
         width: Option<f32>,
-    ) -> (Size, TextLayout) {
+    ) -> (Size<Points>, TextLayout) {
         let prepared = engine.prepare(t);
-        let size = engine.measure(&prepared, width);
+        let size = engine.measure(&prepared, width.map(Points));
         (size, engine.layout(&prepared, size))
     }
 
@@ -2963,7 +3166,7 @@ mod tests {
                 (
                     "Spaced letters ",
                     ResolvedTextStyle {
-                        letter_spacing: 1.3,
+                        letter_spacing: Points(1.3),
                         ..plain
                     },
                 ),
@@ -2978,8 +3181,8 @@ mod tests {
                 (
                     " mixed with big text",
                     ResolvedTextStyle {
-                        font_size: 31.0,
-                        line_height: 40.0,
+                        font_size: Points(31.0),
+                        line_height: Points(40.0),
                         ..plain
                     },
                 ),
@@ -3005,7 +3208,7 @@ mod tests {
                 t.text
             );
             for width in (40..400).step_by(7) {
-                let size = engine.measure(&prepared, Some(width as f32));
+                let size = engine.measure(&prepared, Some(Points(width as f32)));
                 let mut measured = 0;
                 prepared.break_lines(width as f32, |_| {
                     measured += 1;
@@ -3013,15 +3216,15 @@ mod tests {
                 });
                 let lines = engine.lines(&engine.layout(&prepared, size));
                 assert_eq!(lines.len(), measured, "{:?} at {width}", t.text);
-                let bottom = lines.last().map_or(0.0, |l| l.y + l.height);
+                let bottom = lines.last().map_or(0.0, |l| l.y.0 + l.height.0);
                 assert!(
-                    bottom <= size.height,
+                    bottom <= size.height.0,
                     "{:?} at {width}: {bottom} > {size:?}",
                     t.text
                 );
                 for line in &lines {
                     assert!(
-                        line.x >= -0.01 && line.x + line.width <= size.width + 0.01,
+                        line.x.0 >= -0.01 && line.x.0 + line.width.0 <= size.width.0 + 0.01,
                         "{:?} at {width}: {line:?} in {size:?}",
                         t.text
                     );
@@ -3045,7 +3248,7 @@ mod tests {
         let mut t = t.clone();
         t.no_wrap = true;
         let prepared = engine.prepare(&t);
-        assert_eq!(engine.measure(&prepared, Some(50.0)), one);
+        assert_eq!(engine.measure(&prepared, Some(Points(50.0))), one);
     }
 
     #[test]
@@ -3056,7 +3259,7 @@ mod tests {
         let t = text(&[("alpha beta gamma delta", plain(15.0))]);
         let prepared = engine.prepare(&t);
         let word = engine.measure(&engine.prepare(&text(&[("alpha beta", plain(15.0))])), None);
-        let (_, layout) = layout_of(&engine, &t, Some(word.width + 2.0));
+        let (_, layout) = layout_of(&engine, &t, Some(word.width.0 + 2.0));
         // Spaces end lines; the next line starts with a word.
         let lines = line_texts(&t, &layout);
         assert_eq!(lines[0], "alpha beta ", "{lines:?}");
@@ -3084,7 +3287,7 @@ mod tests {
         let prepared = engine.prepare(&t);
         let natural = engine.measure(&prepared, None).width;
         // Two characters and more a line (narrower, any break goes).
-        for width in (40..natural as i32).step_by(5) {
+        for width in (40..natural.0 as i32).step_by(5) {
             let (_, layout) = layout_of(&engine, &t, Some(width as f32));
             let lines = line_texts(&t, &layout);
             for l in &lines[1..] {
@@ -3106,8 +3309,8 @@ mod tests {
         let t = text(&[(
             "Line height on every line of a paragraph that wraps a few times",
             ResolvedTextStyle {
-                font_size: 16.0,
-                line_height: 30.0,
+                font_size: Points(16.0),
+                line_height: Points(30.0),
                 ..Default::default()
             },
         )]);
@@ -3115,13 +3318,13 @@ mod tests {
         let lines = engine.lines(&layout);
         assert!(lines.len() > 2);
         for (i, l) in lines.iter().enumerate() {
-            assert!((l.height - 30.0).abs() < 0.01, "{l:?}");
-            assert!((l.y - 30.0 * i as f32).abs() < 0.01, "{l:?}");
+            assert!((l.height.0 - 30.0).abs() < 0.01, "{l:?}");
+            assert!((l.y.0 - 30.0 * i as f32).abs() < 0.01, "{l:?}");
             // Half-leading: the font's box sits in the middle.
-            let half = (30.0 - l.ascender - l.descender).abs();
+            let half = (30.0 - l.ascender.0 - l.descender.0).abs();
             assert!(half < 0.01, "{l:?}");
         }
-        assert_eq!(size.height, (30.0 * lines.len() as f32).ceil());
+        assert_eq!(size.height, Points((30.0 * lines.len() as f32).ceil()));
         // A bigger span only grows its own line.
         let small = plain(14.0);
         let t = text(&[
@@ -3132,9 +3335,9 @@ mod tests {
         let (_, layout) = layout_of(&engine, &t, Some(180.0));
         let lines = engine.lines(&layout);
         assert!(lines.len() > 2);
-        assert!(lines[0].height > lines[1].height * 1.5, "{lines:?}");
+        assert!(lines[0].height.0 > lines[1].height.0 * 1.5, "{lines:?}");
         assert!(
-            (lines[1].height - lines[2].height).abs() < 0.01,
+            (lines[1].height.0 - lines[2].height.0).abs() < 0.01,
             "{lines:?}"
         );
     }
@@ -3148,14 +3351,14 @@ mod tests {
         let spaced = text(&[(
             "Spacing",
             ResolvedTextStyle {
-                letter_spacing: 4.0,
+                letter_spacing: Points(4.0),
                 ..plain(15.0)
             },
         )]);
         let a = engine.measure(&engine.prepare(&t), None);
         let b = engine.measure(&engine.prepare(&spaced), None);
         // Seven letters, four points after each.
-        assert!((b.width - a.width - 28.0).abs() <= 1.0, "{a:?} {b:?}");
+        assert!(((b.width - a.width).0 - 28.0).abs() <= 1.0, "{a:?} {b:?}");
         assert_eq!(a.height, b.height);
     }
 
@@ -3201,29 +3404,72 @@ mod tests {
     }
 
     #[test]
+    fn attachments_sit_by_vertical_align() {
+        let Some(engine) = engine() else {
+            return;
+        };
+        let style = ResolvedTextStyle::default();
+        // The first line's top of a 30 pt attachment after "Ax", and the
+        // line's extent above and below its baseline.
+        let place = |align| {
+            let mut t = text(&[("Ax", style)]);
+            let mut alignments = nsh_core::AttachmentAlignments::default();
+            alignments.push(
+                &mut t,
+                nsh_core::geometry::size(Points(10.0), Points(30.0)),
+                align,
+                style,
+            );
+            let prepared = engine.prepare_aligned(&t, &alignments);
+            let size = engine.measure(&prepared, None);
+            let layout = engine.layout(&prepared, size);
+            let line = engine.lines(&layout).remove(0);
+            let top = engine.attachments(&layout)[0].expect("shown").y.0;
+            (top, line.ascender.0, line.descender.0)
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        // Its bottom on the baseline.
+        let (top, up, _) = place(nsh_core::VerticalAlign::Baseline);
+        assert!(near(top + 30.0, up), "{top} {up}");
+        // Its top at the font's: the line grows below the baseline.
+        let (top, up, down) = place(nsh_core::VerticalAlign::TextTop);
+        assert!(near(top, 0.0) && near(up + down, 30.0), "{top} {up} {down}");
+        // Its bottom at the font's: the line grows above the baseline.
+        let (top, up, down) = place(nsh_core::VerticalAlign::TextBottom);
+        assert!(
+            near(top + 30.0, up + down) && near(top, 0.0),
+            "{top} {up} {down}"
+        );
+        // Its middle above the baseline.
+        let (top, up, _) = place(nsh_core::VerticalAlign::Middle);
+        assert!(top + 15.0 < up, "{top} {up}");
+    }
+
+    #[test]
     fn max_lines_and_attachments() {
         let Some(engine) = engine() else {
             return;
         };
         let style = ResolvedTextStyle::default();
         let mut t = text(&[("Before ", style)]);
-        t.push_attachment(20.0, 30.0, style);
+        t.push_attachment(nsh_core::geometry::size(Points(20.0), Points(30.0)), style);
         t.push(
             " after the attachment, and long enough to wrap a few times here.",
             style,
         );
         let prepared = engine.prepare(&t);
-        let size = engine.measure(&prepared, Some(120.0));
+        let size = engine.measure(&prepared, Some(Points(120.0)));
         let layout = engine.layout(&prepared, size);
         let points = engine.attachments(&layout);
         assert_eq!(points.len(), 1);
-        let (x, y) = points[0].expect("attachment shown");
+        let at = points[0].expect("attachment shown");
+        let (x, y) = (at.x.0, at.y.0);
         assert!(x > 0.0 && y >= 0.0, "{x}, {y}");
         let lines = engine.lines(&layout);
-        assert!(lines[0].height >= 30.0, "{:?}", lines[0]);
+        assert!(lines[0].height.0 >= 30.0, "{:?}", lines[0]);
         // On the baseline.
         assert!(
-            (y + 30.0 - lines[0].ascender).abs() < 0.01,
+            (y + 30.0 - lines[0].ascender.0).abs() < 0.01,
             "{y} {:?}",
             lines[0]
         );
@@ -3231,21 +3477,21 @@ mod tests {
         t.max_lines = 2;
         t.ellipsize = EllipsizeMode::Tail;
         let prepared = engine.prepare(&t);
-        let two = engine.measure(&prepared, Some(120.0));
+        let two = engine.measure(&prepared, Some(Points(120.0)));
         assert!(two.height < size.height);
         let layout = engine.layout(&prepared, two);
         assert_eq!(engine.lines(&layout).len(), 2);
         let s = shown(&t, &layout);
         assert!(s.ends_with('…'), "{s}");
         for line in engine.lines(&layout) {
-            assert!(line.x + line.width <= two.width + 0.01, "{line:?}");
+            assert!(line.x.0 + line.width.0 <= two.width.0 + 0.01, "{line:?}");
         }
 
         let mut t = text(&[("One\ntwo\nthree", style)]);
         t.max_lines = 2;
         t.ellipsize = EllipsizeMode::Tail;
         let prepared = engine.prepare(&t);
-        let size = engine.measure(&prepared, Some(200.0));
+        let size = engine.measure(&prepared, Some(Points(200.0)));
         let layout = engine.layout(&prepared, size);
         // "two" and the ellipsis, which stands for the line break.
         assert_eq!(shown(&t, &layout), "One|two…");
@@ -3270,13 +3516,13 @@ mod tests {
             t.max_lines = 1;
             t.ellipsize = mode;
             let prepared = engine.prepare(&t);
-            let size = engine.measure(&prepared, Some(160.0));
-            assert!(size.width <= 160.0, "{mode:?} {size:?}");
+            let size = engine.measure(&prepared, Some(Points(160.0)));
+            assert!(size.width.0 <= 160.0, "{mode:?} {size:?}");
             let layout = engine.layout(&prepared, size);
             let lines = engine.lines(&layout);
             assert_eq!(lines.len(), 1, "{mode:?}");
             assert!(
-                lines[0].x + lines[0].width <= 160.01,
+                lines[0].x.0 + lines[0].width.0 <= 160.01,
                 "{mode:?} {:?}",
                 lines[0]
             );
@@ -3305,7 +3551,7 @@ mod tests {
         t.no_wrap = true;
         t.max_lines = 2;
         let prepared = engine.prepare(&t);
-        let layout = engine.layout(&prepared, Size::new(80.0, 40.0));
+        let layout = engine.layout(&prepared, Size::new(Points(80.0), Points(40.0)));
         let s = shown(&t, &layout);
         assert_eq!(s.matches('…').count(), 2, "{s}");
     }
@@ -3322,13 +3568,16 @@ mod tests {
         let (first, second) = (&lines[0], &lines[1]);
         assert_eq!((first.start, first.end), (0, 2));
         assert_eq!((second.start, second.end), (3, 14));
-        assert_eq!(first.y, 0.0);
-        assert!((second.y - first.height).abs() < 0.01);
-        assert!((first.ascender + first.descender - first.height).abs() < 0.01);
-        assert!(first.ascender > 14.0 && first.descender > 3.0, "{first:?}");
-        let (cap, x) = (first.cap_height, first.x_height);
+        assert_eq!(first.y.0, 0.0);
+        assert!((second.y.0 - first.height.0).abs() < 0.01);
+        assert!((first.ascender.0 + first.descender.0 - first.height.0).abs() < 0.01);
+        assert!(
+            first.ascender.0 > 14.0 && first.descender.0 > 3.0,
+            "{first:?}"
+        );
+        let (cap, x) = (first.cap_height.0, first.x_height.0);
         assert!(cap > 11.0 && cap < 16.0 && x > 8.0 && x < cap, "{cap} {x}");
-        assert!(second.width > first.width);
+        assert!(second.width.0 > first.width.0);
     }
 
     #[test]
@@ -3337,10 +3586,10 @@ mod tests {
             return;
         };
         let mut t = text(&[("Short", plain(15.0))]);
-        let size = Size::new(300.0, 30.0);
+        let size = Size::new(Points(300.0), Points(30.0));
         let x = |t: &AttributedText| {
             let p = engine.prepare(t);
-            engine.lines(&engine.layout(&p, size))[0].x
+            engine.lines(&engine.layout(&p, size))[0].x.0
         };
         assert!(x(&t) < 1.0);
         t.align = TextAlign::Right;
@@ -3371,10 +3620,16 @@ mod tests {
         let lines = engine.lines(&layout);
         assert!(lines.len() > 2);
         for l in &lines[..lines.len() - 1] {
-            assert!((l.x + l.width - size.width).abs() < 0.5, "{l:?} {size:?}");
+            assert!(
+                (l.x.0 + l.width.0 - size.width.0).abs() < 0.5,
+                "{l:?} {size:?}"
+            );
         }
         let last = lines.last().unwrap();
-        assert!(last.x < 0.01 && last.width < size.width - 5.0, "{last:?}");
+        assert!(
+            last.x.0 < 0.01 && last.width.0 < size.width.0 - 5.0,
+            "{last:?}"
+        );
     }
 
     #[test]
@@ -3423,7 +3678,7 @@ mod tests {
         );
         let line = &engine.lines(&layout)[0];
         assert!(
-            line.x >= -0.01 && line.x + line.width <= size.width + 0.01,
+            line.x.0 >= -0.01 && line.x.0 + line.width.0 <= size.width.0 + 0.01,
             "{line:?}"
         );
     }
@@ -3484,6 +3739,41 @@ mod tests {
     }
 
     #[test]
+    fn span_backgrounds_box_each_line() {
+        let Some(engine) = engine() else {
+            return;
+        };
+        let style = plain(15.0);
+        let code = ResolvedTextStyle {
+            font_size: Points(13.0),
+            background: Some(nsh_core::TextBackground {
+                color: Color(0xeeee_eeff),
+                radius: Points(4.0),
+                node: 4,
+            }),
+            ..style
+        };
+        let t = text(&[("Run ", style), ("cargo test --all", code), (" now", style)]);
+        let (size, layout) = layout_of(&engine, &t, None);
+        let l = layout.downcast::<GpuiLayout>().unwrap();
+        let mut rects = Vec::new();
+        l.background_rects(&t, |x, y, w, h, r, c| rects.push((x, y, w, h, r, c)));
+        assert_eq!(rects.len(), 1, "{rects:?}");
+        let (x, y, w, h, r, c) = rects[0];
+        // The code's own font: lower than the line, around its baseline.
+        assert!(x > 0.0 && x + w < size.width.0, "{rects:?}");
+        assert!(y >= 0.0 && h < l.lines[0].info.height.0 + 0.01, "{rects:?}");
+        assert_eq!((r, c), (4.0, Color(0xeeee_eeff)));
+        // Wrapped: a box on each line the span reaches.
+        let (_, layout) = layout_of(&engine, &t, Some(w * 0.7));
+        let l = layout.downcast::<GpuiLayout>().unwrap();
+        let mut rects = Vec::new();
+        l.background_rects(&t, |x, y, w, h, r, c| rects.push((x, y, w, h, r, c)));
+        assert!(rects.len() >= 2, "{rects:?}");
+        assert!(rects[1].1 > rects[0].1);
+    }
+
+    #[test]
     fn carets_and_highlights() {
         let Some(engine) = engine() else {
             return;
@@ -3494,10 +3784,10 @@ mod tests {
         let l = layout.downcast::<GpuiLayout>().unwrap();
         assert_eq!(l.lines.len(), 2);
         assert_eq!(l.caret_at(-5.0, 2.0), 0);
-        assert_eq!(l.caret_at(size.width + 20.0, 2.0), 15);
+        assert_eq!(l.caret_at(size.width.0 + 20.0, 2.0), 15);
         // Below the text: the last line.
-        assert_eq!(l.caret_at(size.width + 20.0, size.height + 50.0), 22);
-        let mid = l.caret_at(size.width / 2.0, 2.0);
+        assert_eq!(l.caret_at(size.width.0 + 20.0, size.height.0 + 50.0), 22);
+        let mid = l.caret_at((size.width / 2.0).0, 2.0);
         assert!(mid > 3 && mid < 12, "{mid}");
         // Nearest edge: just right of a box's start is before it.
         let b = l.boxes[l.lines[0].boxes.clone()][2];
@@ -3518,7 +3808,7 @@ mod tests {
         let (size, layout) = layout_of(&engine, &rtl, None);
         let l = layout.downcast::<GpuiLayout>().unwrap();
         // Right to left: the right edge is the start.
-        assert_eq!(l.caret_at(size.width + 5.0, 2.0), 0);
+        assert_eq!(l.caret_at(size.width.0 + 5.0, 2.0), 0);
         assert_eq!(l.caret_at(-5.0, 2.0), 9);
     }
 
@@ -3533,7 +3823,7 @@ mod tests {
         let data = include_bytes!("../../../../examples/gallery/fonts/Pacifico-Regular.ttf");
         let style = ResolvedTextStyle {
             font_family: Some(nsh_core::FontFamily::new("Pacifico")),
-            font_size: 20.0,
+            font_size: Points(20.0),
             ..Default::default()
         };
         let t = text(&[("Custom fonts", style)]);
@@ -3554,7 +3844,7 @@ mod tests {
         );
         assert_eq!(&*engine.face(&style).font.family, "Pacifico");
         // Pacifico is tall: its lines are more than 1.5 ems.
-        assert!(after.height > 30.0, "{after:?}");
+        assert!(after.height.0 > 30.0, "{after:?}");
     }
 
     #[test]
@@ -3600,8 +3890,8 @@ mod tests {
         };
         let t = AttributedText::default();
         let (size, layout) = layout_of(&engine, &t, Some(100.0));
-        assert_eq!(size.width, 0.0);
-        assert!(size.height > 10.0);
+        assert_eq!(size.width, Points(0.0));
+        assert!(size.height.0 > 10.0);
         assert_eq!(engine.lines(&layout).len(), 1);
         // A text ending in a line break has an empty last line.
         let t = text(&[("one\n", plain(14.0))]);
@@ -3628,7 +3918,7 @@ mod tests {
             ("é\u{301}x", plain(15.0)),
         ]);
         let (size, layout) = layout_of(&engine, &t, None);
-        assert!(size.width > 0.0);
+        assert!(size.width.0 > 0.0);
         let shown = shown(&t, &layout);
         for part in ["2×3×", "中文", "😀"] {
             assert!(shown.contains(part), "{shown}");

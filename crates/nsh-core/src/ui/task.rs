@@ -24,7 +24,11 @@ use std::{
 use rustc_hash::FxHashMap;
 use tokio::runtime::Handle;
 
-use crate::{Command, Dialog, NodeId, ROOT_ID, StatusBarSetting, time::Instant};
+use crate::{
+    Command, Dialog, NodeId, ROOT_ID, StatusBarSetting,
+    geometry::{DevicePixels, Size},
+    time::Instant,
+};
 
 type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -76,25 +80,26 @@ pub(crate) enum Action {
     /// Reads the system clipboard; the answer resolves the slot.
     ReadClipboard(ClipboardRead),
     /// An operation on the native animation graph.
-    Animation(nsh_animation::AnimationOp),
+    Animation(crate::animation::AnimationOp),
     /// Starts an animation; its end resolves the slot.
     Animate {
-        op: nsh_animation::AnimationOp,
-        animation: nsh_animation::AnimationId,
+        op: crate::animation::AnimationOp,
+        animation: crate::animation::AnimationId,
         end: AnswerSlot<bool>,
     },
     /// Reads a node's value where it moves; the value resolves the slot.
     ReadValue {
-        node: nsh_animation::NodeId,
+        node: crate::animation::NodeId,
         value: AnswerSlot<f32>,
     },
     /// A component's own list reports the rows viewable now (they stayed
     /// so for its minimum view time).
     ReportViewable(NodeId),
+    /// A hint overlay's delay is over with the pointer on its anchor: it
+    /// shows.
+    Hint(NodeId),
     /// The start of the next display frame resolves the slot.
     Frame(AnswerSlot<Instant>),
-    /// Changes the layout direction's policy.
-    Direction(super::services::Direction),
     /// Sets the app's appearance.
     Appearance(crate::platform::Appearance),
     /// Measures the node with the layout of the commit the action goes out
@@ -108,15 +113,80 @@ pub(crate) enum ClipboardRead {
     Text(AnswerSlot<String>),
     /// Whether it holds text.
     Has(AnswerSlot<bool>),
+    /// The image (`None` when it holds none).
+    Image(AnswerSlot<Option<ClipboardImage>>),
+    /// Whether it holds an image.
+    HasImage(AnswerSlot<bool>),
+    /// The `file:` URLs of the local files on it.
+    Files(AnswerSlot<Vec<String>>),
 }
 
-/// An image's size in pixels (`Image.getSize`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, super::JsObject)]
+/// An image read from the system clipboard (`Clipboard.readImage`).
+#[derive(Debug, Clone, Default, PartialEq, super::JsObject)]
+pub struct ClipboardImage {
+    /// The image as a `data:` URL (`data:image/png;base64,…`): an image's
+    /// `src`, and `fetch(url)` gives its bytes.
+    pub url: String,
+    /// Its size in pixels.
+    pub size: Size<DevicePixels>,
+}
+
+/// An image's size in pixels (`Image.getSize`); TS: `ImageSize`, an alias of
+/// `Size`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ImageSize {
     /// Width.
-    pub width: f64,
+    pub width: DevicePixels,
     /// Height.
-    pub height: f64,
+    pub height: DevicePixels,
+}
+
+impl ImageSize {
+    /// As a [`Size`].
+    pub fn size(&self) -> Size<DevicePixels> {
+        Size::new(self.width, self.height)
+    }
+}
+
+impl From<ImageSize> for Size<DevicePixels> {
+    fn from(s: ImageSize) -> Self {
+        s.size()
+    }
+}
+
+/// TS: `type ImageSize = Size` (`{ width, height }`, in pixels here).
+impl super::JsValue for ImageSize {
+    fn ts_type(types: &mut super::TsTypes) -> String {
+        types.declare("ImageSize", |_| {
+            "/** An image's size in pixels (`Image.getSize`). */\nexport type ImageSize = Size;"
+                .into()
+        })
+    }
+
+    fn from_js(value: super::JsIn<'_>) -> Result<Self, super::PropError> {
+        if value.kind() != super::JsKind::Object {
+            return Err(value.expected("an object"));
+        }
+        let side = |key: &str| -> Result<DevicePixels, super::PropError> {
+            let v = value.field(key)?;
+            DevicePixels::from_js(v.get()).map_err(|e| super::PropError(format!("`{key}`: {e}")))
+        };
+        Ok(ImageSize {
+            width: side("width")?,
+            height: side("height")?,
+        })
+    }
+
+    fn to_js<'a>(
+        &self,
+        host: &'a dyn super::JsHost,
+    ) -> Result<super::JsOwned<'a>, super::PropError> {
+        let owned = super::JsOwned::new(host, host.new_object()?);
+        let object = owned.get().raw();
+        host.set_field(object, "width", self.width.to_js(host)?.into_raw())?;
+        host.set_field(object, "height", self.height.to_js(host)?.into_raw())?;
+        Ok(owned)
+    }
 }
 
 /// The status bar's base setting, as a command for the surface's root.
@@ -476,10 +546,12 @@ pub(crate) fn act_after(
 ) -> Task<()> {
     let weak = Rc::downgrade(executor);
     let acting = weak.clone();
+    // From now, not from when the task is first polled.
+    let at = crate::time::now() + delay;
     let id = executor.spawn(
         host,
         Box::pin(async move {
-            super::ambient::timer(delay).await;
+            super::ambient::timer_until(at).await;
             if let Some(executor) = acting.upgrade() {
                 executor.act(action);
             }

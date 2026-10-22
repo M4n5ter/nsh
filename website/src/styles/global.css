@@ -56,31 +56,33 @@
 
   /* Finishes (`finish` in ui.tsx): gentle top-to-bottom gradients, a
      highlight along the top edge, soft shadows. */
-  --finish-card-bg: linear-gradient(180deg, #1d1e22 0%, #17181b 100%);
-  --finish-card: 0 10px 28px rgb(0 0 0 / 38%);
+  --finish-card-bg: linear-gradient(180deg, #1b1c20 0%, #191a1d 100%);
+  --finish-card: inset 0 1px 0 rgb(255 255 255 / 4%), 0 16px 36px -20px rgb(0 0 0 / 75%);
   --finish-flat: 0 1px 2px rgb(0 0 0 / 30%);
   --finish-inset: inset 0 1px 3px rgb(0 0 0 / 55%);
-  --finish-raised-bg: linear-gradient(180deg, #2d2f34 0%, #222428 100%);
-  --finish-raised: 0 1px 2px rgb(0 0 0 / 45%);
-  --finish-primary-bg: linear-gradient(180deg, #fbfbfc 0%, #d4d6d9 100%);
-  --finish-primary-hover-bg: linear-gradient(180deg, #ffffff 0%, #dfe1e4 100%);
-  --finish-primary: inset 0 1px 0 rgb(255 255 255 / 90%), 0 3px 10px rgb(0 0 0 / 40%);
-  --finish-accent-bg: linear-gradient(180deg, #dbf893 0%, #b3dd4e 100%);
-  --finish-accent: inset 0 1px 0 rgb(255 255 255 / 45%), 0 3px 12px rgb(200 242 109 / 22%);
+  --finish-raised-bg: linear-gradient(180deg, #2b2d32 0%, #24262a 100%);
+  --finish-raised: inset 0 1px 0 rgb(255 255 255 / 7%), 0 1px 1px rgb(0 0 0 / 40%), 0 6px 14px -7px rgb(0 0 0 / 70%);
+  --finish-primary-bg: linear-gradient(180deg, #fbfbfc 0%, #e3e5e8 100%);
+  --finish-primary-hover-bg: linear-gradient(180deg, #ffffff 0%, #eaecee 100%);
+  --finish-primary: inset 0 1px 0 #ffffff, 0 1px 1px rgb(0 0 0 / 40%), 0 8px 18px -8px rgb(0 0 0 / 75%);
+  --finish-accent-bg: linear-gradient(180deg, #d6f78a 0%, #c1ea5c 100%);
+  --finish-accent: inset 0 1px 0 rgb(255 255 255 / 55%), 0 1px 1px rgb(0 0 0 / 40%), 0 8px 20px -9px rgb(200 242 109 / 40%);
 
-  /* Code: Shiki emits the macos-classic-light colours (src/light.theme.json);
-     the rules below map them onto these, so every snippet shares one palette. */
+  /* Code: Shiki emits the allsum-light colours (src/light.theme.json, the
+     palette of TextView's built-in highlighting); the rules below map them
+     onto these, so every snippet shares one palette. */
   --code-bg: #0c0d0f;
   --code-fg: #d6d9dd;
-  --code-keyword: #7ea8ff;
-  --code-string: #45d49a;
-  --code-comment: #6b7078;
-  --code-fn: #c8f26d;
-  --code-type: #8fd3e8;
-  --code-constant: #ffb547;
-  --code-number: var(--code-constant);
-  --code-property: #8fd3e8;
-  --code-variable: var(--code-keyword);
+  --code-keyword: #c4a7ff;
+  --code-string: #9fd68a;
+  --code-comment: #7d7a72;
+  --code-fn: #82b8ff;
+  --code-type: #6fd3d8;
+  --code-number: #f5b27a;
+  --code-constant: var(--code-number);
+  --code-property: #f0c674;
+  --code-variable: var(--code-property);
+  --code-deletion: #f87171;
   --code-link: var(--doc-link);
 
   --grid-line: rgb(255 255 255 / 4%);
@@ -93,17 +95,18 @@
   --shadow-panel: 0 20px 50px -24px rgb(0 0 0 / 70%);
   --shadow-dialog: 0 25px 60px -12px rgb(0 0 0 / 70%);
 
-  /* The demo frame's screen; demos run in the dark appearance. */
+  /* The demo frame's screen, behind the app: the demos' own background,
+     as they follow the page's theme. */
   --screen: #101113;
 
   --nav-shadow: 0 1px 0 rgb(0 0 0 / 35%);
   --nav-bg: color-mix(in srgb, var(--background) 72%, transparent);
   --nav-line: var(--line);
   --page-light: rgb(255 255 255 / 3.5%);
-  /* Dark surfaces get their top light from their gradients: a 1px inset highlight right inside a 1px border
-     reads as a doubled, blurry edge. */
-  --highlight: transparent;
-  --band-tinted: linear-gradient(180deg, #0d0e10, #0b0c0e);
+  /* Surfaces are nearly flat, so their top light is a faint 1px inset highlight: bright enough to read as an
+     edge catching light, faint enough not to double the border under it. */
+  --highlight: rgb(255 255 255 / 5%);
+  --band-tinted: linear-gradient(180deg, #0c0d0f, #0c0d0f);
   --logo-dot: #eef0f2;
   --logo-ring: transparent;
   --code-surface: rgb(0 0 0 / 14%);
@@ -113,7 +116,7 @@
   /* Liquid glass, for floating and layered surfaces only: a translucent
      fill, a lit rim (top light, bottom dark) and a gentle shadow. */
   --glass-fill: rgb(30 32 36 / 55%);
-  --glass-thumb: linear-gradient(180deg, rgb(255 255 255 / 16%), rgb(255 255 255 / 5%));
+  --glass-thumb: linear-gradient(180deg, rgb(255 255 255 / 12.4%), rgb(255 255 255 / 8.6%));
   --glass-edge: inset 0 1px 0 rgb(255 255 255 / 12%), inset 0 -1px 0 rgb(0 0 0 / 25%), inset 0 0 0 1px rgb(255 255 255 / 6%), 0 2px 8px rgb(0 0 0 / 25%);
   --glass-thumb-edge: inset 0 1px 0 rgb(255 255 255 / 22%), inset 0 -1px 0 rgb(0 0 0 / 20%), 0 1px 3px rgb(0 0 0 / 35%);
   --logo-top: #e2fb9f;
@@ -121,11 +124,11 @@
   --accent-border: transparent;
   --nav-active: rgb(255 255 255 / 6%);
   --nav-hover: rgb(255 255 255 / 3.5%);
-  --callout-tint: 9%;
-  --callout-tint-end: 3%;
+  --callout-tint: 8%;
+  --callout-tint-end: 8%;
   --callout-base: var(--card);
-  --callout-edge: transparent;
-  --active-shadow: 0 1px 2px rgb(0 0 0 / 45%), 0 4px 10px -6px rgb(0 0 0 / 55%);
+  --callout-edge: rgb(255 255 255 / 6%);
+  --active-shadow: 0 1px 2px rgb(0 0 0 / 35%);
   --callout-shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px -12px rgb(0 0 0 / 45%);
   /* A faint grain over the page, as on the gallery's surfaces. */
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  .07 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
@@ -143,7 +146,7 @@
 }
 
 /* The light variant: warm-neutral surfaces, the same finishes, the accent
-   darkened so it reads as text; demos keep running dark (`--screen`). */
+   darkened so it reads as text. */
 html.light {
   --background: #f3f3ef;
   --foreground: #15161a;
@@ -162,6 +165,7 @@ html.light {
   --ring: #4a6a0a;
   --sidebar: #efefea;
   --sidebar-accent: #ebebe6;
+  --screen: #f3f3ef;
 
   --citrus: #4a6a0a;
   --on-citrus: #1b2207;
@@ -182,28 +186,29 @@ html.light {
   --destructive: #d43345;
   --important: #4a6a0a;
 
-  --finish-card-bg: linear-gradient(180deg, #ffffff 0%, #fafaf7 100%);
-  --finish-card: inset 0 1px 0 #ffffff, inset 0 -1px 0 rgb(0 0 0 / 3%), 0 1px 2px rgb(20 20 10 / 6%), 0 8px 24px rgb(20 20 10 / 7%);
+  --finish-card-bg: linear-gradient(180deg, #ffffff 0%, #fdfdfc 100%);
+  --finish-card: inset 0 1px 0 #ffffff, 0 1px 1px rgb(20 20 10 / 4%), 0 14px 32px -18px rgb(20 20 10 / 20%);
   --finish-flat: inset 0 1px 0 #ffffff, inset 0 -1px 0 rgb(0 0 0 / 2.5%), 0 1px 2px rgb(20 20 10 / 5%);
   --finish-inset: inset 0 1px 2px rgb(0 0 0 / 6%), inset 0 0 0 1px rgb(0 0 0 / 2%);
-  --finish-raised-bg: linear-gradient(180deg, #ffffff 0%, #f4f4f0 100%);
-  --finish-raised: inset 0 1px 0 #ffffff, inset 0 -1px 0 rgb(0 0 0 / 3%), 0 1px 2px rgb(20 20 10 / 8%);
-  --finish-primary-bg: linear-gradient(180deg, #2a2b30 0%, #16171a 100%);
-  --finish-primary-hover-bg: linear-gradient(180deg, #33353b 0%, #1c1d21 100%);
-  --finish-primary: inset 0 1px 0 rgb(255 255 255 / 14%), 0 1px 2px rgb(20 20 10 / 18%), 0 4px 12px rgb(20 20 10 / 14%);
-  --finish-accent-bg: linear-gradient(180deg, #d4f683 0%, #bfe95c 100%);
-  --finish-accent: inset 0 1px 0 rgb(255 255 255 / 55%), 0 1px 3px rgb(80 110 10 / 18%);
+  --finish-raised-bg: linear-gradient(180deg, #ffffff 0%, #f6f6f2 100%);
+  --finish-raised: inset 0 1px 0 #ffffff, 0 1px 1px rgb(20 20 10 / 6%), 0 5px 12px -6px rgb(20 20 10 / 18%);
+  --finish-primary-bg: linear-gradient(180deg, #2e3035 0%, #1b1c20 100%);
+  --finish-primary-hover-bg: linear-gradient(180deg, #36383e 0%, #222327 100%);
+  --finish-primary: inset 0 1px 0 rgb(255 255 255 / 16%), 0 1px 1px rgb(20 20 10 / 20%), 0 7px 14px -7px rgb(20 20 10 / 50%);
+  --finish-accent-bg: linear-gradient(180deg, #d6f78a 0%, #c1ea5c 100%);
+  --finish-accent: inset 0 1px 0 rgb(255 255 255 / 60%), 0 1px 1px rgb(80 110 10 / 20%), 0 7px 14px -7px rgb(110 150 20 / 55%);
   --accent-border: #a7cf3f;
 
   --code-bg: #f0f0eb;
   --code-fg: #24262a;
-  --code-keyword: #3d63d1;
-  --code-string: #0f8a55;
-  --code-comment: #8c9097;
-  --code-fn: #4a6a0a;
-  --code-type: #0d6b84;
-  --code-constant: #b26a00;
-  --code-property: #0d6b84;
+  --code-keyword: #8250df;
+  --code-string: #116329;
+  --code-comment: #6e7781;
+  --code-fn: #0550ae;
+  --code-type: #0a7285;
+  --code-number: #953800;
+  --code-property: #7d4e00;
+  --code-deletion: #cf222e;
 
   --grid-line: rgb(21 22 26 / 5%);
   --scrollbar-thumb: rgb(21 22 26 / 18%);
@@ -220,7 +225,7 @@ html.light {
   --nav-line: rgb(40 40 20 / 13%);
   --page-light: rgb(255 255 255 / 70%);
   --highlight: #ffffff;
-  --band-tinted: linear-gradient(180deg, #eeeee9, #ebebe5);
+  --band-tinted: linear-gradient(180deg, #edede8, #ecece6);
   --logo-dot: #15161a;
   --logo-ring: transparent;
   --code-surface: rgb(120 120 90 / 4%);
@@ -228,11 +233,11 @@ html.light {
   --chip-bg: rgb(21 22 26 / 5.5%);
   --chip-edge: rgb(21 22 26 / 4%);
   --glass-fill: rgb(255 255 255 / 62%);
-  --glass-thumb: linear-gradient(180deg, #ffffff, rgb(255 255 255 / 72%));
+  --glass-thumb: linear-gradient(180deg, #ffffff, rgb(255 255 255 / 81.1%));
   --glass-edge: inset 0 1px 0 rgb(255 255 255 / 95%), inset 0 -1px 0 rgb(0 0 0 / 5%), inset 0 0 0 1px rgb(0 0 0 / 6%), 0 2px 8px rgb(20 20 10 / 8%);
   --glass-thumb-edge: inset 0 1px 0 #ffffff, inset 0 -1px 0 rgb(0 0 0 / 6%), 0 1px 3px rgb(20 20 10 / 14%);
-  --logo-top: #b5df4d;
-  --logo-bottom: #7ea51f;
+  --logo-top: #a3d13a;
+  --logo-bottom: #6a9a12;
   --nav-active: rgb(0 0 0 / 4.5%);
   --nav-hover: rgb(0 0 0 / 2.8%);
   --callout-tint: 7%;
@@ -323,18 +328,14 @@ html[lang^="zh"] :is(h1, h2, h3, h4) { letter-spacing: -0.01em; }
 
 .astro-code { background: var(--code-bg) !important; color: var(--code-fg) !important; }
 .astro-code span { color: var(--code-fg) !important; background-color: transparent !important; }
-.astro-code span[style*="color:#0433ff" i] { color: var(--code-keyword) !important; }
-.astro-code span[style*="color:#0000a2" i] { color: var(--code-fn) !important; }
-.astro-code span[style*="color:#571ab7" i] { color: var(--code-type) !important; }
-.astro-code span[style*="color:#036a07" i] { color: var(--code-string) !important; }
-.astro-code span[style*="color:#9a9a9a" i] { color: var(--code-comment) !important; }
-.astro-code span[style*="color:#c5060b" i],
-.astro-code span[style*="color:#3b96a6" i],
-.astro-code span[style*="color:#d21f07" i] { color: var(--code-constant) !important; }
-.astro-code span[style*="color:#8090e5" i] { color: var(--code-property) !important; }
-.astro-code span[style*="color:#318495" i] { color: var(--code-variable) !important; }
-.astro-code span[style*="color:#119605" i] { color: var(--code-number) !important; }
-.astro-code span[style*="color:#005cc5" i] { color: var(--code-link) !important; }
+.astro-code span[style*="color:#8250df" i] { color: var(--code-keyword) !important; }
+.astro-code span[style*="color:#116329" i] { color: var(--code-string) !important; }
+.astro-code span[style*="color:#6e7781" i] { color: var(--code-comment) !important; }
+.astro-code span[style*="color:#953800" i] { color: var(--code-number) !important; }
+.astro-code span[style*="color:#0550ae" i] { color: var(--code-fn) !important; }
+.astro-code span[style*="color:#7d4e00" i] { color: var(--code-property) !important; }
+.astro-code span[style*="color:#0a7285" i] { color: var(--code-type) !important; }
+.astro-code span[style*="color:#cf222e" i] { color: var(--code-deletion) !important; }
 
 /* ====================================================================
    Top bar
@@ -772,7 +773,7 @@ html[lang^="zh"] .toc__label { letter-spacing: 0.05em; }
   /* The opening paragraph is the page's standfirst. */
   .doc-body > p:first-child { color: var(--muted-foreground); font-size: 1.05rem; line-height: 1.7; }
 
-  p, ul, ol, pre, table, blockquote, .callout, details, figure { margin-block: 1rem; }
+  p, ul, ol, pre, table, blockquote, .callout, details, figure, .code-tabs { margin-block: 1rem; }
   .doc-body > :first-child { margin-top: 0; }
   .doc-body > :last-child { margin-bottom: 0; }
 
@@ -918,6 +919,65 @@ html[lang^="zh"] .toc__label { letter-spacing: 0.05em; }
   .doc-code-copy[data-copied] { color: var(--success); }
   .doc-code-copy svg { width: 0.85rem; height: 0.85rem; }
 
+  /* Code tabs (remark-code-tabs.js): the same card as a code block, its
+     header row a tab per language instead of one label. The selected tab is
+     the text colour over a 2px accent bar; the copy button stays in the row. */
+  .code-tabs {
+    position: relative;
+    margin-block: 1rem;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--finish-card-bg);
+    background-color: var(--card);
+    box-shadow: inset 0 1px 0 var(--highlight), var(--code-shadow);
+  }
+  .code-tabs__list {
+    display: flex;
+    gap: 0.25rem;
+    height: 2.25rem;
+    padding: 0 2.6rem 0 0.4rem;
+    border-bottom: 1px solid var(--divider);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .code-tabs__tab {
+    position: relative;
+    padding: 0 0.5rem;
+    color: var(--muted-foreground);
+    font: 600 0.7rem/1 var(--font-mono);
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: color 140ms ease;
+  }
+  .code-tabs__tab:hover { color: var(--foreground); }
+  .code-tabs__tab[aria-selected="true"] { color: var(--foreground); }
+  .code-tabs__tab[aria-selected="true"]::after {
+    position: absolute;
+    right: 0.5rem;
+    bottom: -1px;
+    left: 0.5rem;
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: var(--citrus);
+    content: "";
+  }
+  .code-tabs__tab:focus-visible { outline-offset: -2px; border-radius: 6px; }
+  .code-tabs__panel:focus-visible { outline-offset: -2px; }
+  .code-tabs__panel[hidden] { display: none; }
+  .code-tabs pre {
+    position: static;
+    margin: 0;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent !important;
+    box-shadow: none;
+  }
+  .code-tabs pre::before { display: none; }
+  .code-tabs:hover .doc-code-copy, .code-tabs:focus-within .doc-code-copy { opacity: 1; }
+
   /* Tables: a clean card, a faintly tinted header with small muted labels,
      hairlines between rows. */
   table {
@@ -938,7 +998,11 @@ html[lang^="zh"] .toc__label { letter-spacing: 0.05em; }
   th, td { padding: 0.55rem 0.85rem; line-height: 1.55; text-align: left; vertical-align: top; }
   thead th { border-bottom: 1px solid var(--line); }
   tbody tr + tr td { border-top: 1px solid var(--line); }
-  td:first-child code { white-space: nowrap; overflow-wrap: normal; }
+  /* Code in a cell keeps to one line and prose keeps a readable width: a
+     table wider than the page scrolls sideways instead of breaking
+     `boolean` into `boole an`. */
+  td code { white-space: nowrap; overflow-wrap: normal; word-break: normal; }
+  td:last-child { min-width: 16rem; }
 
   blockquote { padding: 0.1rem 0 0.1rem 1.1rem; border-left: 2px solid var(--citrus); color: var(--muted-foreground); }
   blockquote > p { margin-block: 0.5rem; }
@@ -1104,16 +1168,6 @@ html[lang^="zh"] .toc__label { letter-spacing: 0.05em; }
   background: var(--screen);
   box-shadow: 0 0 0 1px var(--line);
 }
-/* The inset's inner shadow, over the running app too. */
-.phone__screen::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  box-shadow: inset 0 1px 3px rgb(0 0 0 / 45%);
-  pointer-events: none;
-}
-
 .phone__screen iframe {
   display: block;
   width: calc(var(--phone-w) * 1px);
@@ -1196,6 +1250,26 @@ html[lang^="zh"] .toc__label { letter-spacing: 0.05em; }
 }
 .demo__open:hover { background: var(--secondary); color: var(--foreground) !important; }
 
+/* The panel's actions, icons in one group: edit in the playground, open in
+   a new tab (their names in `title` and `aria-label`). */
+.demo__actions {
+  display: inline-flex;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.demo__action {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 28px;
+  color: var(--muted-foreground) !important;
+  text-decoration: none !important;
+}
+.demo__action + .demo__action { border-left: 1px solid var(--border); }
+.demo__action:hover { background: var(--secondary); color: var(--foreground) !important; }
+
 /* Segmented controls: a glassy track, the selected item a lit glass pill. */
 .segmented {
   display: inline-flex;
@@ -1217,7 +1291,7 @@ html[lang^="zh"] .toc__label { letter-spacing: 0.05em; }
   transition: background 140ms ease, color 140ms ease;
 }
 .segmented button:hover { color: var(--foreground); }
-.segmented button[aria-selected="true"] { background: var(--glass-thumb); color: var(--foreground); box-shadow: var(--glass-thumb-edge); }
+.segmented button:is([aria-selected="true"], [aria-checked="true"]) { background: var(--glass-thumb); color: var(--foreground); box-shadow: var(--glass-thumb-edge); }
 
 .demo__stage {
   display: flex;
@@ -1248,10 +1322,17 @@ html[lang^="zh"] .toc__label { letter-spacing: 0.05em; }
   .demo__body .demo__stage .phone { --phone-scale: 0.64; }
   .demo .demo__body > .demo__code { display: block; max-height: none; contain: size; }
   .demo__body .demo__code pre { min-height: 100%; font-size: 0.8rem; }
-  .demo__bar .segmented { display: none; }
+  .demo__bar .demo__views { display: none; }
   .demo__bar .demo__file { margin-left: 0; }
   .demo .demo__body > .demo__stage { display: flex; }
 }
+
+/* The Desktop layout: a 1024×640 window scaled to the stage's width
+   (`demo-client.ts`), the source below it. */
+.demo[data-layout="desktop"] .demo__body { display: block; }
+.demo[data-layout="desktop"] .demo__body > .demo__stage { display: flex; border-right: 0; }
+.demo[data-layout="desktop"] .demo__body > .demo__code { display: block; max-height: 28rem; contain: none; border-top: 1px solid var(--line); }
+.demo[data-layout="desktop"] .demo__bar .demo__views { display: none; }
 
 .demo--missing { padding: 1rem; color: var(--destructive); font-size: 0.875rem; }
 

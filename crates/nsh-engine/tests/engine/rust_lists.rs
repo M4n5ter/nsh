@@ -11,25 +11,33 @@ use nsh_core::{
     ui::{Root, prelude::*},
 };
 use nsh_engine::{App, Engine, EngineConfig, Environment};
-use nsh_ui_mobile::{ListView, ListViewProps, Stepper, StepperApi, StepperProps};
 
-use crate::ChannelSink;
+use crate::{
+    ChannelSink,
+    test_ui::{Stepper, StepperApi, list_view, stepper},
+};
 
 fn start(root: Root) -> (Engine, Receiver<MountBatch>) {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: App::Rust(root),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
+        websocket: None,
+        filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
         data_dir: None,
         storage: None,
+        clock: Default::default(),
+        context: Default::default(),
+        pinned: Default::default(),
+        clipboard: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -126,7 +134,7 @@ fn Own() -> impl IntoElement {
                 move || count.get(),
                 |at| text(move || format!("row {}", at.index())).h(px(40.0)),
             )
-            .estimated_item_size(40.0)
+            .estimated_item_size(px(40.0))
             .flex_1()
             .header(
                 text(move || format!("header {}", header_taps.get()))
@@ -137,14 +145,14 @@ fn Own() -> impl IntoElement {
             .separator(|| view().h(px(1.0)).bg(rgb(0xeeeeee)))
             .sticky_header_indices([0])
             .keyboard_dismiss_mode(KeyboardDismissMode::OnDrag)
-            .end_reached_threshold(0.5)
+            .load_more_threshold(0.5)
             .initial_scroll_index(2)
             .minimum_view_time(Duration::from_millis(100))
-            .on_viewable_items_changed(move |rows: &ViewableItems| {
+            .on_viewable_items_change(move |rows: &ViewableItems| {
                 let rows = rows.indices();
                 visible.set(format!("{}-{}", rows.start(), rows.end()));
             })
-            .on_end_reached(move |_: &()| {
+            .on_load_more(move |_: &()| {
                 if !emptied.replace(true) {
                     count.set(0);
                 }
@@ -201,7 +209,7 @@ fn rust_lists_have_headers_footers_separators_and_empty_views() {
     let viewable = |first: f64, last: f64| {
         engine.control().dispatch_event(
             list,
-            EventKind::ViewableItemsChanged,
+            EventKind::ViewableItemsChange,
             EventPayload::Map(vec![
                 ("first", PayloadValue::Number(first)),
                 ("last", PayloadValue::Number(last)),
@@ -220,7 +228,7 @@ fn rust_lists_have_headers_footers_separators_and_empty_views() {
     // component's.
     engine
         .control()
-        .dispatch_event(list, EventKind::EndReached, EventPayload::None);
+        .dispatch_event(list, EventKind::LoadMore, EventPayload::None);
     tree.drain(&rx);
     assert!(tree.shows("nothing"), "{:?}", tree.texts);
     let nothing = tree.find("nothing").unwrap();
@@ -235,6 +243,66 @@ fn rust_lists_have_headers_footers_separators_and_empty_views() {
     );
 }
 
+/// A page: a header and a list of 100 rows in the page's viewport.
+#[component]
+fn Page() -> impl IntoElement {
+    scroll().flex_1().child(text("header").h(px(200.0))).child(
+        virtual_list(100, |at| {
+            text(move || format!("row {}", at.index())).h(px(40.0))
+        })
+        .viewport(ListViewport::Parent)
+        .estimated_item_size(px(40.0)),
+    )
+}
+
+#[test]
+fn rust_lists_in_a_pages_viewport_scroll_with_the_page() {
+    let (engine, rx) = start(Root::of::<Page>());
+    let mut tree = Tree::default();
+    let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    tree.apply(&first);
+    tree.drain(&rx);
+    // One scroll view, the page's; the list is a view in it.
+    let scrolls: Vec<u32> = tree
+        .kinds
+        .iter()
+        .filter(|(_, k)| *k == "Scroll")
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(scrolls.len(), 1, "{:?}", tree.kinds);
+    let page = scrolls[0];
+    // The rows from the list's start (200 down) to the viewport's end and
+    // a screen more: 0 to 1488 of the list, 38 rows.
+    let rows = |tree: &Tree| {
+        tree.texts
+            .iter()
+            .filter(|t| t.1.starts_with("row "))
+            .count()
+    };
+    assert!(
+        tree.shows("row 0") && tree.shows("row 37"),
+        "{:?}",
+        tree.texts
+    );
+    assert!(!tree.shows("row 38"));
+    assert_eq!(rows(&tree), 38);
+    let row = tree.find("row 0").unwrap();
+    let list = tree.parents[&tree.parents[&row]];
+    assert_eq!(tree.kinds[&list], "View");
+    assert_eq!(tree.parents[&list], page);
+    // The page scrolls 2000: the list's rows 23 to 87 render, in the
+    // cells there were and a few more.
+    engine.control().scroll(page, point(px(0.0), px(2000.0)), 0);
+    tree.drain(&rx);
+    assert!(
+        tree.shows("row 23") && tree.shows("row 87"),
+        "{:?}",
+        tree.texts
+    );
+    assert!(!tree.shows("row 88"));
+    assert_eq!(rows(&tree), 87 - 23 + 1);
+}
+
 /// A `ListView` with rows of this component and a header.
 #[component]
 fn Stocks() -> impl IntoElement {
@@ -243,7 +311,7 @@ fn Stocks() -> impl IntoElement {
     let pressed = signal(String::new());
     let ended = signal(0);
     view().flex_1().child(
-        ListView::element(ListViewProps::default()).items(
+        list_view().items(
             virtual_list(rows.len(), move |at| {
                 let rows = rows.clone();
                 text(move || rows[at.index()].clone())
@@ -253,7 +321,7 @@ fn Stocks() -> impl IntoElement {
             .header(text(move || {
                 format!("{} ended {}", pressed.get(), ended.get())
             }))
-            .on_end_reached(move |_: &()| ended.update(|e| *e += 1)),
+            .on_load_more(move |_: &()| ended.update(|e| *e += 1)),
         ),
     )
 }
@@ -285,7 +353,7 @@ fn rust_components_fill_a_list_views_rows() {
     // Its list's events are the component's too.
     engine
         .control()
-        .dispatch_event(list, EventKind::EndReached, EventPayload::None);
+        .dispatch_event(list, EventKind::LoadMore, EventPayload::None);
     tree.drain(&rx);
     assert!(tree.shows("pressed 1 ended 1"), "{:?}", tree.texts);
 }
@@ -296,30 +364,41 @@ fn start_js(app: &str) -> (Engine, Receiver<MountBatch>) {
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("App.tsx");
     std::fs::write(&entry, app).unwrap();
+    let ui_sets = vec![crate::test_ui::registry()];
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry,
         minify: false,
         split: false,
-        ui_sets: vec![nsh_ui_mobile::registry()],
+        ui_sets: ui_sets.iter().map(Into::into).collect(),
     })
     .unwrap();
-    let bytecode =
-        nsh_js::compile_bytecode_with(&bundle.code, false, &[nsh_ui_mobile::registry()]).unwrap();
+    let bytecode = nsh_js::compile_bytecode_with(
+        &bundle.code,
+        false,
+        &ui_sets.iter().map(Into::into).collect::<Vec<_>>(),
+    )
+    .unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         // SAFETY: compiled just now by this runtime.
         app: App::Js(unsafe { nsh_engine::Bundle::bytecode(bytecode) }),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
+        websocket: None,
+        filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
-        ui_sets: vec![nsh_ui_mobile::registry()],
+        ui_sets,
         runtime: None,
         data_dir: None,
         storage: None,
+        clock: Default::default(),
+        context: Default::default(),
+        pinned: Default::default(),
+        clipboard: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -328,7 +407,7 @@ fn start_js(app: &str) -> (Engine, Receiver<MountBatch>) {
 }
 
 const APP_LIST_VIEW: &str = r#"import { mount, signal, Text, View } from "nsh";
-import { ListView } from "nsh/ui/mobile";
+import { ListView } from "test/ui";
 
 const ends = signal(0);
 const rows = Array.from({ length: 100 }, (_, i) => `row ${i}`);
@@ -336,7 +415,7 @@ const rows = Array.from({ length: 100 }, (_, i) => `row ${i}`);
 mount(() => (
   <View style={{ flex: 1 }}>
     <Text>{`ends ${ends()}`}</Text>
-    <ListView each={rows} onEndReached={() => ends.set(ends() + 1)}>
+    <ListView each={rows} onLoadMore={() => ends.set(ends() + 1)}>
       {(row) => <Text>{row()}</Text>}
     </ListView>
   </View>
@@ -352,10 +431,10 @@ fn the_apps_handlers_on_a_list_views_rows_run() {
     let row = tree.find("row 1").expect("rows");
     let (list, _) = tree.cell(row).expect("in a list");
     // The list is a slot of the component (its node is JS's): the app's
-    // `onEndReached` gets the event.
+    // `onLoadMore` gets the event.
     engine
         .control()
-        .dispatch_event(list, EventKind::EndReached, EventPayload::None);
+        .dispatch_event(list, EventKind::LoadMore, EventPayload::None);
     tree.drain(&rx);
     assert!(tree.shows("ends 1"), "{:?}", tree.texts);
 }
@@ -364,12 +443,12 @@ fn the_apps_handlers_on_a_list_views_rows_run() {
 #[component]
 fn Asker() -> impl IntoElement {
     let asked = signal(String::new());
-    let stepper = component_ref::<Stepper>();
+    let stepper_ref = component_ref::<Stepper>();
     view()
         .flex_1()
         .child(
             text(move || format!("asked {}", asked.get())).on_press(move |_: &()| {
-                let value = stepper.api::<StepperApi>().map(|api| {
+                let value = stepper_ref.api::<StepperApi>().map(|api| {
                     let value = api.value();
                     api.set_value(5.0);
                     value
@@ -377,13 +456,7 @@ fn Asker() -> impl IntoElement {
                 asked.set(format!("{value:?}"));
             }),
         )
-        .child(
-            Stepper::element(StepperProps {
-                default_value: 3.0.into(),
-                ..StepperProps::default()
-            })
-            .component_ref(&stepper),
-        )
+        .child(stepper().default_value(3.0).component_ref(&stepper_ref))
 }
 
 #[test]

@@ -58,7 +58,7 @@
 //! surface element registers its focus handle after it, so keys still go
 //! to the surface.
 //!
-//! Announcements (`announceForAccessibility`, [`announce`]) are a polite
+//! Announcements (`announce`, [`announce`]) are a polite
 //! live `Label` node added under the surface's: all three adapters read a
 //! live node that appears.
 //!
@@ -92,7 +92,7 @@ use gpui::{
 };
 use nsh_core::{
     Accessibility, AccessibilityRole as AxRole, Checked, Command, EventKind, EventMask, LiveRegion,
-    MountBatch, NodeId, ViewKind,
+    MountBatch, NodeId, ViewKind, geometry::Points,
 };
 use rustc_hash::FxHashMap;
 
@@ -394,15 +394,6 @@ const STANDARD_ACTIONS: [&str; 8] = [
     "escape",
 ];
 
-/// True when the view declares the accessibility action `name`.
-fn declares(s: &ViewState, name: &str) -> bool {
-    s.props
-        .accessibility
-        .actions
-        .iter()
-        .any(|a| &*a.name == name)
-}
-
 /// The AccessKit id of the view `id` of the surface `key`: stable across
 /// frames, and apart from every other surface's.
 pub(crate) fn node_id(key: u64, id: NodeId) -> accesskit::NodeId {
@@ -428,12 +419,33 @@ fn describe(
     field: Option<&FieldValue>,
     live: LiveRegion,
 ) -> (Node, Vec<Action>) {
-    let a = &s.props.accessibility;
+    describe_props(
+        &s.props,
+        s.events,
+        own_name(view, s, Some(role)),
+        role,
+        field,
+        live,
+        Some(s),
+    )
+}
+
+fn describe_props(
+    props: &nsh_core::ViewProps,
+    events: EventMask,
+    name: Option<String>,
+    role: Role,
+    field: Option<&FieldValue>,
+    live: LiveRegion,
+    view_state: Option<&ViewState>,
+) -> (Node, Vec<Action>) {
+    let a = &props.accessibility;
+    let declares = |name: &str| a.actions.iter().any(|action| &*action.name == name);
     let mut node = Node::new(match role {
         Role::TextInput if field.is_some_and(|f| f.password) => Role::PasswordInput,
         r => r,
     });
-    match own_name(view, s, Some(role)) {
+    match name {
         // AccessKit reads a label's name from its value.
         Some(name) if role == Role::Label => node.set_value(name),
         Some(name) => node.set_label(name),
@@ -450,7 +462,7 @@ fn describe(
     if let Some(help) = help_of(a, role) {
         node.set_description(help);
     }
-    if let Some(id) = &s.props.test_id {
+    if let Some(id) = &props.test_id {
         node.set_author_id(&**id);
     }
     let state = &a.state;
@@ -489,12 +501,15 @@ fn describe(
         LiveRegion::Assertive => node.set_live(Live::Assertive),
     }
     let mut actions = vec![Action::ScrollIntoView];
-    if let Some(sc) = &s.scroll {
-        let (mx, my) = sc.max((s.frame.width, s.frame.height));
-        node.set_scroll_x(sc.x as f64);
+    if let Some(s) = view_state
+        && let Some(sc) = &s.scroll
+    {
+        let max = sc.max(s.frame.size);
+        let (mx, my) = (max.x.0, max.y.0);
+        node.set_scroll_x(sc.x.0 as f64);
         node.set_scroll_x_min(0.0);
         node.set_scroll_x_max(mx as f64);
-        node.set_scroll_y(sc.y as f64);
+        node.set_scroll_y(sc.y.0 as f64);
         node.set_scroll_y_min(0.0);
         node.set_scroll_y_max(my as f64);
         if my > 0.0 {
@@ -505,33 +520,33 @@ fn describe(
         }
         actions.push(Action::SetScrollOffset);
     }
-    if s.scroll.is_some() || s.clips() {
+    if view_state.is_some_and(|s| s.scroll.is_some() || s.clips()) {
         node.set_clips_children();
     }
     if !state.disabled {
-        let pressable = s.events.contains(EventKind::Press) || declares(s, "activate");
+        let pressable = events.contains(EventKind::Press) || declares("activate");
         if pressable {
             actions.push(Action::Click);
         }
         if focusable(role) {
             actions.push(Action::Focus);
         }
-        if declares(s, "increment") {
+        if declares("increment") {
             actions.push(Action::Increment);
         }
-        if declares(s, "decrement") {
+        if declares("decrement") {
             actions.push(Action::Decrement);
         }
-        if state.expanded.is_some() && (pressable || declares(s, "expand")) {
+        if state.expanded.is_some() && (pressable || declares("expand")) {
             actions.push(Action::Expand);
         }
-        if state.expanded.is_some() && (pressable || declares(s, "collapse")) {
+        if state.expanded.is_some() && (pressable || declares("collapse")) {
             actions.push(Action::Collapse);
         }
-        if declares(s, "longpress") || s.events.contains(EventKind::LongPress) {
+        if declares("longpress") || events.contains(EventKind::LongPress) {
             actions.push(Action::ShowContextMenu);
         }
-        let stepped = range.is_some() && (declares(s, "increment") || declares(s, "decrement"));
+        let stepped = range.is_some() && (declares("increment") || declares("decrement"));
         if field.is_some_and(|f| !f.read_only) || stepped {
             actions.push(Action::SetValue);
         }
@@ -675,8 +690,51 @@ fn walk(
         let mut sub = Vec::new();
         walk(w, child, &cm, folds, live, &mut sub);
         let s = child.state();
+        if let Some(text) = &s.text {
+            for link in &text.text.links {
+                let a = &link.props.accessibility;
+                if a.hidden {
+                    continue;
+                }
+                let Some(role) = role_for(a, ViewKind::View, is_pressable(link.events)) else {
+                    continue;
+                };
+                let Some(rect) = crate::text::range_bounds(&s, link.start, link.end) else {
+                    continue;
+                };
+                let Some((x, y, width, height)) = cm.bounds(rect.0, rect.1, rect.2, rect.3) else {
+                    continue;
+                };
+                let start = nsh_core::text_edit::utf16_to_byte(&text.text.text, link.start);
+                let end = nsh_core::text_edit::utf16_to_byte(&text.text.text, link.end);
+                let name = a
+                    .label
+                    .as_deref()
+                    .unwrap_or(&text.text.text[start..end])
+                    .to_owned();
+                let (mut node, actions) =
+                    describe_props(&link.props, link.events, Some(name), role, None, live, None);
+                let k = w.scale as f64;
+                node.set_bounds(accesskit::Rect {
+                    x0: x as f64 * k,
+                    y0: y as f64 * k,
+                    x1: (x + width) as f64 * k,
+                    y1: (y + height) as f64 * k,
+                });
+                let id = node_id(w.key, link.node);
+                w.out.entries.push(Entry {
+                    id,
+                    view: link.node,
+                    node,
+                    actions,
+                });
+                sub.push(id);
+            }
+        }
         let (mut node, actions) = describe(child, &s, role, field.as_ref(), live);
-        if let Some((x, y, bw, bh)) = cm.bounds(0.0, 0.0, s.frame.width, s.frame.height) {
+        if let Some((x, y, bw, bh)) =
+            cm.bounds(0.0, 0.0, s.frame.size.width.0, s.frame.size.height.0)
+        {
             let k = w.scale as f64;
             node.set_bounds(accesskit::Rect {
                 x0: x as f64 * k,
@@ -784,19 +842,19 @@ pub(crate) fn focus_changed(surface: &Rc<Surface>, _view: &NshView) {
 }
 
 /// The element with the accessibility focus.
-pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
-    if let Some(field) = crate::text_input::focused(surface) {
-        return Some(field);
+fn focused(surface: &Surface) -> Option<NodeId> {
+    if let Some(target) = crate::text_input::focused_target(surface) {
+        return Some(target.id());
     }
     let id = STATES.with_borrow(|s| s.get(&surface.key()).and_then(|s| s.focus))?;
     let view = surface.view(id)?;
     match exposed(&view) {
-        Ok(Some(e)) => Some(e),
+        Ok(Some(e)) => Some(e.id()),
         _ => None,
     }
 }
 
-/// Has assistive technologies read `text` (`announceForAccessibility`).
+/// Has assistive technologies read `text` (`announce`).
 pub(crate) fn announce(surface: &Rc<Surface>, text: &str) {
     if text.is_empty() {
         return;
@@ -843,7 +901,7 @@ pub(crate) fn prepaint(
     let mut built = build(key, &surface.root, surface.origin.get(), scale, &field);
     let mut proxied = None;
     let mut proxy = None;
-    if let Some(view) = focused(surface).map(|v| v.id())
+    if let Some(view) = focused(surface)
         && let Some((entry, below)) = built.take_subtree(node_id(key, view))
     {
         let node = entry.node;
@@ -954,14 +1012,85 @@ pub(crate) fn paint(surface: &Surface, window: &mut Window, cx: &mut App) {
     for (node, view, actions) in listeners {
         for action in actions {
             window.on_a11y_action(node, action, move |data, window, cx| {
-                if let Some(surface) = Surface::by_key(key)
-                    && let Some(view) = surface.view(view)
-                {
-                    perform(&surface, &view, action, data, window.scale_factor());
+                if let Some(surface) = Surface::by_key(key) {
+                    if let Some(view) = surface.view(view) {
+                        perform(&surface, &view, action, data, window.scale_factor());
+                    } else if let Some(target) = crate::text_input::link_target(&surface, view) {
+                        perform_link(&surface, target, action, data);
+                    }
                 }
                 crate::rt::flush(cx);
             });
         }
+    }
+}
+
+/// A virtual link takes the same application action as its pointer press.
+fn perform_link(
+    surface: &Rc<Surface>,
+    target: crate::text_input::FocusTarget,
+    action: Action,
+    data: Option<&ActionData>,
+) {
+    let Some(link) = target.link().filter(|link| link.is_enabled()) else {
+        return;
+    };
+    match action {
+        Action::Focus => {
+            crate::input::focus_link(surface, target.view(), link.node);
+        }
+        Action::ScrollIntoView => crate::text_input::reveal_target(surface, &target),
+        Action::Click => {
+            action_or_press_props(
+                surface,
+                link.node,
+                &link.props.accessibility,
+                link.events,
+                "activate",
+                true,
+            );
+        }
+        Action::ShowContextMenu => {
+            if !action_or_press_props(
+                surface,
+                link.node,
+                &link.props.accessibility,
+                link.events,
+                "longpress",
+                false,
+            ) && link.events.contains(EventKind::LongPress)
+            {
+                surface.event(
+                    link.node,
+                    EventKind::LongPress,
+                    nsh_core::EventPayload::None,
+                );
+            }
+        }
+        Action::CustomAction => {
+            if let Some(ActionData::CustomAction(index)) = data
+                && let Some(action) = link.props.accessibility.actions.get(*index as usize)
+            {
+                send_action(surface, link.node, &action.name);
+            }
+        }
+        Action::Increment | Action::Decrement | Action::Expand | Action::Collapse => {
+            let name = match action {
+                Action::Increment => "increment",
+                Action::Decrement => "decrement",
+                Action::Expand => "expand",
+                _ => "collapse",
+            };
+            action_or_press_props(
+                surface,
+                link.node,
+                &link.props.accessibility,
+                link.events,
+                name,
+                false,
+            );
+        }
+        _ => {}
     }
 }
 
@@ -974,14 +1103,23 @@ pub(crate) fn activate(surface: &Surface, view: &NshView) -> bool {
 /// Sends the accessibility action `name` if the view declares it, else
 /// (with `press`) a press if it has press handlers.
 fn action_or_press(surface: &Surface, view: &NshView, name: &str, press: bool) -> bool {
-    let (id, has_action, pressable) = {
-        let s = view.state();
-        (
-            s.id,
-            declares(&s, name),
-            s.events.contains(EventKind::Press),
-        )
-    };
+    let s = view.state();
+    action_or_press_props(surface, s.id, &s.props.accessibility, s.events, name, press)
+}
+
+fn action_or_press_props(
+    surface: &Surface,
+    id: NodeId,
+    accessibility: &Accessibility,
+    events: EventMask,
+    name: &str,
+    press: bool,
+) -> bool {
+    let has_action = accessibility
+        .actions
+        .iter()
+        .any(|action| &*action.name == name);
+    let pressable = events.contains(EventKind::Press);
     if has_action {
         send_action(surface, id, name);
         true
@@ -1098,15 +1236,16 @@ fn perform(
             let target = {
                 let s = view.state();
                 s.scroll.as_ref().map(|sc| {
-                    let (w, h) = (s.frame.width, s.frame.height);
-                    let (mx, my) = sc.max((w, h));
+                    let (w, h) = (s.frame.size.width.0, s.frame.size.height.0);
+                    let max = sc.max(s.frame.size);
+                    let (mx, my) = (max.x.0, max.y.0);
                     let (dx, dy) = match action {
                         Action::ScrollUp => (0.0, -scroll_step(data, h)),
                         Action::ScrollDown => (0.0, scroll_step(data, h)),
                         Action::ScrollLeft => (-scroll_step(data, w), 0.0),
                         _ => (scroll_step(data, w), 0.0),
                     };
-                    ((sc.x + dx).clamp(0.0, mx), (sc.y + dy).clamp(0.0, my))
+                    ((sc.x.0 + dx).clamp(0.0, mx), (sc.y.0 + dy).clamp(0.0, my))
                 })
             };
             if let Some((x, y)) = target {
@@ -1127,8 +1266,8 @@ fn perform(
 /// Scrolls the scroll view `view` to the offset.
 fn scroll_to(surface: &Rc<Surface>, view: &NshView, x: f32, y: f32) {
     let command = Command::ScrollTo {
-        x,
-        y,
+        x: Points(x),
+        y: Points(y),
         animated: false,
     };
     crate::scroll::command(surface, view, &command);

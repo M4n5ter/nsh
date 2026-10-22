@@ -87,6 +87,11 @@ public class NshView extends FrameLayout {
      * @param trace log per-commit timings
      */
     public NshView(Context context, boolean trace) {
+        this(context, trace, new File(context.getFilesDir(), "nsh"));
+    }
+
+    /** As {@link #NshView(Context, boolean)}, the apps keeping their data in {@code dataDir}. */
+    NshView(Context context, boolean trace, File dataDir) {
         super(context);
         density = getResources().getDisplayMetrics().density;
         TextLayouts.cacheDir = context.getCacheDir();
@@ -106,8 +111,12 @@ public class NshView extends FrameLayout {
         // sets no soft input mode, this makes the system resize (and report
         // the keyboard as insets) instead of panning the window.
         setScrollContainer(true);
-        // Apps keep their data in nsh/<app id> in the files directory.
-        handle = Native.create(this, density, trace, new File(context.getFilesDir(), "nsh").getPath());
+        // The back key where the window has no OnBackInvokedCallback in
+        // effect (below Android 13, or `enableOnBackInvokedCallback` off).
+        addOnUnhandledKeyEventListener((v, e) -> onBackKey(e));
+        // Apps keep their data in <dataDir>/<app id>: nsh in the files
+        // directory unless the development host's test session says.
+        handle = Native.create(this, density, trace, dataDir.getPath());
     }
 
     /**
@@ -147,6 +156,11 @@ public class NshView extends FrameLayout {
         Native.setLimits(handle, memoryMb, stackKb, loadMs, callMs, maxNodes);
     }
 
+    /** Runs the apps loaded from now on as apps on their own, without limits (nsh's own activities). */
+    void useStandaloneLimits() {
+        Native.setStandaloneLimits(handle);
+    }
+
     /**
      * The directory the storage ({@code nsh/storage}) of the apps this view
      * loads from now on is kept in ({@code storage.json} in it). {@code null}
@@ -172,6 +186,31 @@ public class NshView extends FrameLayout {
         } catch (java.io.IOException none) {
             return null;
         }
+    }
+
+    /**
+     * The host app's locale, standing in for the user's: what {@code Intl}
+     * formats for by default and what {@code locale()} ({@code nsh/device})
+     * reads, at once and for every app loaded later.
+     *
+     * @param locale the locale, or null to follow the system's again
+     */
+    public void setLocale(java.util.Locale locale) {
+        hostLocale = locale;
+        publishEnvironment(getRootWindowInsets());
+    }
+
+    /**
+     * The host app's text size relative to the default (1), standing in for
+     * the system's font size: texts and inputs are laid out again at it and
+     * {@code fontScale()} reads it, at once and for every app loaded later;
+     * lengths stay as they are.
+     *
+     * @param scale the text size, or 0 to follow the system's again
+     */
+    public void setFontScale(float scale) {
+        hostFontScale = scale;
+        publishEnvironment(getRootWindowInsets());
     }
 
     /**
@@ -291,12 +330,26 @@ public class NshView extends FrameLayout {
         return Native.connectDevServer(handle, url);
     }
 
-    /** Stops the app. The view can no longer be used. */
+    /**
+     * Stops the app and calls {@link NshComponent#destroy} on each of its
+     * native components. The view can no longer be used.
+     */
     public void destroy() {
         if (handle != 0) {
             Native.destroy(handle);
             handle = 0;
         }
+        mounter.destroyComponents();
+    }
+
+    /**
+     * Called by the native side when the running app stopped because another
+     * one replaced it ({@code Host::load}). Batches the old app sent before
+     * are already queued, so its components go after them and before the
+     * new app's first batch.
+     */
+    void appStopped() {
+        main.post(mounter::destroyComponents);
     }
 
     @Override
@@ -309,6 +362,9 @@ public class NshView extends FrameLayout {
     // --- Environment ---------------------------------------------------------
 
     private float keyboard;
+    /** The host app's locale and text size ({@link #setLocale}, {@link #setFontScale}). */
+    private java.util.Locale hostLocale;
+    private float hostFontScale;
 
     @Override
     public WindowInsets onApplyWindowInsets(WindowInsets insets) {
@@ -392,8 +448,10 @@ public class NshView extends FrameLayout {
         Configuration c = getResources().getConfiguration();
         boolean dark = (c.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
         safe = new float[] {top / density, right / density, bottom / density, left / density};
+        java.util.Locale locale = hostLocale != null ? hostLocale : java.util.Locale.getDefault();
+        float fontScale = hostFontScale > 0 && !Float.isInfinite(hostFontScale) ? hostFontScale : c.fontScale;
         Native.environment(handle, new float[] {
-            top / density, right / density, bottom / density, left / density, ime / density, 0.25f, c.fontScale,
+            top / density, right / density, bottom / density, left / density, ime / density, 0.25f, fontScale,
             android.text.TextUtils.getLayoutDirectionFromLocale(java.util.Locale.getDefault()) == LAYOUT_DIRECTION_RTL ? 1 : 0,
             // "Remove animations" sets the animator scale to 0.
             android.provider.Settings.Global.getFloat(getContext().getContentResolver(),
@@ -403,14 +461,14 @@ public class NshView extends FrameLayout {
             Build.VERSION.SDK_INT,
             (c.uiMode & Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION ? 3
                     : c.smallestScreenWidthDp >= 600 ? 1 : 0,
-        }, dark, java.util.Locale.getDefault().toLanguageTag());
+        }, dark, locale.toLanguageTag());
     }
 
     private android.view.accessibility.AccessibilityManager accessibility() {
         return (android.view.accessibility.AccessibilityManager) getContext().getSystemService(Context.ACCESSIBILITY_SERVICE);
     }
 
-    /** TalkBack turning on or off: `AccessibilityInfo` and its events. */
+    /** TalkBack turning on or off: `screenReaderEnabled()`. */
     private final android.view.accessibility.AccessibilityManager.TouchExplorationStateChangeListener screenReader =
             enabled -> publishEnvironment(getRootWindowInsets());
 
@@ -439,17 +497,51 @@ public class NshView extends FrameLayout {
     private boolean backRegistered;
     private boolean exiting;
 
+    /** The mounter, for the test agent ({@link TestAgent}). */
+    Mounter mounter() {
+        return mounter;
+    }
+
     /**
      * Handles the back button for the app: closes modals, pops screens, runs
-     * JS `BackHandler` listeners. Activities on Android 12 and older call it
-     * from {@code onBackPressed} and fall back to the default when it
-     * returns false; newer versions get the press through a callback.
+     * JS `BackHandler` listeners. The view gets the button by itself: through
+     * an {@code OnBackInvokedCallback} it registers while the app wants back
+     * presses where the window dispatches back that way (Android 13+ with
+     * {@code android:enableOnBackInvokedCallback="true"}), else as the back
+     * key, which it takes before the activity's {@code onBackPressed} (and
+     * so before AndroidX's {@code OnBackPressedDispatcher}). Hosts that see
+     * the press first in another way may forward it here, falling back to
+     * their own handling when it returns false.
      *
      * @return whether the app handled the press
      */
     public boolean handleBack() {
         if (exiting || handle == 0) return false;
         return mounter.handleBack();
+    }
+
+    /** The back key's press went to the app (its release does too). */
+    private boolean backKeyDown;
+
+    /**
+     * The back key, as the window dispatches it without an
+     * {@code OnBackInvokedCallback} in effect: no view on the focus path took
+     * it, and the activity is next ({@code onBackPressed}). The app takes it
+     * while it wants back presses; with the callback in effect the window
+     * never sends the key, so a press is never handled twice.
+     */
+    private boolean onBackKey(android.view.KeyEvent e) {
+        if (e.getKeyCode() != android.view.KeyEvent.KEYCODE_BACK) return false;
+        if (e.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+            if (e.getRepeatCount() == 0) {
+                backKeyDown = !exiting && handle != 0 && isShown() && mounter.wantsBack();
+            }
+            return backKeyDown;
+        }
+        if (e.getAction() != android.view.KeyEvent.ACTION_UP || !backKeyDown) return false;
+        backKeyDown = false;
+        if (!e.isCanceled()) handleBack();
+        return true;
     }
 
     /** Whether the app wants back presses (registers the callback). */

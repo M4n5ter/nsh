@@ -10,7 +10,7 @@ use std::{
 };
 
 use nsh_core::{
-    Rect,
+    Bounds, Points,
     canvas::{CanvasTextAlign, CanvasTextBaseline, LineJoin},
     ui::{
         Animation, LayoutAnimation, LayoutCurve, LayoutTransition, prelude::*, sample_easing,
@@ -19,9 +19,9 @@ use nsh_core::{
 };
 
 use crate::ui::{
-    Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, MONO, PressProps,
-    PressRole, Segment, Segmented, SegmentedEvent, SegmentedProps, SegmentedSize, Tone, caption,
-    colors, icon, legend, press_with, radius, segmented, tints,
+    Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, MONO, PressRole,
+    Segment, SegmentedSize, Tone, caption, colors, icon, legend, lengths, press, radius, rect,
+    segmented, tints,
 };
 
 /// The tones of the demos' dots and tiles.
@@ -34,7 +34,7 @@ const TONES: [AdaptiveColor; 5] = [
 ];
 
 /// Text on a tone's fill.
-const ON_TONE: AdaptiveColor = AdaptiveColor::new(rgb(0xffffff), rgb(0x13160c));
+const ON_TONE: AdaptiveColor = AdaptiveColor::rgb(0xffffff, 0x13160c);
 
 /// `Easing.inOut(Easing.cubic)`.
 const CUBIC_IN_OUT: Easing = Easing::Curve(Curve::Cubic, EaseMode::InOut);
@@ -128,44 +128,41 @@ fn chip(
     active: Memo<bool>,
     on_press: impl Into<Listener<()>>,
 ) -> impl IntoElement {
-    press_with(
-        PressProps {
-            hit_slop: Some(4.0),
-            role: PressRole::Tab.into(),
-            selected: Prop::bind(move || active.get()),
-            ..PressProps::default()
-        },
-        on_press,
-    )
-    .child(
-        view()
-            .h(px(36.0))
-            .px(px(14.0))
-            .rounded(px(18.0))
-            .justify_center()
-            .style_when(
-                move || !active.get(),
-                |s| {
-                    s.bg(colors::RAISED)
-                        .finish(Finish::Raised)
-                        .border_1()
-                        .border_color(colors::BORDER)
-                },
-            )
-            .style_when(active, |s| s.bg(colors::LIGHT).finish(Finish::Light))
-            .child(
-                text(label)
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(move || {
-                        if active.get() {
-                            colors::ON_LIGHT
-                        } else {
-                            colors::TEXT
-                        }
-                    }),
-            ),
-    )
+    let on_press: Listener<()> = on_press.into();
+    press()
+        .hit_slop(4.0)
+        .role(PressRole::Tab)
+        .selected(move || active.get())
+        .on_press(on_press)
+        .child(
+            view()
+                .h(px(36.0))
+                .px(px(14.0))
+                .rounded(px(18.0))
+                .justify_center()
+                .style_when(
+                    move || !active.get(),
+                    |s| {
+                        s.bg(colors::RAISED)
+                            .finish(Finish::Raised)
+                            .border_1()
+                            .border_color(colors::BORDER)
+                    },
+                )
+                .style_when(active, |s| s.bg(colors::LIGHT).finish(Finish::Light))
+                .child(
+                    text(label)
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || {
+                            if active.get() {
+                                colors::ON_LIGHT
+                            } else {
+                                colors::TEXT
+                            }
+                        }),
+                ),
+        )
 }
 
 // --- Hero -------------------------------------------------------------------
@@ -233,7 +230,7 @@ fn Hero() -> impl IntoElement {
             .top(px(34.0))
             .size(px(S - 68.0))
             .rounded(px((S - 68.0) / 2.0))
-            .border(1.5)
+            .border(px(1.5))
             .border_color(colors::ACCENT)
             .bind_opacity(&r.interpolate(&[0.0, 0.15, 1.0], &[0.0, 0.6, 0.0]))
             .bind_scale(&r.interpolate(&[0.0, 1.0], &[0.35, 1.45]))
@@ -253,7 +250,12 @@ fn Hero() -> impl IntoElement {
             )
             .finish_shadow(Finish::Accent)
             .bind_scale(&breathe.interpolate(&[0.0, 1.0], &[0.9, 1.08]))
-            .child(icon(IconName::Animation, 22.0, colors::ON_ACCENT))
+            .child(
+                icon()
+                    .name(IconName::Animation)
+                    .size(22.0)
+                    .tint(colors::ON_ACCENT),
+            )
     };
     Card::new()
         .icon(IconName::Animation)
@@ -281,11 +283,11 @@ fn Hero() -> impl IntoElement {
 // --- Easing -----------------------------------------------------------------
 
 /// Diagonal hatching inside a rectangle.
-fn hatch(p: Painter, color: Color, (x, y, w, h): (f32, f32, f32, f32)) -> Painter {
+fn hatch(p: Painter, color: Hsla, (x, y, w, h): (f32, f32, f32, f32)) -> Painter {
     let mut p = p
         .save()
         .begin_path()
-        .rect(x, y, w, h)
+        .rect(rect(x, y, w, h))
         .clip()
         .stroke_color(color)
         .line_width(1.0)
@@ -318,7 +320,9 @@ fn draw_plot(width: f32, selected: usize, px: &AnimatedValue, py: &AnimatedValue
     for q in [0.25, 0.5, 0.75] {
         p = p.begin_path().move_to(x(q), t).line_to(x(q), b).stroke();
     }
-    p = p.line_dash(&[3.0, 4.0]).stroke_color(color(colors::FAINT));
+    p = p
+        .line_dash(&lengths([3.0, 4.0]))
+        .stroke_color(color(colors::FAINT));
     for v in [0.0, 1.0] {
         p = p.begin_path().move_to(l, y(v)).line_to(r, y(v)).stroke();
     }
@@ -367,7 +371,7 @@ fn draw_plot(width: f32, selected: usize, px: &AnimatedValue, py: &AnimatedValue
         .begin_path()
         .move_to(l, &hy)
         .line_to(&hx, &hy)
-        .line_dash(&[2.0, 3.0])
+        .line_dash(&lengths([2.0, 3.0]))
         .stroke()
         .line_dash(&[])
         .fill_color(color(colors::LIGHT))
@@ -431,12 +435,12 @@ fn EasingPlot() -> impl IntoElement {
         .child(
             canvas(move || draw_plot(width.get(), selected.get(), &dot_x, &dot_y))
                 .h(px(PLOT))
-                .on_layout(move |frame: &Rect| width.set(frame.width)),
+                .on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0)),
         )
         .child(
             scroll()
                 .horizontal()
-                .shows_indicator(false)
+                .scrollbar(false)
                 .child(view().flex_row().gap_2().children(chips)),
         )
         .child(Button::new("Play", move |_: &()| play()).icon(IconName::Play))
@@ -474,8 +478,8 @@ fn EasingRace() -> impl IntoElement {
                         .h(px(12.0))
                         .justify_center()
                         .when(i == 0, |v| {
-                            v.on_layout(move |frame: &Rect| {
-                                travel.set((frame.width - 12.0).max(0.0));
+                            v.on_layout(move |frame: &Bounds<Points>| {
+                                travel.set((frame.size.width.0 - 12.0).max(0.0));
                             })
                         })
                         .child(view().h(px(2.0)).rounded(px(1.0)).bg(colors::RAISED))
@@ -725,7 +729,7 @@ fn draw_springs(
         gx += 12.0;
     }
     p = p
-        .line_dash(&[3.0, 4.0])
+        .line_dash(&lengths([3.0, 4.0]))
         .stroke_color(color(colors::FAINT))
         .begin_path()
         .move_to(l, y(1.0))
@@ -788,7 +792,7 @@ fn Springs() -> impl IntoElement {
                 .bg(colors::BACKGROUND)
                 .finish(Finish::Track)
                 .when(i == 0, |v| {
-                    v.on_layout(move |frame: &Rect| width.set(frame.width))
+                    v.on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0))
                 })
                 .child(
                     view()
@@ -827,7 +831,7 @@ fn Springs() -> impl IntoElement {
         .child(
             canvas(move || draw_springs(plot.get(), width.get(), there.get(), &clock, &xs))
                 .h(px(150.0))
-                .on_layout(move |frame: &Rect| plot.set(frame.width)),
+                .on_layout(move |frame: &Bounds<Points>| plot.set(frame.size.width.0)),
         )
         .child(
             view().flex_row().gap(px(14.0)).flex_wrap().children(
@@ -968,12 +972,13 @@ fn Interpolations() -> impl IntoElement {
                 )),
         )
         .child(
-            segmented(["t = 0", "t = 1", "t = 2"].map(Segment::new), at).on_event(
-                move |SegmentedEvent::Change(to): &SegmentedEvent| {
+            segmented()
+                .options(["t = 0", "t = 1", "t = 2"].map(Segment::new))
+                .selected(at)
+                .on_change(move |to: &u32| {
                     at.set(*to);
                     let _ = t.spring(*to as f32, spring(140.0, 16.0));
-                },
-            ),
+                }),
         )
         .child(
             view()
@@ -1077,7 +1082,7 @@ fn HidingHeader() -> impl IntoElement {
                                 ..Interpolation::default()
                             },
                         ))
-                        .child(icon(IconName::Search, 16.0, colors::MUTED))
+                        .child(icon().name(IconName::Search).size(16.0).tint(colors::MUTED))
                         .child(
                             text("Search")
                                 .flex_1()
@@ -1153,16 +1158,16 @@ fn Layout() -> impl IntoElement {
         .subtitle("Frames, inserts and removals of the next commit")
         .right(Badge::new(move || format!("{} views", len.get())))
         .child(
-            Segmented::element(SegmentedProps {
-                options: PRESETS
-                    .iter()
-                    .map(|(label, _)| Segment::new(*label))
-                    .collect::<Vec<_>>()
-                    .into(),
-                selected: preset.into(),
-                size: SegmentedSize::Small,
-            })
-            .on_event(move |SegmentedEvent::Change(i): &SegmentedEvent| preset.set(*i)),
+            segmented()
+                .options(
+                    PRESETS
+                        .iter()
+                        .map(|(label, _)| Segment::new(*label))
+                        .collect::<Vec<_>>(),
+                )
+                .selected(preset)
+                .size(SegmentedSize::Small)
+                .on_change(move |i: &u32| preset.set(*i)),
         )
         .child(
             view()
@@ -1171,7 +1176,7 @@ fn Layout() -> impl IntoElement {
                 .style_when(column, |s| s.flex_col())
                 .flex_wrap()
                 .gap_2()
-                .child(Each::new(items, |id| *id, tile)),
+                .child(each(items, |id| *id, tile)),
         )
         .child(
             view()
@@ -1235,12 +1240,12 @@ fn Layout() -> impl IntoElement {
 #[component]
 pub(crate) fn Animations() -> impl IntoElement {
     DemoPage::new()
-        .card(|| Hero::element(()))
-        .card(|| EasingPlot::element(()))
-        .card(|| EasingRace::element(()))
-        .card(|| Composition::element(()))
-        .card(|| Springs::element(()))
-        .card(|| Interpolations::element(()))
-        .card(|| HidingHeader::element(()))
-        .card(|| Layout::element(()))
+        .card(hero)
+        .card(easing_plot)
+        .card(easing_race)
+        .card(composition)
+        .card(springs)
+        .card(interpolations)
+        .card(hiding_header)
+        .card(layout)
 }

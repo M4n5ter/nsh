@@ -767,7 +767,7 @@ pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
     }
 }
 
-/// Has assistive technologies read `text` (`announceForAccessibility`).
+/// Has assistive technologies read `text` (`announce`).
 #[allow(dead_code, reason = "system.rs calls it for `Command::Announce`")]
 pub(crate) fn announce(surface: &Rc<Surface>, text: &str) {
     if clients_listening() {
@@ -1127,7 +1127,7 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.part, Part::Element(Control::CheckBox));
         // Touch properties do not change what is exposed.
-        v.state_mut().props.active_opacity = Some(0.5);
+        v.state_mut().props.long_press_delay = Some(800.0);
         assert_eq!(spec_of(&v.state()), b);
     }
 }

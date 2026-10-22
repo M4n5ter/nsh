@@ -10,6 +10,8 @@ unsafe extern "C" {
     fn js_font_ascent(font: *const u8, font_len: usize) -> f64;
     #[link_name = "font_descent"]
     fn js_font_descent(font: *const u8, font_len: usize) -> f64;
+    #[link_name = "font_x_height"]
+    fn js_font_x_height(font: *const u8, font_len: usize) -> f64;
     #[link_name = "register_font"]
     fn js_register_font(
         family: *const u8,
@@ -21,10 +23,22 @@ unsafe extern "C" {
     );
     #[link_name = "submit"]
     fn js_submit(json: *const u8, len: usize);
+    #[link_name = "image_bytes"]
+    fn js_image_bytes(uri: *const u8, uri_len: usize, data: *const u8, data_len: usize);
+    #[link_name = "release_image"]
+    fn js_release_image(uri: *const u8, uri_len: usize);
     #[link_name = "request_frame"]
     fn js_request_frame();
+    #[link_name = "request_pump"]
+    fn js_request_pump();
     #[link_name = "report_error"]
     fn js_report_error(message: *const u8, len: usize);
+    /// A message of a test session's app for the dev server (JSON
+    /// `nsh_dev::protocol::ClientMessage`: its requests), sent over the
+    /// page's socket.
+    #[cfg(feature = "dev")]
+    #[link_name = "test_send"]
+    fn js_test_send(json: *const u8, len: usize);
     #[link_name = "log"]
     fn js_log(level: u32, message: *const u8, len: usize);
     #[link_name = "read_asset"]
@@ -51,6 +65,20 @@ unsafe extern "C" {
     fn js_fetch_pause(id: u32, paused: u32);
     #[link_name = "fetch_cancel"]
     fn js_fetch_cancel(id: u32);
+    #[link_name = "filesystem_start"]
+    fn js_filesystem_start(id: u32, p: *const u8, l: usize, bp: *const u8, bl: usize);
+    #[link_name = "filesystem_cancel"]
+    fn js_filesystem_cancel(id: u32);
+    #[link_name = "websocket_start"]
+    fn js_websocket_start(id: u32, request: *const u8, len: usize) -> u32;
+    #[link_name = "websocket_send"]
+    fn js_websocket_send(id: u32, data: *const u8, len: usize, binary: u32) -> u32;
+    #[link_name = "websocket_close"]
+    fn js_websocket_close(id: u32, code: u32, reason: *const u8, len: usize) -> u32;
+    #[link_name = "websocket_buffered"]
+    fn js_websocket_buffered(id: u32) -> f64;
+    #[link_name = "websocket_cancel"]
+    fn js_websocket_cancel(id: u32);
     #[link_name = "load_chunk"]
     fn js_load_chunk(id: *const u8, id_len: usize);
     #[link_name = "storage_load"]
@@ -92,6 +120,12 @@ pub(crate) fn font_metrics(font: &str) -> (f32, f32) {
     }
 }
 
+/// The x height of CSS `font` (0 when the browser cannot tell).
+pub(crate) fn font_x_height(font: &str) -> f32 {
+    // SAFETY: the slice is valid for the call; JS only reads it.
+    unsafe { js_font_x_height(font.as_ptr(), font.len()) as f32 }
+}
+
 /// Adds a font (`FontFace`) to the document.
 pub(crate) fn register_font(family: &str, data: &[u8], weight: u16, italic: bool) {
     // SAFETY: the slices are valid for the call; JS copies them.
@@ -113,10 +147,40 @@ pub(crate) fn submit(json: &str) {
     unsafe { js_submit(json.as_ptr(), json.len()) }
 }
 
+/// Gives the page the bytes of the in-memory image `uri` (a `data:` URI's,
+/// a blob's): it makes a browser blob URL of them that `<img>` elements
+/// showing `uri` load.
+pub(crate) fn image_bytes(uri: &str, data: &[u8]) {
+    // SAFETY: the slices are valid for the call; JS copies them.
+    unsafe { js_image_bytes(uri.as_ptr(), uri.len(), data.as_ptr(), data.len()) }
+}
+
+/// The page may forget (revoke) the blob URL of the in-memory image `uri`.
+pub(crate) fn release_image(uri: &str) {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_release_image(uri.as_ptr(), uri.len()) }
+}
+
 /// Asks for a `requestAnimationFrame` callback (`nsh_frame`).
 pub(crate) fn request_frame() {
     // SAFETY: no arguments.
     unsafe { js_request_frame() }
+}
+
+/// Asks for an `nsh_pump` soon: the engine has work that came outside a
+/// call into it (a task woken by a browser callback, through wasm-bindgen's
+/// glue) or that a pump left for the next. JS coalesces the requests into
+/// one pump per turn and never calls in while a call runs.
+pub(crate) fn request_pump() {
+    // SAFETY: no arguments.
+    unsafe { js_request_pump() }
+}
+
+/// Sends a test session's app's message to the dev server (JSON).
+#[cfg(feature = "dev")]
+pub(crate) fn test_send(json: &str) {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_test_send(json.as_ptr(), json.len()) }
 }
 
 /// Shows an app error.
@@ -257,4 +321,53 @@ pub(crate) fn storage_clear(prefix: &str) -> Result<(), String> {
     crate::storage::take_reply();
     // SAFETY: the slice is valid for the call; JS only reads it.
     storage_result(unsafe { js_storage_clear(prefix.as_ptr(), prefix.len()) }).map(drop)
+}
+
+/// Opens a browser WebSocket with the serialized request.
+pub(crate) fn websocket_start(id: u32, request: &str) -> bool {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_websocket_start(id, request.as_ptr(), request.len()) != 0 }
+}
+
+/// Sends one text or binary message on the browser socket.
+pub(crate) fn websocket_send(id: u32, data: &[u8], binary: bool) -> bool {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_websocket_send(id, data.as_ptr(), data.len(), binary as u32) != 0 }
+}
+
+/// Requests the browser's closing handshake.
+pub(crate) fn websocket_close(id: u32, code: u16, reason: &str) -> bool {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_websocket_close(id, code as u32, reason.as_ptr(), reason.len()) != 0 }
+}
+
+/// Reads the browser's current queued byte count.
+pub(crate) fn websocket_buffered(id: u32) -> usize {
+    // SAFETY: no pointers.
+    unsafe { js_websocket_buffered(id) as usize }
+}
+
+/// Removes callbacks before closing a discarded browser socket.
+pub(crate) fn websocket_cancel(id: u32) {
+    // SAFETY: no pointers.
+    unsafe { js_websocket_cancel(id) }
+}
+
+/// Begins a browser OPFS operation.
+pub(crate) fn filesystem_start(id: u32, request: &str, bytes: &[u8]) {
+    // SAFETY: JS copies both slices during this call.
+    unsafe {
+        js_filesystem_start(
+            id,
+            request.as_ptr(),
+            request.len(),
+            bytes.as_ptr(),
+            bytes.len(),
+        )
+    }
+}
+/// Detaches an operation when its engine future is dropped.
+pub(crate) fn filesystem_cancel(id: u32) {
+    // SAFETY: only an opaque integer crosses the boundary.
+    unsafe { js_filesystem_cancel(id) }
 }

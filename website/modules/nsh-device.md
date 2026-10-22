@@ -1,15 +1,22 @@
 ---
 title: nsh/device
-description: The window size, color scheme, font scale, platform, pixel ratio and right-to-left layout.
+description: The window size, color scheme, font scale, locale, platform, pixel ratio and layout direction.
 order: 6
 ---
 
 # nsh/device
 
-`nsh/device` tells the app about the device and its environment. `windowSize`, `colorScheme` and `fontScale` are reactive accessors: read them in JSX, `computed` or `effect`, and what reads them updates when the platform reports a change (rotation, a window resize, switching to dark mode, changing the text size).
+The device API tells the app about the device and its environment. Rust code calls the functions of `nsh_core::ui::prelude` (`window()`, `dark()`, `font_scale()`, `locale()`, `os()`, `idiom()`, `pixel_ratio()`, `set_color_scheme()`, ...); TSX imports `nsh/device`. The window size, the color scheme, the font scale, the pixel ratio and the locale are reactive: read them in a binding (a closure passed to an element in Rust, JSX in TSX), `computed` or `effect`, and what reads them updates when the platform reports a change (rotation, a window resize, switching to dark mode, changing the text size or the language, moving to a screen of another density).
 
-```ts
-import { colorScheme, fontScale, I18nManager, PixelRatio, Platform, windowSize } from "nsh/device";
+```rust tabs
+use nsh_core::{
+    platform::{Appearance, Idiom, Os},
+    ui::prelude::*, // window, dark, font_scale, locale, os, idiom, pixel_ratio, set_color_scheme, ...
+};
+```
+
+```tsx tabs
+import { colorScheme, fontScale, locale, pixelRatio, platform, setColorScheme, windowSize } from "nsh/device";
 ```
 
 See [Device and environment](../docs/device-and-environment.md) for the guide.
@@ -17,12 +24,18 @@ See [Device and environment](../docs/device-and-environment.md) for the guide.
 ## windowSize
 
 ```ts
-const windowSize: Accessor<{ width: number; height: number }>;
+const windowSize: Accessor<Size>;
 ```
 
-The size of the surface in points: the window, or the embedded `NshAppView` / `NshView`. Reactive.
+The size of the surface in points: the window, or the embedded `NshAppView` / `NshView`. Reactive. Rust: `window() -> Size<Points>`.
 
-```tsx
+```rust tabs
+let wide = move || window().width >= px(600.0);
+
+view().style_when(wide, |s| s.flex_row())
+```
+
+```tsx tabs
 const wide = () => windowSize().width >= 600;
 
 <View style={{ flexDirection: wide() ? "row" : "column" }}>{/* ... */}</View>
@@ -34,9 +47,13 @@ const wide = () => windowSize().width >= 600;
 const colorScheme: Accessor<"light" | "dark">;
 ```
 
-The system appearance. Reactive. Tailwind's `dark:` variant follows it too (see [Tailwind](../docs/tailwind.md)).
+The appearance shown: the system's, unless the app set its own (`nsh.json` `"appearance"`, [`setColorScheme`](#setcolorscheme)). Reactive. Rust: `dark() -> bool`; theme colors (`AdaptiveColor`) and the `.dark(…)` style variant follow it without reading it. Tailwind's `dark:` variant follows it too (see [Tailwind](../docs/tailwind.md)).
 
-```tsx
+```rust tabs
+view().flex_1().bg(move || if dark() { black() } else { white() })
+```
+
+```tsx tabs
 const dark = () => colorScheme() === "dark";
 
 <View style={{ flex: 1, backgroundColor: dark() ? "#000" : "#fff" }} />
@@ -48,41 +65,61 @@ const dark = () => colorScheme() === "dark";
 const fontScale: Accessor<number>;
 ```
 
-The user's preferred text size relative to the default (`1` is the default size; Dynamic Type on iOS, font size on Android). Reactive. Text already scales with it unless `allowFontScaling={false}`; read it when other sizes should follow, such as icons next to text.
+The user's preferred text size relative to the default (`1` is the default size; Dynamic Type on iOS, font size on Android), or the text size the embedding app sets in its place. Reactive. Rust: `font_scale() -> f32`. Text already scales with it unless `allowFontScaling={false}`; read it when other sizes should follow, such as icons next to text.
 
-## Platform
+## locale
 
 ```ts
-const Platform: {
-  readonly OS: "ios" | "android" | "macos" | "windows" | "linux" | "web";
-  readonly isDesktop: boolean;
-  readonly Version: string | number;
-  readonly isPad: boolean;
-  readonly isTV: boolean;
-  readonly isMacCatalyst: boolean;
-  readonly constants: {
-    readonly osVersion: string | number;
-    readonly interfaceIdiom: "phone" | "pad" | "mac" | "tv" | "desktop";
-  };
+const locale: Accessor<string>;
+```
+
+The user's locale as a BCP 47 tag (`"en-US"`, `"zh-Hans-CN"`), or the locale the embedding app sets in its place. Reactive. Rust: `locale() -> Locale` (`locale().as_str()` is the tag). `Intl` formats for it by default; read it to choose the strings of your own translations ([Device and environment](../docs/device-and-environment.md#language-and-region)).
+
+## setColorScheme
+
+```ts
+function setColorScheme(scheme: "light" | "dark" | "system"): void;
+```
+
+Shows the app in `scheme` whatever the system's appearance, at once: `colorScheme()`, `dark:` classes, the components' theme and the platform's controls (alerts, the status bar's default style) follow it; `"system"` follows the system again. `nsh.json` `"appearance"` sets it from the start. Rust: `set_color_scheme(Appearance::Dark)` (`Appearance::Light`, `Appearance::System`).
+
+## platform
+
+```ts
+const platform: Platform;
+
+interface Platform {
+  readonly os: "ios" | "android" | "macos" | "windows" | "linux" | "web";
+  readonly renderer: "native" | "web" | "terminal";
+  readonly isTerminal: boolean;
+  readonly version: string;
+  readonly idiom: "phone" | "pad" | "mac" | "tv" | "desktop";
+  readonly catalyst: boolean;
   select<T>(spec: PlatformSelectSpec<T>): T | undefined;
-};
+}
 ```
 
 The platform the app runs on, constant while it runs.
 
-| Member | Description |
-|---|---|
-| `OS` | The operating system. iOS, the iOS simulator and Mac Catalyst report `"ios"`, browsers `"web"`. |
-| `isDesktop` | A desktop OS (macOS, Windows, Linux), or a browser with a mouse and a wide window. |
-| `Version` | iOS and desktops: the version string (`"17.5"`); Android: the API level (a number). |
-| `isPad` | A tablet: an iPad, or an Android tablet. |
-| `isTV` | A TV (Apple TV idiom, Android TV). |
-| `isMacCatalyst` | Mac Catalyst in the Mac idiom. |
-| `constants.osVersion` | The same as `Version`. |
-| `constants.interfaceIdiom` | `"phone"`, `"pad"`, `"mac"`, `"tv"` or `"desktop"`. |
-| `select(spec)` | The value for this platform (see below). |
+| Member | Rust | Description |
+|---|---|---|
+| `os` | `os() -> Os` (`os().name()` is the TS string) | The operating system. iOS, the iOS simulator and Mac Catalyst report `"ios"`, browsers `"web"`. |
+| `version` | `os_version() -> (u16, u16)` | iOS and desktops: the OS version (`"17.5"`); Android: the API level (`"35"`); the web: `"0.0"`. Rust gives the major and minor version, or the API level and 0 on Android. |
+| `idiom` | `idiom() -> Idiom` | The kind of device: `"phone"`, `"pad"` (an iPad, an Android tablet), `"mac"` (Mac Catalyst in the Mac idiom), `"tv"` (Apple TV, Android TV) or `"desktop"`, the desktop device class: macOS, Windows, Linux, and browsers with a mouse and a wide window. |
+| `catalyst` | `idiom() == Idiom::Mac` | Mac Catalyst in the Mac idiom. |
+| `renderer` | `renderer()` | The surface's presentation: platform views / desktop graphics (`"native"`), browser HTML (`"web"`) or terminal cells (`"terminal"`). |
+| `isTerminal` | `is_terminal()` | The surface renders in terminal cells. `os` reports the terminal host's operating system. |
+| `select(spec)` | `match os() { … }` | The value for this platform (see below). |
 
-### Platform.select
+```rust tabs
+let columns = if is_desktop() { 3 } else { 1 };
+```
+
+```tsx tabs
+const columns = platform.idiom === "desktop" && !platform.isTerminal ? 3 : 1;
+```
+
+### platform.select
 
 ```ts
 interface PlatformSelectSpec<T> {
@@ -91,80 +128,74 @@ interface PlatformSelectSpec<T> {
   macos?: T;
   windows?: T;
   linux?: T;
-  mobile?: T;   // iOS and Android
-  desktop?: T;  // macOS, Windows and Linux
-  native?: T;   // every platform
+  web?: T;
+  terminal?: T; // terminal rendering, before the OS
+  mobile?: T;   // iOS, Android, and phone and tablet browsers
+  desktop?: T;  // macOS, Windows, Linux, and desktop browsers
+  native?: T;   // every platform but the web
   default?: T;
 }
 ```
 
-Returns the value for the current OS (`ios`, `android`, `web`, ...), else `mobile` / `desktop`, else `native` (every platform but the web), else `default`, else `undefined`. In a browser, `mobile` or `desktop` follows the idiom.
+Returns the value for the current OS (`ios`, `android`, `web`, ...), else `mobile` / `desktop`, else `native` (every platform but the web), else `default`, else `undefined`. In a browser, `mobile` or `desktop` follows the idiom. Rust code matches on `os()` (and `is_desktop()` for `mobile` / `desktop`).
 
-```ts
-const shadow = Platform.select({
+Terminals try `terminal`, then the host OS, then `native` and `default`. Use `platform.select({ terminal: "Press Enter", default: "Tap" })` for terminal interaction hints.
+
+```rust tabs
+use nsh_core::platform::Os;
+
+let card = view().p_4();
+let card = match os() {
+    Os::Ios => card.shadow_color(black()).shadow_opacity(0.15).shadow_radius(px(8.0)),
+    Os::Android => card.elevation(px(4.0)),
+    _ => card,
+};
+```
+
+```tsx tabs
+const shadow = platform.select({
   ios: { shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 8 },
   android: { elevation: 4 },
 });
 ```
 
 > [!TIP]
-> For props that only one platform has, prefer the `ios={{…}}` / `android={{…}}` props of elements and components to branching on `Platform` (see [Platform-specific code](../docs/platform-specific.md)).
+> For props that only one platform has, prefer the `ios={{…}}` / `android={{…}}` props of TSX elements and components to branching on `platform` (see [Platform-specific code](../docs/platform-specific.md)).
 
-## PixelRatio
-
-```ts
-const PixelRatio: {
-  get(): number;
-  getFontScale(): number;
-  getPixelSizeForLayoutSize(size: number): number;
-  roundToNearestPixel(size: number): number;
-};
-```
-
-Device pixels per point.
-
-| Method | Description |
-|---|---|
-| `get()` | Device pixels per point (e.g. `3` on most iPhones). |
-| `getFontScale()` | The same as `fontScale()`, without tracking. |
-| `getPixelSizeForLayoutSize(size)` | `size` points in whole device pixels. |
-| `roundToNearestPixel(size)` | `size` rounded to the nearest device pixel, in points. |
+## pixelRatio
 
 ```ts
-const hairline = 1 / PixelRatio.get();
+const pixelRatio: Accessor<number>;
 ```
 
-`PixelRatio` is not reactive. A window can move to another screen (on Mac Catalyst, or an external display); read it in components that also read `windowSize()`, so they run again when the window changes.
+Device pixels per point (e.g. `3` on most iPhones). Reactive: it changes when the window moves to a screen of another density (on Mac Catalyst, the desktops, or an external display). Rust: `pixel_ratio() -> f32`, and `round_to_nearest_pixel(points)` for a length on whole device pixels; in TSX that length is `Math.round(x * pixelRatio()) / pixelRatio()`.
 
-## I18nManager
-
-```ts
-const I18nManager: {
-  isRTL: boolean;                  // reactive
-  doLeftAndRightSwapInRTL: true;
-  allowRTL(allow: boolean): void;
-  forceRTL(force: boolean): void;
-  getConstants(): { isRTL: boolean; doLeftAndRightSwapInRTL: boolean };
-};
+```rust tabs
+let hairline = move || px(1.0 / pixel_ratio());
 ```
 
-Right-to-left layout. In right-to-left layout, rows run from the right, and `left` / `right` style properties (`marginLeft`, `paddingRight`, ...) mean start and end. Changes apply at once; no restart is needed.
+```tsx tabs
+const hairline = () => 1 / pixelRatio();
+```
 
-| Member | Description |
-|---|---|
-| `isRTL` | Whether the app lays out right to left. Reading it is tracked. |
-| `doLeftAndRightSwapInRTL` | Always `true`: `left` and `right` swap in right-to-left layout. |
-| `allowRTL(allow)` | Follow right-to-left languages (default `true`). |
-| `forceRTL(force)` | Lay out right to left whatever the language. |
-| `getConstants()` | `{ isRTL, doLeftAndRightSwapInRTL }`. |
+## Layout direction
 
-```tsx
-<Text onPress={() => I18nManager.forceRTL(!I18nManager.isRTL)}>
-  {I18nManager.isRTL ? "Right to left" : "Left to right"}
-</Text>
+The layout direction follows the user's language: in a right-to-left language (Arabic, Hebrew, ...) the app lays out right to left, rows run from the right, and `left` / `right` style properties (`marginLeft`, `paddingRight`, ...) mean start and end. Changes apply at once, with no restart.
+
+A view's `direction` style (`"ltr"`, `"rtl"` or `"inherit"`, the default) sets the direction of its own subtree; in Rust, `.direction(LayoutDirection::..)`.
+
+```rust tabs
+view().direction(LayoutDirection::Rtl).flex_row().gap_2().child(text("First")).child(text("Second"))
+```
+
+```tsx tabs
+<View style={{ direction: "rtl", flexDirection: "row", gap: 8 }}>
+  <Text>First</Text>
+  <Text>Second</Text>
+</View>
 ```
 
 ## Related
 
-- Safe area insets and the keyboard (`safeArea()`, `keyboard()`, `useSafeAreaInsets()`) are part of [`nsh/ui/mobile`](../components/index.md).
+- Safe area insets (Rust `safe_area()`; TSX `safeArea()`, `safeAreaInsets()`) and the software keyboard (Rust `keyboard_height()`; TSX `keyboardFrame()`) are part of [`nsh/base`](./nsh-base.md#safearea-and-safeareainsets).
 - Screen reader and reduced motion settings are in [`nsh/accessibility`](./nsh-accessibility.md).

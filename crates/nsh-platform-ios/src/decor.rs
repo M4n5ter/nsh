@@ -13,15 +13,17 @@
 //! their shadow; a `<text>` with different radii is masked, which clips its
 //! shadow too.
 
-use nsh_core::{BorderStyle, Borders, Color, CornerRadii, ResizeMode, ViewStyle};
+use nsh_core::{
+    BorderStyle, Borders, Color, CornerRadii, ObjectPosition, ResizeMode, ViewStyle,
+    geometry::{px, size},
+};
 use objc2::{MainThreadMarker, rc::Retained, runtime::AnyObject};
 use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage, CGMutablePath};
 use objc2_foundation::{NSArray, NSNumber};
 use objc2_quartz_core::{
     CACornerMask, CALayer, CAMediaTiming, CAShapeLayer, CATransaction, kCACornerCurveCircular,
-    kCACornerCurveContinuous, kCAFillRuleEvenOdd, kCAGravityCenter, kCAGravityResize,
-    kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCALineCapRound,
+    kCACornerCurveContinuous, kCAFillRuleEvenOdd, kCAGravityResize, kCALineCapRound,
 };
 use objc2_ui_kit::{UIColor, UIImage, UIView};
 
@@ -56,8 +58,16 @@ pub(crate) struct Decor {
     mask: Option<Retained<CAShapeLayer>>,
     /// Holds the children while the view both clips them and casts a shadow.
     content: Option<Retained<UIView>>,
-    /// Image content (image views only).
+    /// Image content (image views only): clips the picture to the view's
+    /// shape.
     image: Option<Retained<CALayer>>,
+    /// The image itself, inside [`Decor::image`], framed where the resize
+    /// mode and the position put it.
+    picture: Option<Retained<CALayer>>,
+    /// How the image fits.
+    mode: ResizeMode,
+    /// Where the fitted image sits.
+    position: ObjectPosition,
     /// The image, kept to switch between plain and tinted display.
     contents: Option<(Retained<CGImage>, CGFloat)>,
     /// `tintColor`: the image layer shows this color through a mask of the
@@ -73,12 +83,18 @@ pub(crate) struct Decor {
 
 impl Decor {
     /// Decoration of an image view: the image lives in its own clipped
-    /// sublayer, so the view's layer can cast an unclipped shadow.
+    /// sublayer, so the view's layer can cast an unclipped shadow, and in
+    /// a picture layer inside that, framed where it is fitted.
     pub(crate) fn for_image() -> Self {
         let image = CALayer::new();
         image.setMasksToBounds(true);
+        let picture = CALayer::new();
+        // SAFETY: an immutable Core Animation constant.
+        picture.setContentsGravity(unsafe { kCAGravityResize });
+        image.addSublayer(&picture);
         Self {
             image: Some(image),
+            picture: Some(picture),
             sized: true,
             ..Self::default()
         }
@@ -95,13 +111,12 @@ impl Decor {
         self.sized
     }
 
-    /// Shows `image` (or nothing) in an image view.
     /// Shows `image` (fading in over `fade` seconds); an animated image
     /// plays its frames, forever.
     pub(crate) fn set_image(&mut self, image: Option<&UIImage>, fade: f64) {
         // SAFETY: plain getters on a valid image.
         self.contents = image.and_then(|i| unsafe { i.CGImage().map(|cg| (cg, i.scale())) });
-        let Some(layer) = self.image.clone() else {
+        let Some(layer) = self.picture.clone() else {
             return;
         };
         let key = objc2_foundation::ns_string!("frames");
@@ -117,6 +132,7 @@ impl Decor {
         } else {
             quiet(|| self.show_contents());
         }
+        quiet(|| self.fit_contents());
         // SAFETY: plain getters on a valid image.
         let frames = image.and_then(|i| unsafe { i.images().map(|f| (f, i.duration())) });
         if let Some((frames, duration)) = frames.filter(|(f, _)| f.count() > 1)
@@ -142,9 +158,9 @@ impl Decor {
         }
     }
 
-    /// Puts the image into the image layer, or into the tint mask.
+    /// Puts the image into the picture layer, or into the tint mask.
     fn show_contents(&self) {
-        let Some(layer) = &self.image else { return };
+        let Some(layer) = &self.picture else { return };
         let target = match &self.tint {
             Some((_, tint)) => {
                 // SAFETY: clearing the contents.
@@ -169,31 +185,60 @@ impl Decor {
         };
     }
 
-    /// How an image view fits its image.
-    pub(crate) fn set_resize_mode(&self, mode: ResizeMode) {
-        let Some(layer) = &self.image else { return };
-        // SAFETY: immutable Core Animation constants.
-        let gravity = unsafe {
-            match mode {
-                ResizeMode::Cover => kCAGravityResizeAspectFill,
-                ResizeMode::Contain => kCAGravityResizeAspect,
-                ResizeMode::Stretch => kCAGravityResize,
-                ResizeMode::Center => kCAGravityCenter,
-            }
+    /// How an image view fits its image (`resizeMode`) and where it places
+    /// it (`objectPosition`).
+    pub(crate) fn set_fit(&mut self, mode: ResizeMode, position: ObjectPosition) {
+        if self.mode != mode || self.position != position {
+            self.mode = mode;
+            self.position = position;
+            quiet(|| self.fit_contents());
+        }
+    }
+
+    /// Frames the picture layer (and the tint in it) where the resize mode
+    /// and the position put the image in the image layer, which crops what
+    /// reaches outside.
+    fn fit_contents(&self) {
+        let (Some(layer), Some(picture)) = (&self.image, &self.picture) else {
+            return;
         };
-        quiet(|| {
-            layer.setContentsGravity(gravity);
-            if let Some((_, tint)) = &self.tint
-                && let Some(mask) = tint.mask()
-            {
-                mask.setContentsGravity(gravity);
-            }
+        let bounds = layer.bounds().size;
+        let natural = self.contents.as_ref().map_or((0.0, 0.0), |(cg, scale)| {
+            let scale = scale.max(0.01);
+            (
+                (CGImage::width(Some(cg)) as CGFloat / scale) as f32,
+                (CGImage::height(Some(cg)) as CGFloat / scale) as f32,
+            )
         });
+        let natural = size(px(natural.0), px(natural.1));
+        let bounds = size(px(bounds.width as f32), px(bounds.height as f32));
+        let mut fitted = self.mode.fit(natural, bounds, self.position);
+        // `center` keeps an image larger than the view at its natural size
+        // here (cropped), as UIKit's center gravity always showed it.
+        if self.mode == ResizeMode::Center && natural.width.0 > 0.0 && natural.height.0 > 0.0 {
+            fitted.size = natural;
+            fitted.origin = self.position.place(bounds, natural);
+        }
+        let frame = CGRect::new(
+            CGPoint::new(fitted.origin.x.0 as CGFloat, fitted.origin.y.0 as CGFloat),
+            CGSize::new(
+                fitted.size.width.0 as CGFloat,
+                fitted.size.height.0 as CGFloat,
+            ),
+        );
+        picture.setFrame(frame);
+        if let Some((_, tint)) = &self.tint {
+            let inner = CGRect::new(CGPoint::new(0.0, 0.0), frame.size);
+            tint.setFrame(inner);
+            if let Some(mask) = tint.mask() {
+                mask.setFrame(inner);
+            }
+        }
     }
 
     /// Shows the image in a single color (`tintColor`), or as is.
-    fn set_tint(&mut self, tint: Option<Color>, local: CGRect) {
-        let Some(layer) = self.image.clone() else {
+    fn set_tint(&mut self, tint: Option<Color>) {
+        let Some(layer) = self.picture.clone() else {
             return;
         };
         match (tint, self.tint.clone()) {
@@ -207,7 +252,8 @@ impl Decor {
                 let t = CALayer::new();
                 t.setBackgroundColor(cg_color(color).as_deref());
                 let mask = CALayer::new();
-                mask.setContentsGravity(&layer.contentsGravity());
+                // SAFETY: an immutable Core Animation constant.
+                mask.setContentsGravity(unsafe { kCAGravityResize });
                 // SAFETY: a fresh mask layer owned by the tint layer.
                 unsafe { t.setMask(Some(&mask)) };
                 layer.addSublayer(&t);
@@ -220,12 +266,6 @@ impl Decor {
                 self.show_contents();
             }
             (None, None) => {}
-        }
-        if let Some((_, t)) = &self.tint {
-            t.setFrame(local);
-            if let Some(mask) = t.mask() {
-                mask.setFrame(local);
-            }
         }
     }
 
@@ -315,12 +355,15 @@ impl Decor {
         // layer's own (self-clamping) radius needs no size: views without
         // paths are not reshaped on resize.
         let raw = style.radii();
-        let radii = raw.fit(w, h);
+        let radii = raw.fit(size(px(w), px(h)));
         let shadow = style.shadow.is_visible();
         let borders = &style.borders;
         // Sides that differ are drawn as colored rings; equal sides by the
         // layer's border or a stroke.
-        let uniform = borders.uniform().filter(|_| borders.is_visible());
+        let uniform = borders
+            .uniform()
+            .map(|(w, c)| (w.0, c))
+            .filter(|_| borders.is_visible());
         let ring = uniform.is_none() && borders.is_visible();
         let border = uniform.is_some();
         let dashed = borders.style != BorderStyle::Solid;
@@ -328,8 +371,8 @@ impl Decor {
         // Corners sharing one radius are drawn by the layer itself. Scroll
         // views always do so (their sublayers scroll): the largest radius
         // stands in for the others.
-        let shared = raw.shared().or_else(|| {
-            (kind == Kind::Scroll).then(|| raw.to_array().into_iter().fold(0.0, f32::max))
+        let shared = raw.shared().map(|r| r.0).or_else(|| {
+            (kind == Kind::Scroll).then(|| raw.to_array().into_iter().fold(0.0, |m, r| r.0.max(m)))
         });
         let corners = corner_mask(&raw);
         let outside = shadow || crate::visual::draws_outside(style);
@@ -352,6 +395,7 @@ impl Decor {
             || stroke
             || ring
             || style.effects.is_some()
+            || style.glass_effect != nsh_core::GlassEffect::None
             || style.outline.is_visible();
 
         // Corners of the layer itself. Core Animation draws nothing for a
@@ -414,7 +458,10 @@ impl Decor {
             });
             let half = (bw / 2.0) as CGFloat;
             s.setFrame(local);
-            s.setPath(Some(&rounded(inset(local, half), radii.inset(bw / 2.0))));
+            s.setPath(Some(&rounded(
+                inset(local, half),
+                radii.inset(px(bw / 2.0)),
+            )));
             s.setLineWidth(bw as CGFloat);
             s.setStrokeColor(cg_color(bc).as_deref());
             let w = bw as f64;
@@ -502,9 +549,11 @@ impl Decor {
         }
 
         // Image content follows the view's shape.
-        self.set_tint(style.tint_color.filter(|_| kind == Kind::Image), local);
+        self.set_tint(style.tint_color.filter(|_| kind == Kind::Image));
         if let Some(image) = &self.image {
             image.setFrame(local);
+            // In the same transaction as the image layer's frame.
+            self.fit_contents();
             set_corners(image, r, corners, raw.continuous);
             if shared.is_some() {
                 // SAFETY: clearing the mask.
@@ -526,8 +575,11 @@ impl Decor {
             let s = style.shadow;
             layer.setShadowColor(cg_color(s.color).as_deref());
             layer.setShadowOpacity(s.opacity);
-            layer.setShadowOffset(CGSize::new(s.offset_x as CGFloat, s.offset_y as CGFloat));
-            layer.setShadowRadius(s.radius as CGFloat);
+            layer.setShadowOffset(CGSize::new(
+                s.offset_x.0 as CGFloat,
+                s.offset_y.0 as CGFloat,
+            ));
+            layer.setShadowRadius(s.radius.0 as CGFloat);
             let solid = !style.background_color.is_transparent() || animated_background;
             let path = solid.then(|| rounded(local, radii));
             layer.setShadowPath(path.as_deref().map(|p| &**p));
@@ -562,7 +614,7 @@ impl Decor {
             }
             return;
         };
-        let [top, right, bottom, left] = b.widths.map(|w| w as CGFloat);
+        let [top, right, bottom, left] = b.widths.to_array().map(|w| w.0 as CGFloat);
         let ring = ring_path(local, radii, [top, right, bottom, left]);
         let same_color = b.colors.iter().all(|&c| c == b.colors[0]);
         let count = if same_color { 1 } else { 4 };
@@ -681,7 +733,7 @@ pub(crate) fn corner_mask(radii: &CornerRadii) -> CACornerMask {
     ];
     let rounded = all
         .iter()
-        .filter(|(r, _)| *r > 0.0)
+        .filter(|(r, _)| r.0 > 0.0)
         .fold(CACornerMask::empty(), |m, &(_, c)| m | c);
     if rounded.is_empty() {
         CACornerMask::all()
@@ -716,7 +768,7 @@ fn ring_path(rect: CGRect, radii: CornerRadii, widths: [CGFloat; 4]) -> CFRetain
     if inner.size.width <= 0.0 || inner.size.height <= 0.0 {
         return path;
     }
-    let [tl, tr, br, bl] = radii.to_array().map(|r| r as CGFloat);
+    let [tl, tr, br, bl] = radii.to_array().map(|r| r.0 as CGFloat);
     // (horizontal, vertical) radii of each inner corner.
     let corner = |r: CGFloat, h: CGFloat, v: CGFloat| ((r - h).max(0.0), (r - v).max(0.0));
     let corners = [
@@ -739,7 +791,7 @@ pub(crate) fn rounded(rect: CGRect, radii: CornerRadii) -> CFRetained<CGMutableP
 /// Adds a rectangle with the corners `radii` to `path`, counterclockwise
 /// with `reverse` (a hole under the non-zero rule).
 pub(crate) fn add_rounded(path: &CGMutablePath, rect: CGRect, radii: CornerRadii, reverse: bool) {
-    let corners = radii.to_array().map(|r| (r as CGFloat, r as CGFloat));
+    let corners = radii.to_array().map(|r| (r.0 as CGFloat, r.0 as CGFloat));
     add_outline(path, rect, corners, radii.continuous, reverse);
 }
 
@@ -751,18 +803,40 @@ fn add_outline(
     continuous: bool,
     reverse: bool,
 ) {
-    use nsh_core::shape::Segment;
-    let (x0, y0) = (rect.origin.x, rect.origin.y);
-    let bounds = (x0, y0, x0 + rect.size.width, y0 + rect.size.height);
+    use nsh_core::{
+        Corners, Point, Points,
+        geometry::{bounds, point, size},
+        shape::Segment,
+    };
+    let pt = |v: CGFloat| Points(v as f32);
+    let rect = bounds(
+        point(pt(rect.origin.x), pt(rect.origin.y)),
+        size(pt(rect.size.width), pt(rect.size.height)),
+    );
+    let [tl, tr, br, bl] = corners.map(|(h, v)| size(pt(h), pt(v)));
+    let corners = Corners {
+        top_left: tl,
+        top_right: tr,
+        bottom_right: br,
+        bottom_left: bl,
+    };
+    let cg = |p: Point<Points>| (p.x.0 as CGFloat, p.y.0 as CGFloat);
     let p = Some(path);
     let m = std::ptr::null();
-    nsh_core::shape::rounded_rect(bounds, corners, continuous, reverse, &mut |s| {
+    nsh_core::shape::rounded_rect(rect, corners, continuous, reverse, &mut |s| {
         // SAFETY: a valid mutable path and a null transform.
         unsafe {
             match s {
-                Segment::Move(x, y) => CGMutablePath::move_to_point(p, m, x, y),
-                Segment::Line(x, y) => CGMutablePath::add_line_to_point(p, m, x, y),
-                Segment::Cubic([a, b, c, d, x, y]) => {
+                Segment::Move(to) => {
+                    let (x, y) = cg(to);
+                    CGMutablePath::move_to_point(p, m, x, y)
+                }
+                Segment::Line(to) => {
+                    let (x, y) = cg(to);
+                    CGMutablePath::add_line_to_point(p, m, x, y)
+                }
+                Segment::Cubic([c1, c2, to]) => {
+                    let ((a, b), (c, d), (x, y)) = (cg(c1), cg(c2), cg(to));
                     CGMutablePath::add_curve_to_point(p, m, a, b, c, d, x, y)
                 }
                 Segment::Close => CGMutablePath::close_subpath(p),

@@ -5,24 +5,26 @@
 
 use std::f32::consts::TAU;
 
+use nsh_base::dialog;
 use nsh_core::{
-    ModalPresentation, Rect,
+    Bounds, ModalPresentation, Points,
+    animation::{Curve, EaseMode},
     canvas::{CanvasTextAlign, CanvasTextBaseline, LineCap},
-    nsh_animation::{Curve, EaseMode},
     ui::prelude::*,
 };
-use nsh_ui_mobile::{Sheet, SheetEvent, SheetProps};
 
 use super::{
-    book::{Depth, OrderBook},
-    chart::{Chart, ChartProps},
+    book::{depth, order_book},
+    chart::chart,
     live,
     market::{HORIZONS, Quote, Range, compact, price, signed, time, tone_of},
     parts::{Block, live_dot},
-    tape::{Flow, tape},
-    ticket::{Side, Ticket, TicketEvent, TicketProps},
+    tape::{flow, tape_block},
+    ticket::{Side, TicketEvent},
 };
-use crate::ui::{Button, ButtonVariant, Finish, Finished, IconName, Stat, colors, icon, radius};
+use crate::ui::{
+    Button, ButtonVariant, Finish, Finished, IconName, Stat, colors, icon, lengths, radius, sheet,
+};
 
 /// The props of a part of a stock's screen.
 #[derive(Debug, Clone, Copy, PartialEq, Props)]
@@ -55,7 +57,7 @@ pub(crate) fn StockView(props: StockViewProps, cx: Scope<NoEvent>) -> impl IntoE
     let live = live();
     let index = props.stock as usize;
     let (wide, split) = (props.wide, props.split);
-    let props = StockProps { stock: props.stock };
+    let stock = props.stock;
     // The market keeps the stock's book, tape and flow while it is shown.
     live.market.borrow_mut().focus(Some(index));
     {
@@ -110,7 +112,7 @@ pub(crate) fn StockView(props: StockViewProps, cx: Scope<NoEvent>) -> impl IntoE
             ticket.set(true);
         }
     };
-    let bottom = move || cx.insets().bottom;
+    let bottom = move || cx.insets().bottom.0;
     let (second, market) = (live.second, live.market.clone());
     let footer = text(move || {
         second.get();
@@ -126,7 +128,7 @@ pub(crate) fn StockView(props: StockViewProps, cx: Scope<NoEvent>) -> impl IntoE
     .text_size(px(12.0))
     .text_color(colors::FAINT)
     .tabular_nums();
-    let chart = move |props: ChartProps| Block::new().child(Chart::element(props));
+    let chart_block = move |height: f32| Block::new().child(chart().stock(stock).height(height));
     let content = if wide {
         scroll()
             .flex_1()
@@ -136,7 +138,7 @@ pub(crate) fn StockView(props: StockViewProps, cx: Scope<NoEvent>) -> impl IntoE
                     .pt(px(14.0))
                     .text_size(px(22.0))
                     .font_weight(FontWeight::BOLD)
-                    .letter_spacing(-0.3)
+                    .letter_spacing(px(-0.3))
                     .text_color(colors::TEXT),
             )
             .child(
@@ -146,37 +148,31 @@ pub(crate) fn StockView(props: StockViewProps, cx: Scope<NoEvent>) -> impl IntoE
                         view()
                             .min_w(px(0.0))
                             .style_when(split, |s| s.flex_1())
-                            .child(QuoteSection::element(props))
-                            .child(chart(ChartProps {
-                                stock: props.stock,
-                                height: 340.0,
-                            }))
-                            .child(Ranges::element(props)),
+                            .child(quote_section().stock(stock))
+                            .child(chart_block(340.0))
+                            .child(ranges().stock(stock)),
                     )
                     .child(
                         view()
                             .border_l_color(colors::LINE)
                             .style_when(split, |s| s.w(px(380.0)).border_l_1())
-                            .child(OrderBook::element(props))
-                            .child(tape(&live, index))
-                            .child(Depth::element(props))
-                            .child(Flow::element(())),
+                            .child(order_book().stock(stock))
+                            .child(tape_block(&live, index))
+                            .child(depth().stock(stock))
+                            .child(flow()),
                     ),
             )
             .child(footer)
     } else {
         scroll()
             .flex_1()
-            .child(QuoteSection::element(props))
-            .child(chart(ChartProps {
-                stock: props.stock,
-                ..ChartProps::default()
-            }))
-            .child(OrderBook::element(props))
-            .child(tape(&live, index))
-            .child(Depth::element(props))
-            .child(Flow::element(()))
-            .child(Ranges::element(props))
+            .child(quote_section().stock(stock))
+            .child(Block::new().child(chart().stock(stock)))
+            .child(order_book().stock(stock))
+            .child(tape_block(&live, index))
+            .child(depth().stock(stock))
+            .child(flow())
+            .child(ranges().stock(stock))
             .child(footer)
     };
     let change = computed(move || quote.get().percent());
@@ -249,7 +245,12 @@ pub(crate) fn StockView(props: StockViewProps, cx: Scope<NoEvent>) -> impl IntoE
                         colors::DOWN
                     }
                 })
-                .child(icon(IconName::Check, 18.0, colors::ON_LIGHT)),
+                .child(
+                    icon()
+                        .name(IconName::Check)
+                        .size(18.0)
+                        .tint(colors::ON_LIGHT),
+                ),
         )
         .child(
             view()
@@ -270,33 +271,33 @@ pub(crate) fn StockView(props: StockViewProps, cx: Scope<NoEvent>) -> impl IntoE
         );
     // The ticket: made fresh each time it opens.
     let ticket_view = move || {
-        Ticket::element(TicketProps {
-            code: code.into(),
-            tick,
-            last: Prop::bind(move || quote.get().last),
-            side: side.into(),
-        })
-        .on_event(move |e: &TicketEvent| match e {
-            TicketEvent::Side(chosen) => side.set(*chosen),
-            TicketEvent::Placed {
-                title,
-                detail,
-                side,
-            } => {
-                ticket.set(false);
-                show_banner(title.clone(), detail.clone(), *side);
-            }
-        })
+        super::ticket::ticket()
+            .code(code)
+            .tick(tick)
+            .last(move || quote.get().last)
+            .side(side)
+            .on_side(move |chosen: &Side| side.set(*chosen))
+            .on_placed(move |e: &TicketEvent| {
+                if let TicketEvent::Placed {
+                    title,
+                    detail,
+                    side,
+                } = e
+                {
+                    ticket.set(false);
+                    show_banner(title.clone(), detail.clone(), *side);
+                }
+            })
     };
     // A bottom sheet on phones, a card in the window on desktops (Escape or
     // a click outside closes it).
     let ticket_shown = if wide {
-        If::new(ticket, move || {
-            modal()
+        when(ticket, move || {
+            dialog()
                 .when(is_desktop(), |m| {
                     m.presentation(ModalPresentation::FormSheet)
                 })
-                .on_request_close(move |_: &()| ticket.set(false))
+                .on_cancel(move || ticket.set(false))
                 .child(
                     view()
                         .flex_1()
@@ -307,13 +308,11 @@ pub(crate) fn StockView(props: StockViewProps, cx: Scope<NoEvent>) -> impl IntoE
         })
         .into_element()
     } else {
-        Sheet::element(SheetProps {
-            open: ticket.into(),
-            ..SheetProps::default()
-        })
-        .on_event(move |_: &SheetEvent| ticket.set(false))
-        .child(ticket_view())
-        .into_element()
+        sheet()
+            .open(ticket)
+            .on_close(move || ticket.set(false))
+            .child(ticket_view())
+            .into_element()
     };
     view()
         .flex_1()
@@ -411,7 +410,7 @@ fn QuoteSection(props: StockProps) -> impl IntoElement {
                         .text_color(colors::MUTED),
                 )
                 .child(text(sector).text_size(px(13.0)).text_color(colors::FAINT))
-                .child(live_dot(live.running, 6.0))
+                .child(live_dot().running(live.running).size(6.0))
                 .child(
                     text(move || time(clock.get(), true))
                         .text_size(px(12.0))
@@ -428,14 +427,19 @@ fn QuoteSection(props: StockProps) -> impl IntoElement {
                     text(move || p(quote.get().last))
                         .text_size(px(36.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .letter_spacing(-1.0)
+                        .letter_spacing(px(-1.0))
                         .text_color(tone)
                         .tabular_nums(),
                 )
                 .child(
                     view()
                         .bind_rotate(&turn.interpolate(&[0.0, 1.0], &[0.0, 180.0]))
-                        .child(icon(IconName::ArrowUp, 20.0, tone)),
+                        .child(
+                            icon()
+                                .name(IconName::ArrowUp)
+                                .size(20.0)
+                                .tint(move || tone.get()),
+                        ),
                 )
                 .child(
                     view()
@@ -459,7 +463,7 @@ fn QuoteSection(props: StockProps) -> impl IntoElement {
                         ),
                 ),
         )
-        .child(DayRange::element(props))
+        .child(day_range().stock(props.stock))
         .child(
             view().flex_row().flex_wrap().children(
                 FIGURES
@@ -510,7 +514,7 @@ fn DayRange(props: StockProps) -> impl IntoElement {
     let width = stored(0.0_f32);
     let placed = stored(false);
     let place = move |q: Quote| {
-        let width = width.with(|w| *w);
+        let width = width.get();
         if width <= 0.0 {
             return;
         }
@@ -539,8 +543,8 @@ fn DayRange(props: StockProps) -> impl IntoElement {
         .child(range_label(move || format!("L {}", p(quote.get().low))))
         .child(
             view()
-                .on_layout(move |frame: &Rect| {
-                    if width.replace(frame.width) != frame.width {
+                .on_layout(move |frame: &Bounds<Points>| {
+                    if width.replace(frame.size.width.0) != frame.size.width.0 {
                         place(quote.get_untracked());
                     }
                 })
@@ -577,7 +581,7 @@ fn DayRange(props: StockProps) -> impl IntoElement {
                         .left(px(-7.0))
                         .size(px(14.0))
                         .rounded(px(7.0))
-                        .border(3.0)
+                        .border(px(3.0))
                         .border_color(colors::BACKGROUND)
                         .bg(move || {
                             let q = quote.get();
@@ -634,7 +638,7 @@ fn draw_ranges(r: &[Range], last: f64, prev_close: f64, width: f32, decimals: u3
     let bottom = HORIZONS.len() as f32 * 34.0;
     p.stroke_color(color(colors::FAINT))
         .line_width(1.0)
-        .line_dash(&[3.0, 4.0])
+        .line_dash(&lengths([3.0, 4.0]))
         .begin_path()
         .move_to(x_of(prev_close), 0.0)
         .line_to(x_of(prev_close), bottom)
@@ -677,6 +681,6 @@ fn Ranges(props: StockProps) -> impl IntoElement {
             })
             .h(px(HORIZONS.len() as f32 * 34.0 + 16.0))
             .label("Price ranges")
-            .on_layout(move |frame: &Rect| width.set(frame.width)),
+            .on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0)),
         )
 }

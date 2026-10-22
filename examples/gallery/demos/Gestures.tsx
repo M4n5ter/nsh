@@ -1,8 +1,6 @@
-import { cleanup, type GestureResponderEvent, signal, Text, View } from "nsh";
+import { Canvas, cleanup, type GestureResponderEvent, Image, signal, Text, View } from "nsh";
 import { Animated, createAnimatedValue, Easing } from "nsh/animated";
-import { Canvas } from "nsh/canvas";
 import { PanResponder } from "nsh/gesture";
-import { Image } from "nsh/image";
 import { Icon, type IconName } from "../icons";
 import { alpha, Badge, Button, Caption, Card, colors, DemoPage, finish, hint, IconTile, isDark, mono, Press, radius, Row, Stat, tints } from "../ui";
 
@@ -12,9 +10,9 @@ function Dots() {
     <Canvas
       pointerEvents="none"
       style={{ position: "absolute", left: 0, top: 0, right: 0, bottom: 0 }}
-      draw={(ctx, { width, height }) => {
-        ctx.fillStyle = colors.line;
-        for (let x = 8; x < width; x += 14) for (let y = 8; y < height; y += 14) ctx.fillRect(x, y, 1.5, 1.5);
+      draw={(cx, { width, height }) => {
+        cx.fillStyle = colors.line;
+        for (let x = 8; x < width; x += 14) for (let y = 8; y < height; y += 14) cx.fillRect(x, y, 1.5, 1.5);
       }}
     />
   );
@@ -68,6 +66,7 @@ function Transformable() {
           style={{ position: "absolute", width: 200, height: 150, borderRadius: 18, borderWidth: 1, borderColor: colors.faint, borderStyle: "dashed" }}
         />
         <View
+          testID="photo"
           pan={{ x, y }}
           pinch={{ scale }}
           rotation={{ angle }}
@@ -131,6 +130,7 @@ function Ball() {
       <View style={{ ...stage(), height: 200 }}>
         <Dots />
         <View
+          testID="ball"
           {...pan.panHandlers}
           style={{
             position: "absolute",
@@ -240,12 +240,12 @@ function PressEvents() {
   return (
     <Card icon="components" title="Press events" subtitle="In, press, long press and out; native feedback" right={<Badge label={`${count()}`} />}>
       <View
-        onPressIn={() => fire("pressIn")}
-        onPressOut={() => fire("pressOut")}
+        onPressDown={() => fire("pressIn")}
+        onPressUp={() => fire("pressOut")}
         onPress={() => fire("press")}
         onLongPress={() => fire("longPress")}
-        activeOpacity={0.55}
-        accessibilityRole="button"
+        activeStyle={{ opacity: 0.55 }}
+        role="button"
         style={{
           height: 64,
           borderRadius: radius.control,
@@ -287,7 +287,7 @@ function PressEvents() {
           onPress={() => fire("ripple")}
           onLongPress={() => fire("fast long press")}
           delayLongPress={250}
-          underlayColor={colors.border}
+          activeStyle={{ backgroundColor: colors.border }}
           android={{ ripple: { color: alpha(colors.accentFill, 0.25) } }}
           style={{
             flex: 1,
@@ -309,15 +309,15 @@ function PressEvents() {
         <View
           onPress={() => fire("borderless")}
           android={{ ripple: { borderless: true, radius: 40 } }}
-          activeOpacity={0.4}
-          accessibilityRole="button"
+          activeStyle={{ opacity: 0.4 }}
+          role="button"
           accessibilityLabel="Star"
           style={{ width: 56, height: 56, alignItems: "center", justifyContent: "center" }}
         >
           <Icon name="star" size={24} tint={colors.warn} />
         </View>
       </View>
-      <Text onPress={() => fire("text")} activeOpacity={0.3} style={{ alignSelf: "flex-start", fontSize: 15, color: colors.accent, paddingVertical: 12 }}>
+      <Text onPress={() => fire("text")} activeStyle={{ opacity: 0.3 }} style={{ alignSelf: "flex-start", fontSize: 15, color: colors.accent, paddingVertical: 12 }}>
         Pressable text, dimmed while pressed
       </Text>
     </Card>
@@ -389,30 +389,51 @@ function PointerEvents() {
         <Canvas
           pointerEvents="none"
           style={{ position: "absolute", left: 0, top: 0, right: 0, bottom: 0 }}
-          draw={(ctx, { width, height }) => {
+          draw={(cx, { width, height }) => {
             // A hatched band across the middle, framed with dashes.
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(width * 0.18, 0, width * 0.64, height);
-            ctx.clip();
-            ctx.strokeStyle = alpha(colors.warn, 0.28);
-            ctx.lineWidth = 1;
-            ctx.beginPath();
+            cx.save();
+            cx.beginPath();
+            cx.rect(width * 0.18, 0, width * 0.64, height);
+            cx.clip();
+            cx.strokeStyle = alpha(colors.warn, 0.28);
+            cx.lineWidth = 1;
+            cx.beginPath();
             for (let i = -height; i < width; i += 8) {
-              ctx.moveTo(i, height);
-              ctx.lineTo(i + height, 0);
+              cx.moveTo(i, height);
+              cx.lineTo(i + height, 0);
             }
-            ctx.stroke();
-            ctx.restore();
-            ctx.setLineDash([4, 4]);
-            ctx.strokeStyle = colors.warn;
-            ctx.beginPath();
-            ctx.roundRect(width * 0.18 + 0.5, 0.5, width * 0.64 - 1, height - 1, 10);
-            ctx.stroke();
+            cx.stroke();
+            cx.restore();
+            cx.setLineDash([4, 4]);
+            cx.strokeStyle = colors.warn;
+            cx.beginPath();
+            cx.roundRect(width * 0.18 + 0.5, 0.5, width * 0.64 - 1, height - 1, 10);
+            cx.stroke();
           }}
         />
       </View>
       <Api label={hint("Taps on the hatched band reach the button", "Clicks on the hatched band reach the button")} api={'pointerEvents="none"'} />
+    </Card>
+  );
+}
+
+/** The mouse over a view: it comes in, moves and leaves (desktops). */
+function Hover() {
+  const over = signal(false);
+  const at = signal({ x: 0, y: 0 });
+  return (
+    <Card icon="gestures" title="Hover" subtitle={hint("A pointer over a view: iPad, desktops", "The mouse over a view")} right={<Badge label={over() ? "Over" : "Away"} tone={over() ? "accent" : "neutral"} />}>
+      <View
+        testID="hover-pad"
+        onHoverIn={() => over.set(true)}
+        onHoverOut={() => over.set(false)}
+        onHoverMove={(e) => at.set({ x: Math.round(e.position.x), y: Math.round(e.position.y) })}
+        class="hover:bg-card"
+        style={{ ...stage(), height: 100, alignItems: "center", justifyContent: "center" }}
+      >
+        <Text style={{ fontSize: 14, color: colors.muted }}>{over() ? `Pointer at ${at().x}, ${at().y}` : "Pointer away"}</Text>
+      </View>
+      <Api label="In, move and out" api="onHoverIn · onHoverMove · onHoverOut" />
     </Card>
   );
 }
@@ -431,7 +452,7 @@ function Accessibility() {
         {(item, i) => (
           <View
             accessible
-            accessibilityRole="button"
+            role="button"
             accessibilityLabel={item().label}
             accessibilityHint={item().hint}
             onPress={() => last.set(item().label)}
@@ -452,5 +473,5 @@ function Accessibility() {
 }
 
 export function Gestures() {
-  return <DemoPage cards={[Transformable, Ball, TouchPad, PressEvents, HitSlop, PointerEvents, Accessibility]} />;
+  return <DemoPage cards={[Transformable, Ball, Hover, TouchPad, PressEvents, HitSlop, PointerEvents, Accessibility]} />;
 }

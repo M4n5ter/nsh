@@ -34,10 +34,15 @@ pub(crate) struct Java {
     pub(crate) view_report_error: JMethodID,
     pub(crate) view_read_asset: JMethodID,
     pub(crate) view_request_frame: JMethodID,
+    pub(crate) view_app_stopped: JMethodID,
     #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     pub(crate) view_dev_status: JMethodID,
     #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     pub(crate) view_dev_error: JMethodID,
+    /// `com.longbridge.nsh.TestAgent`: the test agent's platform part
+    /// (any thread; it does its work on the UI thread).
+    #[cfg(feature = "dev")]
+    pub(crate) test_agent: GlobalRef,
 }
 
 static JAVA: OnceLock<Java> = OnceLock::new();
@@ -96,12 +101,15 @@ pub(crate) fn init(vm: JavaVM) -> jni::errors::Result<()> {
         view_report_error: env.get_method_id(view_class, "reportError", "(Ljava/lang/String;)V")?,
         view_read_asset: env.get_method_id(view_class, "readAsset", "(Ljava/lang/String;)[B")?,
         view_request_frame: env.get_method_id(view_class, "requestJsFrame", "()V")?,
+        view_app_stopped: env.get_method_id(view_class, "appStopped", "()V")?,
         view_dev_status: env.get_method_id(view_class, "devStatus", "(Ljava/lang/String;)V")?,
         view_dev_error: env.get_method_id(
             view_class,
             "devError",
             "(Ljava/lang/String;Ljava/lang/String;Z)V",
         )?,
+        #[cfg(feature = "dev")]
+        test_agent: class(&mut env, "com/longbridge/nsh/TestAgent")?,
         text,
         net,
         vm,

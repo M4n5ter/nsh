@@ -1,15 +1,22 @@
 ---
 title: nsh/device
-description: 窗口尺寸、配色方案、字体缩放、平台信息、像素密度和从右到左布局。
+description: 窗口尺寸、配色方案、字体缩放、区域设置、平台信息、像素密度和布局方向。
 order: 6
 ---
 
 # nsh/device
 
-`nsh/device` 向应用提供设备及其环境的信息。`windowSize`、`colorScheme` 和 `fontScale` 是响应式的 accessor：在 JSX、`computed` 或 `effect` 中读取它们，平台报告变化（旋转、窗口缩放、切换深色模式、修改文字大小）时，读取它们的地方会随之更新。
+设备 API 向应用提供设备及其环境的信息。Rust 代码调用 `nsh_core::ui::prelude` 中的函数（`window()`、`dark()`、`font_scale()`、`locale()`、`os()`、`idiom()`、`pixel_ratio()`、`set_color_scheme()` 等）；TSX 导入 `nsh/device`。窗口尺寸、配色方案、字体缩放、像素密度和区域设置是响应式的：在绑定（Rust 中传给元素的闭包，TSX 中的 JSX）、`computed` 或 `effect` 中读取它们，平台报告变化（旋转、窗口缩放、切换深色模式、修改文字大小或语言、移到另一种像素密度的屏幕）时，读取它们的地方会随之更新。
 
-```ts
-import { colorScheme, fontScale, I18nManager, PixelRatio, Platform, windowSize } from "nsh/device";
+```rust tabs
+use nsh_core::{
+    platform::{Appearance, Idiom, Os},
+    ui::prelude::*, // window、dark、font_scale、locale、os、idiom、pixel_ratio、set_color_scheme……
+};
+```
+
+```tsx tabs
+import { colorScheme, fontScale, locale, pixelRatio, platform, setColorScheme, windowSize } from "nsh/device";
 ```
 
 教程见[设备与环境](../docs/device-and-environment.md)。
@@ -17,12 +24,18 @@ import { colorScheme, fontScale, I18nManager, PixelRatio, Platform, windowSize }
 ## windowSize
 
 ```ts
-const windowSize: Accessor<{ width: number; height: number }>;
+const windowSize: Accessor<Size>;
 ```
 
-界面的尺寸（点）：窗口，或嵌入时的 `NshAppView` / `NshView`。响应式。
+界面的尺寸（点）：窗口，或嵌入时的 `NshAppView` / `NshView`。响应式。Rust：`window() -> Size<Points>`。
 
-```tsx
+```rust tabs
+let wide = move || window().width >= px(600.0);
+
+view().style_when(wide, |s| s.flex_row())
+```
+
+```tsx tabs
 const wide = () => windowSize().width >= 600;
 
 <View style={{ flexDirection: wide() ? "row" : "column" }}>{/* ... */}</View>
@@ -34,9 +47,13 @@ const wide = () => windowSize().width >= 600;
 const colorScheme: Accessor<"light" | "dark">;
 ```
 
-系统外观。响应式。Tailwind 的 `dark:` 变体也跟随它（见 [Tailwind](../docs/tailwind.md)）。
+显示的外观：系统的外观，除非应用设置了自己的（`nsh.json` 的 `"appearance"`、[`setColorScheme`](#setcolorscheme)）。响应式。Rust：`dark() -> bool`；主题颜色（`AdaptiveColor`）和 `.dark(…)` 样式变体无需读取它就会跟随。Tailwind 的 `dark:` 变体也跟随它（见 [Tailwind](../docs/tailwind.md)）。
 
-```tsx
+```rust tabs
+view().flex_1().bg(move || if dark() { black() } else { white() })
+```
+
+```tsx tabs
 const dark = () => colorScheme() === "dark";
 
 <View style={{ flex: 1, backgroundColor: dark() ? "#000" : "#fff" }} />
@@ -48,41 +65,61 @@ const dark = () => colorScheme() === "dark";
 const fontScale: Accessor<number>;
 ```
 
-用户偏好的文字大小相对于默认大小的比例（`1` 为默认；iOS 上是动态字体，Android 上是字体大小设置）。响应式。除非设置了 `allowFontScaling={false}`，文本本身已经会随之缩放；当其他尺寸（例如文字旁边的图标）也需要跟随时再读取它。
+用户偏好的文字大小相对于默认大小的比例（`1` 为默认；iOS 上是动态字体，Android 上是字体大小设置），或嵌入它的应用设置的文字大小。响应式。Rust：`font_scale() -> f32`。除非设置了 `allowFontScaling={false}`，文本本身已经会随之缩放；当其他尺寸（例如文字旁边的图标）也需要跟随时再读取它。
 
-## Platform
+## locale
 
 ```ts
-const Platform: {
-  readonly OS: "ios" | "android" | "macos" | "windows" | "linux" | "web";
-  readonly isDesktop: boolean;
-  readonly Version: string | number;
-  readonly isPad: boolean;
-  readonly isTV: boolean;
-  readonly isMacCatalyst: boolean;
-  readonly constants: {
-    readonly osVersion: string | number;
-    readonly interfaceIdiom: "phone" | "pad" | "mac" | "tv" | "desktop";
-  };
+const locale: Accessor<string>;
+```
+
+用户的区域设置，BCP 47 标签（`"en-US"`、`"zh-Hans-CN"`），或嵌入它的应用设置的区域设置。响应式。Rust：`locale() -> Locale`（`locale().as_str()` 即标签）。`Intl` 默认按它格式化；读取它来选择你自己的翻译文案（[设备与环境](../docs/device-and-environment.md#语言和地区)）。
+
+## setColorScheme
+
+```ts
+function setColorScheme(scheme: "light" | "dark" | "system"): void;
+```
+
+无论系统外观如何，立即以 `scheme` 显示应用：`colorScheme()`、`dark:` 类、组件的主题和平台控件（警告框、状态栏的默认样式）都随之变化；`"system"` 重新跟随系统。`nsh.json` 的 `"appearance"` 从启动时就设置它。Rust：`set_color_scheme(Appearance::Dark)`（`Appearance::Light`、`Appearance::System`）。
+
+## platform
+
+```ts
+const platform: Platform;
+
+interface Platform {
+  readonly os: "ios" | "android" | "macos" | "windows" | "linux" | "web";
+  readonly renderer: "native" | "web" | "terminal";
+  readonly isTerminal: boolean;
+  readonly version: string;
+  readonly idiom: "phone" | "pad" | "mac" | "tv" | "desktop";
+  readonly catalyst: boolean;
   select<T>(spec: PlatformSelectSpec<T>): T | undefined;
-};
+}
 ```
 
 应用所运行的平台，运行期间不变。
 
-| 成员 | 说明 |
-|---|---|
-| `OS` | 操作系统。iOS、iOS 模拟器和 Mac Catalyst 都报告 `"ios"`，浏览器报告 `"web"`。 |
-| `isDesktop` | 是否为桌面系统（macOS、Windows、Linux），或有鼠标且窗口较宽的浏览器。 |
-| `Version` | iOS 和桌面系统：版本字符串（`"17.5"`）；Android：API 级别（数字）。 |
-| `isPad` | 平板：iPad 或 Android 平板。 |
-| `isTV` | 电视（Apple TV 形态、Android TV）。 |
-| `isMacCatalyst` | 以 Mac 形态运行的 Mac Catalyst。 |
-| `constants.osVersion` | 与 `Version` 相同。 |
-| `constants.interfaceIdiom` | `"phone"`、`"pad"`、`"mac"`、`"tv"` 或 `"desktop"`。 |
-| `select(spec)` | 当前平台对应的值（见下文）。 |
+| 成员 | Rust | 说明 |
+|---|---|---|
+| `os` | `os() -> Os`（`os().name()` 即 TS 的字符串） | 操作系统。iOS、iOS 模拟器和 Mac Catalyst 都报告 `"ios"`，浏览器报告 `"web"`。 |
+| `version` | `os_version() -> (u16, u16)` | iOS 和桌面系统：系统版本（`"17.5"`）；Android：API 级别（`"35"`）；Web：`"0.0"`。Rust 给出主版本和次版本号，在 Android 上是 API 级别和 0。 |
+| `idiom` | `idiom() -> Idiom` | 设备类型：`"phone"`、`"pad"`（iPad、Android 平板）、`"mac"`（以 Mac 形态运行的 Mac Catalyst）、`"tv"`（Apple TV、Android TV）或 `"desktop"`，即桌面设备类型：macOS、Windows、Linux，以及有鼠标且窗口较宽的浏览器。 |
+| `catalyst` | `idiom() == Idiom::Mac` | 以 Mac 形态运行的 Mac Catalyst。 |
+| `renderer` | `renderer()` | 界面的呈现方式：平台视图或桌面图形（`"native"`）、浏览器 HTML（`"web"`）或终端字符单元格（`"terminal"`）。 |
+| `isTerminal` | `is_terminal()` | 界面渲染为终端字符单元格。`os` 报告终端宿主的操作系统。 |
+| `select(spec)` | `match os() { … }` | 当前平台对应的值（见下文）。 |
 
-### Platform.select
+```rust tabs
+let columns = if is_desktop() { 3 } else { 1 };
+```
+
+```tsx tabs
+const columns = platform.idiom === "desktop" && !platform.isTerminal ? 3 : 1;
+```
+
+### platform.select
 
 ```ts
 interface PlatformSelectSpec<T> {
@@ -91,80 +128,74 @@ interface PlatformSelectSpec<T> {
   macos?: T;
   windows?: T;
   linux?: T;
-  mobile?: T;   // iOS 和 Android
-  desktop?: T;  // macOS、Windows 和 Linux
-  native?: T;   // 所有平台
+  web?: T;
+  terminal?: T; // 终端渲染，优先于操作系统
+  mobile?: T;   // iOS、Android，以及手机和平板上的浏览器
+  desktop?: T;  // macOS、Windows、Linux，以及桌面浏览器
+  native?: T;   // 除 Web 外的所有平台
   default?: T;
 }
 ```
 
-依次返回当前操作系统（`ios`、`android`、`web` 等）对应的值，否则 `mobile` / `desktop`，否则 `native`（除 Web 外的所有平台），否则 `default`，都没有则返回 `undefined`。在浏览器中，`mobile` 还是 `desktop` 由界面风格决定。
+依次返回当前操作系统（`ios`、`android`、`web` 等）对应的值，否则 `mobile` / `desktop`，否则 `native`（除 Web 外的所有平台），否则 `default`，都没有则返回 `undefined`。在浏览器中，`mobile` 还是 `desktop` 由设备类型决定。Rust 代码对 `os()` 做 `match`（`mobile` / `desktop` 用 `is_desktop()`）。
 
-```ts
-const shadow = Platform.select({
+终端依次查找 `terminal`、宿主操作系统、`native` 和 `default`。可用 `platform.select({ terminal: "Press Enter", default: "Tap" })` 为终端选择交互提示。
+
+```rust tabs
+use nsh_core::platform::Os;
+
+let card = view().p_4();
+let card = match os() {
+    Os::Ios => card.shadow_color(black()).shadow_opacity(0.15).shadow_radius(px(8.0)),
+    Os::Android => card.elevation(px(4.0)),
+    _ => card,
+};
+```
+
+```tsx tabs
+const shadow = platform.select({
   ios: { shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 8 },
   android: { elevation: 4 },
 });
 ```
 
 > [!TIP]
-> 对于只有某个平台才有的属性，优先使用元素和组件的 `ios={{…}}` / `android={{…}}` 属性，而不是按 `Platform` 分支（见[平台专有代码](../docs/platform-specific.md)）。
+> 对于只有某个平台才有的属性，优先使用 TSX 元素和组件的 `ios={{…}}` / `android={{…}}` 属性，而不是按 `platform` 分支（见[平台专有代码](../docs/platform-specific.md)）。
 
-## PixelRatio
-
-```ts
-const PixelRatio: {
-  get(): number;
-  getFontScale(): number;
-  getPixelSizeForLayoutSize(size: number): number;
-  roundToNearestPixel(size: number): number;
-};
-```
-
-每个点对应的设备像素数。
-
-| 方法 | 说明 |
-|---|---|
-| `get()` | 每点的设备像素数（大多数 iPhone 上为 `3`）。 |
-| `getFontScale()` | 与 `fontScale()` 相同，但不追踪。 |
-| `getPixelSizeForLayoutSize(size)` | `size` 个点对应的整数设备像素数。 |
-| `roundToNearestPixel(size)` | 把 `size` 取整到最近的设备像素，单位仍为点。 |
+## pixelRatio
 
 ```ts
-const hairline = 1 / PixelRatio.get();
+const pixelRatio: Accessor<number>;
 ```
 
-`PixelRatio` 不是响应式的。窗口可能被移动到另一块屏幕上（Mac Catalyst 或外接显示器）；请在同时读取了 `windowSize()` 的组件中读取它，这样窗口变化时组件会重新运行。
+每个点对应的设备像素数（大多数 iPhone 上为 `3`）。响应式：窗口移动到另一种像素密度的屏幕上时（Mac Catalyst、桌面系统或外接显示器）它会变化。Rust：`pixel_ratio() -> f32`，取整到设备像素的长度用 `round_to_nearest_pixel(points)`；在 TSX 中这个长度是 `Math.round(x * pixelRatio()) / pixelRatio()`。
 
-## I18nManager
-
-```ts
-const I18nManager: {
-  isRTL: boolean;                  // 响应式
-  doLeftAndRightSwapInRTL: true;
-  allowRTL(allow: boolean): void;
-  forceRTL(force: boolean): void;
-  getConstants(): { isRTL: boolean; doLeftAndRightSwapInRTL: boolean };
-};
+```rust tabs
+let hairline = move || px(1.0 / pixel_ratio());
 ```
 
-从右到左布局。在从右到左布局中，行从右侧开始排列，`left` / `right` 样式属性（`marginLeft`、`paddingRight` 等）表示起始端和结束端。修改即时生效，无需重启。
+```tsx tabs
+const hairline = () => 1 / pixelRatio();
+```
 
-| 成员 | 说明 |
-|---|---|
-| `isRTL` | 应用是否从右到左布局。读取它会被追踪。 |
-| `doLeftAndRightSwapInRTL` | 始终为 `true`：从右到左布局时 `left` 和 `right` 互换。 |
-| `allowRTL(allow)` | 跟随从右到左书写的语言（默认 `true`）。 |
-| `forceRTL(force)` | 无论语言如何都从右到左布局。 |
-| `getConstants()` | `{ isRTL, doLeftAndRightSwapInRTL }`。 |
+## 布局方向
 
-```tsx
-<Text onPress={() => I18nManager.forceRTL(!I18nManager.isRTL)}>
-  {I18nManager.isRTL ? "Right to left" : "Left to right"}
-</Text>
+布局方向跟随用户的语言：在从右到左书写的语言（阿拉伯语、希伯来语等）中，应用从右到左布局，行从右侧开始排列，`left` / `right` 样式属性（`marginLeft`、`paddingRight` 等）表示起始端和结束端。修改即时生效，无需重启。
+
+视图的 `direction` 样式（`"ltr"`、`"rtl"` 或默认的 `"inherit"`）设置其自身子树的方向；Rust 中为 `.direction(LayoutDirection::..)`。
+
+```rust tabs
+view().direction(LayoutDirection::Rtl).flex_row().gap_2().child(text("First")).child(text("Second"))
+```
+
+```tsx tabs
+<View style={{ direction: "rtl", flexDirection: "row", gap: 8 }}>
+  <Text>First</Text>
+  <Text>Second</Text>
+</View>
 ```
 
 ## 相关内容
 
-- 安全区域和键盘（`safeArea()`、`keyboard()`、`useSafeAreaInsets()`）属于 [`nsh/ui/mobile`](../components/index.md)。
+- 安全区域（Rust 的 `safe_area()`；TSX 的 `safeArea()`、`safeAreaInsets()`）和软键盘（Rust 的 `keyboard_height()`；TSX 的 `keyboardFrame()`）属于 [`nsh/base`](./nsh-base.md#safearea-and-safeareainsets)。
 - 屏幕阅读器和减弱动态效果的设置在 [`nsh/accessibility`](./nsh-accessibility.md) 中。

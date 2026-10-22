@@ -1,7 +1,61 @@
 # Performance
 
 Performance is the project's first priority; the rules are in `AGENTS.md`. Changes to hot paths come with before /
-after `nsh trace` timings and item counts. Current baselines (Apple Silicon):
+after `nsh test --trace` timings and item counts (`nsh trace` before it, in the records below). Current baselines
+(Apple Silicon):
+
+List source publication on the updated pin (macOS Apple Silicon, unoptimized without debug info,
+five alternating pairs, `2f971948` → `28c011ed`): counter first/press work stays at 56/10 ops and
+49/7 mount items. Gallery `Bench.tsx` stays at 1226 ops / 1029 items initially and 1064 ops /
+961 items over a 3000 pt scroll. Full-scroll median core time was 151.91 → 164.81 ms, with ranges
+145.23–155.71 / 141.13–169.76 ms; initial core time was 4.73 → 5.21 ms. List-binding prepend
+stays at 19 ops / 22 items (median 1.19 → 1.18 ms), while removal changes 7 ops / 9 items to
+6 ops / 8 items (0.76 → 0.64 ms). All five pairs preserve the selected row after both splices.
+Timing ranges overlap: these traces establish bounded work and ordinary owner retention, not a
+latency improvement or production input behavior. The earlier comparison below used another base
+and build setup; its timings are not directly comparable with these.
+
+List source publication, release-profile follow-up (macOS Apple Silicon, five alternating pairs,
+`2f971948` → `63efd47a`; opt-level 3, fat LTO, one codegen unit): counter initial/press work stays
+56/10 ops and 49/7 mount items; gallery initial/3000 pt scroll stays 1226/1064 ops and 1029/961
+items. Binding prepend stays 19 ops / 22 items; removal changes 7 ops / 9 items to 6 ops / 8 items.
+Every pair retains the selected row after both splices. Core timings below are marginal medians;
+paired changes are medians of the five individual ratios, not ratios of the marginal medians.
+
+| Work | Before → after (µs) | Paired change | After slower |
+| --- | ---: | ---: | ---: |
+| Gallery initialization | 2027 → 2124 | +4.79% | 4/5 |
+| Gallery 3000 pt scroll | 37118 → 36263 | -0.83% | 2/5 |
+| Binding prepend | 267 → 328 | +14.29% | 3/5 |
+| Binding remove | 119 → 139 | +16.81% | 4/5 |
+
+CLI process-tree user+system CPU paired medians are +2.04% (counter, 3/5 higher), +1.48% (gallery,
+4/5) and +3.98% (binding, 4/5). They include bundling, the driver and trace output, not isolated
+native Host CPU or product FPS. The debug scroll median was +8.49% with 4/5 pairs slower;
+overlapping ranges do not exclude a regression. Release does not repeat that sustained-scroll
+direction, but initialization and binding costs remain. An initial shared-target cache-reuse
+attempt produced identical binaries and was excluded before any measurements; a targeted rebuild
+produced distinct binaries. Only the fixed 30 release runs were measured, without added samples.
+
+List source publication (macOS Apple Silicon, debug headless CLI, five alternating pairs against
+`36c0fa75`): `nsh test --trace` keeps counter first/press work at 56/10 ops and 49/7 mount items.
+Gallery `Bench.tsx` keeps 1226 ops / 1029 items initially and 1064 ops / 961 items over a 3000 pt
+scroll. Median core time for the full scroll was 82.30 → 83.19 ms, with overlapping ranges
+(74.02–86.05 / 70.57–85.19 ms); initial core time was 5.67 → 5.83 ms. In the core list-binding
+compat case, prepending keeps 19 ops / 22 items (median 1.18 → 1.06 ms); removing changes
+7 ops / 9 items to 6 ops / 8 items (0.58 → 0.70 ms, overlapping ranges). Both versions retain
+the selected row in ordinary insertion/removal. The correction covers a pending bind from the
+previous published source after JS has queued another source change; these ordinary traces
+establish bounded work, not a general speedup or the frequency of that cross-frame condition.
+
+`onMouseMove` (Desktop and web): Linux x86_64, debug CLI, five interleaved runs of
+`echo 'await app.press("+1")' | nsh test examples/counter/App.tsx --trace`, against main `fd772aef`.
+The first commit stays at 56 ops / 49 mount items / 21 nodes; the press stays at 10 ops / 7 items / 24 nodes.
+Minimum first-commit times were 277 → 280 µs, press times 180 → 189 µs (medians 189 → 202 µs for the press).
+Cold-start timings varied widely (277–633 µs), so these runs establish unchanged work counts rather than a speedup.
+Without mouse listeners, each backend skips the new mouse hit test. Mouse moves share the existing 8 ms hover
+coalescing interval, with the latest coordinates kept independently per view and event kind.
+
 
 - counter, headless (debug): first frame ~0.5–0.65ms (58 ops / 49 mount items), one tap ~0.15ms (12 ops / 8 items).
 - counter, Catalyst (release): first frame ~1.05–1.15ms (of which ~0.7ms is cold CoreText layout of 10 texts), one tap ~0.12ms.
@@ -13,22 +67,41 @@ after `nsh trace` timings and item counts. Current baselines (Apple Silicon):
   no batch. `list_bench` runs at ~9µs per frame back to back (JS ~4µs; ~30µs / JS ~20µs before reactivity went native) and
   ~50µs with caches flushed between frames, but ~60–150µs after the thread sleeps 10ms. The difference is the CPU clocking down while the thread sleeps (Apple CLPC), not the code path; neither QoS (the engine
   thread is USER_INTERACTIVE) nor the Mach time-constraint policy changes it. Judge optimizations by the back-to-back and flushed-cache numbers:
-  single-frame `nsh trace` timings are dominated by the clock state.
+  single-frame `nsh test --trace` timings are dominated by the clock state.
+- Lists in their parent's viewport (`viewport="parent"`; gallery Lists › Page, release, headless,
+  `app.scroll("id:page", 3000)`): 49 commits, 651 ops / 647 mount items, median commit ~90–100µs; once the window is
+  full, a frame that rebinds one row is 6 ops / 8 items (the page's scroll view moves the list; no `ScrollBy` while
+  the rows match their estimates). Lists of their own pay nothing for it: `Bench.tsx --scroll 3000` and the
+  gallery's Lists pages send the same mount items in every commit before and after (1226 ops / 1029 items first,
+  1064 ops / 914 items over 39 scrolling commits), with commit times within the run-to-run spread.
 - On Catalyst (release), rebinding one row while scrolling slowly takes ~0.4ms (clocked down) and rebinding a whole screen of ~32 rows on a
   fast fling 0.9–1.6ms.
 - Host startup (`Host::new`, release): ~75–155µs (clock state). The web APIs add nothing until first used, then ~90µs to
-  make their classes (`bench_first_web_global`; as JS they cost ~0.8ms as source, ~0.33ms as bytecode).
+  make their classes (`bench_first_web_global`; as JS they cost ~0.8ms as source, ~0.33ms as bytecode). The standard
+  modules add `Buffer` (~30µs warm, ~70µs in a process's first VM; made at startup: it must exist before hardening
+  freezes `%TypedArray%.prototype`) and the async runtime over the plain one (~12µs). The first `new WebSocket`
+  starts the VM's tokio I/O runtime (~12µs and a worker thread); `process` and `crypto` are made on first use
+  (`standard::LAZY`), and `WebSocket` is one of the lazy web classes (`web/websocket.rs`, ~4µs of their making; as
+  a JS facade it cost ~190µs on first use). Installing `Buffer` keeps NSH's lazy web globals unmade. On a Linux x86 desktop (shared, noisy) `Host::new` is ~105µs warm and ~460µs
+  cold in a trace's first VM, close to main's; the counter's hardened release first frame (`nsh trace
+  examples/counter`, minimum of 81 interleaved runs) is ~650µs against main's ~540µs, of which `Buffer`'s cold
+  setup is ~70µs.
+- Android passive press feedback (arm64 emulator, debug; one `nsh test examples/counter/App.tsx --target android --trace`
+  run before and after): the first commit stays at 56 ops / 49 mount items / 21 nodes, and the tap at
+  10 ops / 7 mount items / 24 nodes. First-commit core times were 56.8 → 112.7 ms, tap core times
+  3.85 → 4.09 ms; first-frame totals were 127.3 → 124.5 ms. These noisy single runs establish unchanged
+  engine work counts, not a speedup or a measurement of Java touch dispatch. Passive feedback reuses the root's
+  touch tracker; observers are picked at finger-down and cancelled when a native gesture takes over.
 - Android emulator (arm64, release): rebinding one gallery row while scrolling ~0.3–0.4ms (JS ~60µs); text costs per new
   text: `PrecomputedText` ~120µs, measure ~50µs, final layout reused. First gallery frame 20–50ms (noisy on the emulator).
 
-- Rust components vs the same component in TSX (`component_bench`, `examples/bench`, release, minimum of the runs;
-  `TsButton.tsx` is the TSX Button `nsh/ui/mobile` had before components moved into Rust, restyled to draw exactly
-  like the Rust one), with the Rust Button running once (its props bound) and, in brackets, as it rendered again
-  and was diffed before:
+- Rust components vs the same component in TSX (`component_bench`, which writes its screens as `examples/bench` has them; release, minimum of the runs;
+  a button written as a Rust component and the same button in TSX, `TsButton.tsx`, styled to draw exactly alike),
+  with the Rust button running once (its props bound) and, in brackets, as it rendered again and was diffed before:
 
-  | | Rust Button: JS / core | TSX Button: JS / core |
+  | | Rust button: JS / core | TSX button: JS / core |
   |---|---|---|
-  | first frame, 200 Buttons (ops) | 0.42ms / 1.04ms [0.75ms] (1015) | 0.85ms / 0.64ms (2415) |
+  | first frame, 200 buttons (ops) | 0.42ms / 1.04ms [0.75ms] (1015) | 0.85ms / 0.64ms (2415) |
   | one update of all 200 titles (ops) | 0.15ms / 0.44ms [0.48ms] (200) | 0.13ms / 0.34ms (400) |
   | first frame, 1000-row list | 0.17ms / 0.23ms [0.19ms] | 0.23ms / 0.18ms |
   | scrolling the list, per rebinding frame | 1.5µs / 6.1µs [6.3µs] | 1.5µs / 5.3µs |
@@ -40,7 +113,7 @@ after `nsh trace` timings and item counts. Current baselines (Apple Silicon):
   its text's and label's bindings, and a large view with one changing value costs what that value costs
   (`bench_view_tick`, below). The components' JS face must stay one effect per instance reading the props directly:
   the first version (Solid's `splitProps` / `mergeProps` / `spread` in the former JS runtime) cost 4.0ms of JS for
-  the same first frame, more than the TSX Button.
+  the same first frame, more than the TSX button.
 - Rust components run once (`cargo test --release -p nsh-core bench_view_tick -- --ignored --nocapture`, a view of
   300 static rows and a counter text, one press per frame): the press and the binding it runs take ~0.3µs, the commit
   ~82µs (the text's relayout and the tree's layout pass), one mount item. The former model rendered the whole view
@@ -130,6 +203,20 @@ after `nsh trace` timings and item counts. Current baselines (Apple Silicon):
   median ~5µs vs ~14µs in JS, commit ~15µs vs ~22µs. Scrolling a 1000-row `List` (avatar, two texts, a bound color)
   6000 pt: ~77µs vs ~150µs of JS per rebinding frame, commit ~205µs vs ~276µs.
 
+## Terminal backend
+
+Historical measurements from the terminal backend's Canvas measurement and
+geometry-cache changes (not replacements for the release baselines above):
+
+- Linux x86-64, debug, shared engine: the then-current `nsh trace
+  examples/counter --taps 1` emitted 49 initial and 8 update mount items
+  before and after the Canvas measurement hook. Commit samples were
+  394/247 µs before and 525/245 µs after. The current tracing command is
+  `nsh test --trace`; see [terminal verification](tui.md#verification).
+- In a 160×50 Kitty-protocol PTY, the workbench's Effects-to-deployment
+  interaction dropped from over 5 seconds to 195 ms after per-pass
+  geometry caching and identity-transform shortcuts.
+
 ## The performance monitor (`nsh_engine::perf`)
 
 `PerfMonitor` collects one surface's timings for an on-screen monitor (`--fps`; the macOS backend's `fps.rs` draws it)
@@ -145,7 +232,7 @@ per frame). Other platforms need only call `record_work` / `vsync` / `record_lat
 draw a panel.
 
 - macOS (release, Apple silicon, 1200×800 window, 120 Hz ProMotion screen; `nsh-macos-host --fps --trace` with
-  `--script`, two alternating runs of each; main-thread ms per shown frame as p50 / p95). The display link delivers
+  scripted input (the then `--script` steps), two alternating runs of each; main-thread ms per shown frame as p50 / p95). The display link delivers
   120 Hz in every case (refresh gaps p50 8.33 ms). Before = the backend without the two drawing fixes below:
 
   | Scenario | Before: main p50 / p95, CPU | After: main p50 / p95, CPU |
@@ -202,4 +289,4 @@ draw a panel.
   on the main thread (18 ms of every frame: ~190 new drawings a second). After: no cap in NSH's windows, canvases
   rasterized on two workers and only what animates in place (`canvas.rs`).
 
-The dev profile builds `rquickjs-sys` and `taffy` with `opt-level = 3`, so debug timings are meaningful too; release uses fat LTO.
+The dev profile builds `quickjs-jit-sys` and `taffy` with `opt-level = 3`, so debug timings are meaningful too; release uses fat LTO.

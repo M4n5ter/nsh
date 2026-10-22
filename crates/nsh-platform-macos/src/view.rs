@@ -30,8 +30,8 @@ use std::{
 };
 
 use nsh_core::{
-    EventMask, MAX_TRANSFORMS, Matrix, NodeId, PointerEvents, ROOT_ID, Rect, ViewKind, ViewProps,
-    ViewStyle,
+    Bounds, EventMask, Matrix, NodeId, PointerEvents, Points, ROOT_ID, ViewKind, ViewProps,
+    ViewStyle, animation::AnimValues,
 };
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
@@ -49,27 +49,6 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect};
 use objc2_quartz_core::{CALayer, CALayerDelegate, CATransform3D};
 
 use crate::surface::{Surface, quiet};
-
-/// Values native animations set on a view; they win over the style's.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub(crate) struct AnimValues {
-    /// Animated opacity.
-    pub(crate) opacity: Option<f32>,
-    /// Animated background color.
-    pub(crate) background: Option<nsh_core::Color>,
-    /// Animated entries of the transform list (by position).
-    pub(crate) transform: [Option<f32>; MAX_TRANSFORMS],
-    /// Animated border color (every side).
-    pub(crate) border_color: Option<nsh_core::Color>,
-    /// Animated text color (a text view's runs, an input's text).
-    pub(crate) color: Option<nsh_core::Color>,
-    /// Animated shadow color.
-    pub(crate) shadow_color: Option<nsh_core::Color>,
-    /// Animated shadow opacity.
-    pub(crate) shadow_opacity: Option<f32>,
-    /// Animated shadow blur radius.
-    pub(crate) shadow_radius: Option<f32>,
-}
 
 /// Scroll position and extent of a [`ViewKind::Scroll`] view.
 #[derive(Debug, Default, Clone)]
@@ -102,7 +81,7 @@ pub(crate) struct ScrollState {
 impl ScrollState {
     /// The largest offsets.
     pub(crate) fn max(&self, viewport: (f32, f32)) -> (f32, f32) {
-        let inset = self.behavior.content_inset;
+        let inset = self.behavior.content_inset.map(|v| v.0);
         (
             (self.content.0 + inset.left + inset.right - viewport.0).max(0.0),
             (self.content.1 + inset.top + inset.bottom - viewport.1).max(0.0),
@@ -116,7 +95,7 @@ pub(crate) struct Native {
     /// The view (a subview of the node's view).
     pub(crate) view: Retained<NSView>,
     /// Where it goes.
-    pub(crate) rect: Rect,
+    pub(crate) rect: Bounds<Points>,
 }
 
 /// Everything the mounter set on one view.
@@ -126,7 +105,7 @@ pub(crate) struct ViewState {
     /// What it is.
     pub(crate) kind: ViewKind,
     /// Frame in the parent (points).
-    pub(crate) frame: Rect,
+    pub(crate) frame: Bounds<Points>,
     /// Visual style.
     pub(crate) style: Box<ViewStyle>,
     /// Native animation values.
@@ -141,7 +120,7 @@ pub(crate) struct ViewState {
     pub(crate) states: u8,
     /// Extra translation (sticky list cells, screen transitions).
     pub(crate) shift: (f32, f32),
-    /// Extra opacity (press feedback, screen and modal transitions).
+    /// Extra opacity (screen and modal transitions).
     pub(crate) fade: f32,
     /// Scroll state (scroll views).
     pub(crate) scroll: Option<ScrollState>,
@@ -157,7 +136,7 @@ pub(crate) struct ViewState {
     pub(crate) natives: Vec<Native>,
     /// The area descendants cover outside the bounds (`MountItem::Overflow`):
     /// hit testing looks there too.
-    pub(crate) overflow: Option<Rect>,
+    pub(crate) overflow: Option<Bounds<Points>>,
     /// Running layout / style transitions and keyframes.
     pub(crate) live: Option<Box<crate::transition::Live>>,
     /// The layers decoration added ([`crate::decor`]).
@@ -171,7 +150,7 @@ impl ViewState {
         ViewState {
             id,
             kind,
-            frame: Rect::default(),
+            frame: Bounds::default(),
             style: Box::default(),
             anim: AnimValues::default(),
             events: EventMask::default(),
@@ -195,7 +174,7 @@ impl ViewState {
 
     /// The opacity it is drawn with.
     pub(crate) fn opacity(&self) -> f32 {
-        let live = self.live.as_ref().map_or(1.0, |l| l.opacity);
+        let live = self.live.as_ref().map_or(1.0, |l| l.opacity());
         // `filter: opacity()` scales it like the property.
         let filters = self.style.effects.as_ref().map_or(1.0, |e| {
             e.filters
@@ -257,13 +236,20 @@ impl ViewState {
         if extra.is_none() && (t.ops().is_empty() || (!animated && t.is_identity())) {
             return None;
         }
-        let (w, h) = (self.frame.width, self.frame.height);
+        let (w, h) = (self.frame.size.width.0, self.frame.size.height.0);
         let mut m = t.matrix(|i| self.anim.transform.get(i).copied().flatten());
         if let Some(extra) = extra {
-            m = extra.apply(m, h);
+            m = crate::transition::apply_extra(extra, m, h);
         }
         let o = self.style.transform_origin;
-        let (ox, oy, oz) = (o.x.resolve(w) as f64, o.y.resolve(h) as f64, o.z as f64);
+        let at = |len: nsh_core::geometry::DefiniteLength, side: f32| {
+            len.to_points(
+                nsh_core::geometry::AbsoluteLength::Points(Points(side)),
+                nsh_core::geometry::REM_SIZE,
+            )
+            .0 as f64
+        };
+        let (ox, oy, oz) = (at(o.x, w), at(o.y, h), o.z.0 as f64);
         // To the origin, transform, and back (row vectors).
         Some(
             translation(-ox, -oy, -oz)
@@ -361,25 +347,25 @@ define_class!(
 
     unsafe impl CALayerDelegate for Drawer {
         #[unsafe(method(drawLayer:inContext:))]
-        fn draw_layer(&self, layer: &CALayer, ctx: &CGContext) {
+        fn draw_layer(&self, layer: &CALayer, cx: &CGContext) {
             let Some(view) = self.ivars().load() else {
                 return;
             };
             let Ok(state) = view.ivars().state.try_borrow() else {
                 return;
             };
-            let c = Some(ctx);
+            let c = Some(cx);
             CGContext::save_g_state(c);
             if !layer.contentsAreFlipped() {
                 // Drawing is top down, as in a flipped view.
                 CGContext::translate_ctm(c, 0.0, layer.bounds().size.height);
                 CGContext::scale_ctm(c, 1.0, -1.0);
             }
-            crate::text::draw(ctx, &state);
+            crate::text::draw(cx, &state);
             // What Core Animation redraws (all of it, or a canvas's part
             // that animated values changed), top down.
             let dirty = CGContext::clip_bounding_box(c);
-            crate::canvas::draw(ctx, &state, dirty);
+            crate::canvas::draw(cx, &state, dirty);
             CGContext::restore_g_state(c);
         }
 
@@ -490,6 +476,14 @@ define_class!(
 
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+            // A press hit tests (and its hosted view converts it) with
+            // AppKit's geometry: scroll offsets still shown as layer
+            // transforms move into the bounds first.
+            if let Some(surface) = self.surface()
+                && pressing(self.mtm())
+            {
+                crate::scroll::commit_pending(&surface);
+            }
             // SAFETY: NSView's own hit testing.
             let hit: Option<Retained<NSView>> = unsafe { msg_send![super(self), hitTest: point] };
             // The root takes every event over the app's own views and
@@ -610,6 +604,16 @@ define_class!(
             self.pointer(event);
         }
 
+        // The root sets NSH's cursor; other views pass it up to it.
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, event: &NSEvent) {
+            match self.surface() {
+                Some(surface) => crate::input::cursor_update(&surface),
+                // SAFETY: NSView's own handling (passes it up).
+                None => unsafe { msg_send![super(self), cursorUpdate: event] },
+            }
+        }
+
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             match self.surface() {
@@ -641,7 +645,8 @@ define_class!(
             }
         }
 
-        /// The Edit menu's Select All (Cmd+A): a selectable text's.
+        /// The Edit menu's Select All (Cmd+A): a selectable text's or a
+        /// selection area's.
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
             if let Some(surface) = self.surface() {
@@ -861,6 +866,22 @@ fn clicking(mtm: MainThreadMarker) -> bool {
         })
 }
 
+/// Whether the event AppKit handles (or the test agent hands the window)
+/// is a mouse press.
+fn pressing(mtm: MainThreadMarker) -> bool {
+    scripted_type().map_or_else(
+        || clicking(mtm),
+        |t| {
+            matches!(
+                t,
+                NSEventType::LeftMouseDown
+                    | NSEventType::RightMouseDown
+                    | NSEventType::OtherMouseDown
+            )
+        },
+    )
+}
+
 /// Whether the event AppKit handles is a mouse wheel or trackpad scroll.
 fn scrolling(mtm: MainThreadMarker) -> bool {
     scripted_type()
@@ -873,19 +894,20 @@ fn scrolling(mtm: MainThreadMarker) -> bool {
 }
 
 thread_local! {
-    /// The event `--script` hands its window (`crate::script`) while the
-    /// window handles it: `sendEvent:` does not make it
+    /// The event the test agent hands its window (`crate::synth`) while
+    /// the window handles it: `sendEvent:` does not make it
     /// `NSApp.currentEvent`, which the root's `hitTest:` looks at.
     static SCRIPTED: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
 }
 
-/// The type of the event `--script` hands its window now.
+/// The type of the event the test agent hands its window now.
 fn scripted_type() -> Option<NSEventType> {
     SCRIPTED.with_borrow(|e| e.as_ref().map(|e| e.r#type()))
 }
 
 /// Runs `f` (which hands `event` to a window) with `event` as the one
 /// AppKit handles, for the root's `hitTest:`.
+#[cfg(any(feature = "dev", test))]
 pub(crate) fn scripted<R>(event: &NSEvent, f: impl FnOnce() -> R) -> R {
     let old = SCRIPTED.replace(Some(event.retain()));
     let r = f();
@@ -1043,16 +1065,54 @@ impl NshView {
     fn size_container(&self) {
         if let Some(c) = &*self.ivars().container.borrow() {
             let f = self.state().frame;
-            let origin = c.bounds().origin;
-            c.setFrame(ns_rect(0.0, 0.0, f.width, f.height));
-            c.setBoundsOrigin(origin);
+            let origin = crate::scroll::bounds_origin(self);
+            c.setFrame(ns_rect(0.0, 0.0, f.size.width.0, f.size.height.0));
+            c.setBoundsOrigin(NSPoint::new(origin.0 as CGFloat, origin.1 as CGFloat));
+            if let Some(layer) = c.layer() {
+                layer.setSublayerTransform(IDENTITY);
+            }
         }
     }
 
-    /// Sets the origin of its container's bounds: the scroll offset.
-    pub(crate) fn set_bounds_origin(&self, x: f32, y: f32) {
+    /// The origin of the container's bounds as AppKit has it: the last
+    /// committed scroll offset, possibly stale while the offset shows as
+    /// a layer transform.
+    pub(crate) fn container_bounds_origin(&self) -> (f32, f32) {
+        self.container_view().map_or((0.0, 0.0), |c| {
+            let o = c.bounds().origin;
+            (o.x as f32, o.y as f32)
+        })
+    }
+
+    /// Shows the scroll offset by translating the container layer's
+    /// sublayers `(dx, dy)` points: the pixels move without view geometry
+    /// changing, so AppKit walks no descendant geometry (`setBoundsOrigin`
+    /// invalidates every descendant's window geometry — focus, tracking
+    /// areas, cursor rects — each scroll step, which is the scroll jank).
+    /// [`NshView::commit_bounds_origin`] syncs the views once it settles.
+    pub(crate) fn set_layer_scroll(&self, dx: f32, dy: f32) {
+        let Some(layer) = self.container_view().and_then(|c| c.layer()) else {
+            return;
+        };
+        let mut t = IDENTITY;
+        t.m41 = dx as CGFloat;
+        t.m42 = dy as CGFloat;
+        layer.setSublayerTransform(t);
+    }
+
+    /// Commits the scroll offset to the container's bounds origin and
+    /// drops the layer transform: a no-op visually (the transform carried
+    /// exactly the committed-to-live difference), one subtree walk for
+    /// AppKit to learn where things are; none when they are there.
+    pub(crate) fn commit_bounds_origin(&self, x: f32, y: f32) {
         let c = self.ensure_container();
-        c.setBoundsOrigin(NSPoint::new(x as CGFloat, y as CGFloat));
+        let origin = NSPoint::new(x as CGFloat, y as CGFloat);
+        if c.bounds().origin != origin {
+            c.setBoundsOrigin(origin);
+        }
+        if let Some(layer) = c.layer() {
+            layer.setSublayerTransform(IDENTITY);
+        }
     }
 
     /// Something it draws changed: content (text, canvas) is drawn again
@@ -1140,20 +1200,20 @@ impl NshView {
 
     /// Part of what it draws changed (`rect`, in its own coordinates, y
     /// down): only that is drawn again (a canvas's animated values).
-    pub(crate) fn redraw_rect(&self, rect: nsh_core::Rect) {
+    pub(crate) fn redraw_rect(&self, rect: nsh_core::Bounds<nsh_core::Points>) {
         let Some(layer) = self.content_layer() else {
             return;
         };
         // Layer space is y up unless its contents are flipped
         // (`drawLayer:inContext:` flips the drawing the same way).
         let y = if layer.contentsAreFlipped() {
-            rect.y as CGFloat
+            rect.origin.y.0 as CGFloat
         } else {
-            layer.bounds().size.height - (rect.y + rect.height) as CGFloat
+            layer.bounds().size.height - (rect.origin.y.0 + rect.size.height.0) as CGFloat
         };
         layer.setNeedsDisplayInRect(CGRect::new(
-            CGPoint::new(rect.x as CGFloat, y),
-            CGSize::new(rect.width as CGFloat, rect.height as CGFloat),
+            CGPoint::new(rect.origin.x.0 as CGFloat, y),
+            CGSize::new(rect.size.width.0 as CGFloat, rect.size.height.0 as CGFloat),
         ));
     }
 
@@ -1164,8 +1224,19 @@ impl NshView {
         if ns.window().is_none() || ns.isHiddenOrHasHiddenAncestor() {
             return false;
         }
-        let visible = ns.visibleRect();
-        visible.size.width > 0.0 && visible.size.height > 0.0
+        // `visibleRect` follows the bounds as AppKit has them committed;
+        // while a scroll offset shows as a layer transform the truth is
+        // the scroll state, so the clip is each ancestor's effective
+        // viewport — the same walk, scroll-state origins instead
+        // ([`crate::scroll::bounds_origin`]; a plain view's is (0, 0)).
+        // Ancestor transforms are not applied: nearly all are identity,
+        // and a transformed clip at most defers or draws early.
+        // Placed frames (`ns().frame()`: a sticky shift and mirroring
+        // applied), not the logical ones, for the view and its ancestors
+        // alike: the clip spaces are the ancestors' containers'.
+        let ancestors = std::iter::successors(self.parent_view(), NshView::parent_view)
+            .map(|p| (placed(p.ns().frame()), crate::scroll::bounds_origin(&p)));
+        clip_shows(placed(ns.frame()), ancestors)
     }
 
     /// Its frame, transform or shift changed: places it again.
@@ -1182,18 +1253,18 @@ impl NshView {
             s.scroll
                 .as_ref()
                 .is_some_and(|sc| sc.mirrored)
-                .then_some(s.frame.width)
+                .then_some(s.frame.size.width.0)
         });
         let (rect, root) = {
             let s = self.state();
             let f = s.frame;
-            let mut x = f.x + s.shift.0;
+            let mut x = f.origin.x.0 + s.shift.0;
             if let Some(w) = mirror {
-                x = w - x - f.width;
+                x = w - x - f.size.width.0;
             }
-            let y = f.y + s.shift.1;
+            let y = f.origin.y.0 + s.shift.1;
             (
-                ns_rect(x, y, f.width, f.height),
+                ns_rect(x, y, f.size.width.0, f.size.height.0),
                 s.id == ROOT_ID && self.ivars().surface.borrow().strong_count() > 0,
             )
         };
@@ -1245,7 +1316,12 @@ impl NshView {
         let natives = self.state().natives.clone();
         for n in natives {
             let r = n.rect;
-            n.view.setFrame(ns_rect(r.x, r.y, r.width, r.height));
+            n.view.setFrame(ns_rect(
+                r.origin.x.0,
+                r.origin.y.0,
+                r.size.width.0,
+                r.size.height.0,
+            ));
         }
     }
 
@@ -1296,7 +1372,7 @@ impl NshView {
     }
 
     /// Hosts `view` at `rect` (or moves it there).
-    pub(crate) fn set_native(&self, view: &NSView, rect: Rect) {
+    pub(crate) fn set_native(&self, view: &NSView, rect: Bounds<Points>) {
         {
             let mut s = self.state_mut();
             match s.natives.iter_mut().find(|n| &*n.view == view) {
@@ -1310,7 +1386,12 @@ impl NshView {
         if superview(view).as_deref() != Some(self.ns()) {
             self.ns().addSubview(view);
         }
-        view.setFrame(ns_rect(rect.x, rect.y, rect.width, rect.height));
+        view.setFrame(ns_rect(
+            rect.origin.x.0,
+            rect.origin.y.0,
+            rect.size.width.0,
+            rect.size.height.0,
+        ));
     }
 
     /// Stops hosting `view`.
@@ -1340,9 +1421,75 @@ impl NshView {
     }
 }
 
+/// A rectangle as `(x0, y0, x1, y1)`.
+type Span = (f32, f32, f32, f32);
+
+fn placed(f: NSRect) -> Span {
+    let (x, y) = (f.origin.x as f32, f.origin.y as f32);
+    (x, y, x + f.size.width as f32, y + f.size.height as f32)
+}
+
+/// Whether `rect` (in its parent's content space) is not clipped away by
+/// `ancestors`, innermost first: each one's placed frame (in its own
+/// parent's content space) and the origin its content shows from (a
+/// scroll view's offset, (0, 0) otherwise).
+fn clip_shows(rect: Span, ancestors: impl IntoIterator<Item = (Span, (f32, f32))>) -> bool {
+    let (mut x0, mut y0, mut x1, mut y1) = rect;
+    for (frame, (ox, oy)) in ancestors {
+        let (w, h) = (frame.2 - frame.0, frame.3 - frame.1);
+        x0 = x0.max(ox);
+        y0 = y0.max(oy);
+        x1 = x1.min(ox + w);
+        y1 = y1.min(oy + h);
+        if x1 <= x0 || y1 <= y0 {
+            return false;
+        }
+        // Into the grandparent's content space: the offset origin shows
+        // at the frame's origin.
+        x0 += frame.0 - ox;
+        x1 += frame.0 - ox;
+        y0 += frame.1 - oy;
+        y1 += frame.1 - oy;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_row_shows_through_the_scroll_offset() {
+        let screen = ((0.0, 0.0, 400.0, 800.0), (0.0, 0.0));
+        let row = (0.0, 0.0, 400.0, 40.0);
+        let list = |y| ((0.0, 0.0, 400.0, 600.0), (0.0, y));
+        assert!(clip_shows(row, [list(0.0), screen]));
+        assert!(!clip_shows(row, [list(1000.0), screen]));
+    }
+
+    #[test]
+    fn a_text_in_a_pinned_sticky_header_shows() {
+        // The header's logical frame is at the top of the content; scrolled
+        // 1000 points, it is placed (shifted) at 1000, where the list shows.
+        let text = (8.0, 8.0, 200.0, 32.0);
+        let header = ((0.0, 1000.0, 400.0, 1040.0), (0.0, 0.0));
+        let list = ((0.0, 0.0, 400.0, 600.0), (0.0, 1000.0));
+        assert!(clip_shows(text, [header, list]));
+        let logical = ((0.0, 0.0, 400.0, 40.0), (0.0, 0.0));
+        assert!(!clip_shows(text, [logical, list]));
+    }
+
+    #[test]
+    fn a_text_in_a_mirrored_cell_shows() {
+        // A 400-point mirrored list scrolled 500 points: its bounds origin is
+        // -500, and the cell at logical x 600 is placed at 400 - 600 - 90.
+        let text = (10.0, 10.0, 80.0, 70.0);
+        let list = ((0.0, 0.0, 400.0, 80.0), (-500.0, 0.0));
+        let cell = ((-290.0, 0.0, -200.0, 80.0), (0.0, 0.0));
+        assert!(clip_shows(text, [cell, list]));
+        let logical = ((600.0, 0.0, 690.0, 80.0), (0.0, 0.0));
+        assert!(!clip_shows(text, [logical, list]));
+    }
 
     #[test]
     fn scripted_wheels_are_the_event_handled() {

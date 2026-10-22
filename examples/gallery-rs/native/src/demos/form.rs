@@ -5,23 +5,21 @@
 //! and keys, a sheet of inputs and a message bar riding on the keyboard
 //! (as the TSX gallery's `demos/Form.tsx`).
 
+use nsh_base::{dialog, keyboard_avoiding_view, safe_area_view};
 use nsh_core::{
-    Size,
+    Points, Size,
     ui::{
-        AutoCapitalize, AutoFill, KeyboardDismissMode, LayoutAnimation, ReturnKeyType, View,
-        prelude::*,
+        AutoCapitalize, AutoFill, KeyboardDismissMode, LayoutAnimation, ReturnKeyType,
+        SubmitBehavior, View, prelude::*,
     },
-};
-use nsh_ui_mobile::{
-    KeyboardAvoidingView, KeyboardAvoidingViewProps, SafeAreaView, SafeAreaViewProps,
 };
 
 use crate::{
     nav,
     ui::{
         Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, IconTile, Inset,
-        MONO, Meter, PressProps, RoundButton, Section, Segment, SegmentedEvent, Tone, appear,
-        caption, colors, header, hint, icon, press_with, radius, segmented, tints,
+        MONO, Meter, RoundButton, Section, Segment, Tone, appear, caption, colors, hint, icon,
+        press, radius, segmented, tints, titled,
     },
 };
 
@@ -145,11 +143,11 @@ impl Field {
             .selection_color(|| color(colors::ACCENT))
             .return_key_type(ReturnKeyType::Done)
             .multiline(self.multiline)
-            .editable(self.editable)
-            .on_focus(move |_: &()| {
+            .readonly(!self.editable)
+            .on_focus(move || {
                 focus.timing(1.0, 160.0, Easing::EaseInOut);
             })
-            .on_blur(move |_: &()| {
+            .on_blur(move || {
                 focus.timing(0.0, 220.0, Easing::EaseInOut);
                 if let Some(on_blur) = &on_blur {
                     on_blur();
@@ -247,7 +245,7 @@ impl Field {
                             .bottom(px(-1.0))
                             .rounded(px(radius::CONTROL))
                             .border_curve(BorderCurve::Continuous)
-                            .border(1.5)
+                            .border(px(1.5))
                             .border_color(move || {
                                 if failed() {
                                     colors::DANGER
@@ -261,7 +259,7 @@ impl Field {
             // The error's row comes and goes; while it shows, its text
             // follows the error.
             .children(error.map(|error| {
-                If::new(
+                when(
                     move || error.with(Option::is_some),
                     move || {
                         view()
@@ -298,15 +296,8 @@ fn link_row(
     first: bool,
     on_press: impl Into<Listener<()>>,
 ) -> impl IntoElement {
-    press_with(
-        PressProps {
-            scale: 0.98.into(),
-            label: Some(title.into()).into(),
-            ..PressProps::default()
-        },
-        on_press,
-    )
-    .child(
+    let on_press: Listener<()> = on_press.into();
+    press().scale(0.98).label(title).on_press(on_press).child(
         view()
             .min_h(px(60.0))
             .flex_row()
@@ -334,7 +325,12 @@ fn link_row(
                             .font_family(MONO),
                     ),
             )
-            .child(icon(IconName::Chevron, 14.0, colors::FAINT)),
+            .child(
+                icon()
+                    .name(IconName::Chevron)
+                    .size(14.0)
+                    .tint(colors::FAINT),
+            ),
     )
 }
 
@@ -483,7 +479,7 @@ pub(crate) fn Form() -> impl IntoElement {
         }
         input
             .return_key_type(ReturnKeyType::Next)
-            .on_submit_editing(move |_: &str| {
+            .on_submit(move |_: &str| {
                 if let Some(next) = refs.get(i + 1) {
                     next.focus();
                 }
@@ -497,8 +493,8 @@ pub(crate) fn Form() -> impl IntoElement {
             .title("Keyboard")
             .subtitle("keyboardDismissMode while dragging")
             .right(
-                Badge::new(move || format!("{} pt", keyboard_height().round())).tone(move || {
-                    if keyboard_height() > 0.0 {
+                Badge::new(move || format!("{} pt", keyboard_height().0.round())).tone(move || {
+                    if keyboard_height() > px(0.0) {
                         Tone::Accent
                     } else {
                         Tone::Neutral
@@ -506,14 +502,12 @@ pub(crate) fn Form() -> impl IntoElement {
                 }),
             )
             .child(
-                segmented(
-                    MODES.map(|m| Segment::new(m.1)),
-                    Prop::bind(move || mode.get() as u32),
-                )
-                .on_event(move |e: &SegmentedEvent| {
-                    let SegmentedEvent::Change(i) = *e;
-                    mode.set(i as usize);
-                }),
+                segmented()
+                    .options(MODES.map(|m| Segment::new(m.1)))
+                    .selected(move || mode.get() as u32)
+                    .on_change(move |&i: &u32| {
+                        mode.set(i as usize);
+                    }),
             )
             .child(caption(
                 hint(
@@ -535,7 +529,7 @@ pub(crate) fn Form() -> impl IntoElement {
                     .render(|i| {
                         chained(0, i)
                             .value(move || name.get())
-                            .on_change_text(set(name))
+                            .on_change(set(name))
                             .auto_capitalize(AutoCapitalize::Words)
                             .auto_fill(AutoFill::Name)
                             .placeholder("Ada Lovelace")
@@ -549,7 +543,7 @@ pub(crate) fn Form() -> impl IntoElement {
                     .render(|i| {
                         chained(1, i)
                             .value(move || email.get())
-                            .on_change_text(set(email))
+                            .on_change(set(email))
                             .keyboard_type(KeyboardType::Email)
                             .auto_capitalize(AutoCapitalize::None)
                             .auto_correct(false)
@@ -562,19 +556,19 @@ pub(crate) fn Form() -> impl IntoElement {
                     .gap_2()
                     .child(
                         field(&fx[f::PASSWORD], "Password")
-                            .api("secureTextEntry")
+                            .api("masked")
                             .error(password_err)
                             .on_blur(touch(|t| t.password = true))
                             .render(|i| {
                                 chained(2, i)
                                     .value(move || password.get())
-                                    .on_change_text(move |v: &str| {
+                                    .on_change(move |v: &str| {
                                         if strength(v) != score.get_untracked() {
                                             animate_layout(LayoutAnimation::EASE_IN_EASE_OUT);
                                         }
                                         password.set(v.to_owned());
                                     })
-                                    .secure(true)
+                                    .masked(true)
                                     .auto_fill(AutoFill::NewPassword)
                                     .placeholder("At least 8 characters")
                             }),
@@ -657,11 +651,11 @@ pub(crate) fn Form() -> impl IntoElement {
                     .render(|i| {
                         chained(7, i)
                             .value(move || code.get())
-                            .on_change_text(set(code))
+                            .on_change(set(code))
                             .keyboard_type(KeyboardType::Number)
                             .max_length(6)
                             .placeholder("······")
-                            .letter_spacing(10.0)
+                            .letter_spacing(px(10.0))
                             .text_size(px(22.0))
                             .font_weight(FontWeight::MEDIUM)
                             .tabular_nums()
@@ -703,13 +697,13 @@ pub(crate) fn Form() -> impl IntoElement {
                     .render(|i| {
                         chained(12, i)
                             .value(move || shout.get())
-                            .on_change_text(move |t: &str| shout.set(t.to_uppercase()))
+                            .on_change(move |t: &str| shout.set(t.to_uppercase()))
                             .placeholder("TYPE IN LOWER CASE")
                     }),
             )
             .child(
                 field(&fx[f::READ_ONLY], "Read only")
-                    .api("editable={false}")
+                    .api("readonly")
                     .read_only()
                     .render(|i| i.value("Not editable")),
             )
@@ -734,7 +728,7 @@ pub(crate) fn Form() -> impl IntoElement {
                                 chained(14, i)
                                     .max_length(280)
                                     .value(move || notes.get())
-                                    .on_change_text(set(notes))
+                                    .on_change(set(notes))
                                     .placeholder("Return adds a line")
                                     .min_h(px(100.0))
                             }),
@@ -749,11 +743,11 @@ pub(crate) fn Form() -> impl IntoElement {
                         }),
                     ),
             )
-            .child(AutoGrow::element(()))
+            .child(auto_grow())
             .child(
                 field(&fx[f::CARET], "No caret")
-                    .api("caretHidden")
-                    .render(|i| i.caret_hidden(true).default_value("No caret here")),
+                    .api("caret")
+                    .render(|i| i.caret(false).default_value("No caret here")),
             )
     };
 
@@ -814,11 +808,12 @@ pub(crate) fn Form() -> impl IntoElement {
                             .p_3()
                             .rounded(px(radius::CONTROL))
                             .bg(if up { tints::UP } else { tints::DANGER })
-                            .child(icon(
-                                if up { IconName::Check } else { IconName::Bell },
-                                16.0,
-                                fg,
-                            ))
+                            .child(
+                                icon()
+                                    .name(if up { IconName::Check } else { IconName::Bell })
+                                    .size(16.0)
+                                    .tint(fg),
+                            )
                             .child(
                                 text(message.clone())
                                     .flex_1()
@@ -858,9 +853,7 @@ pub(crate) fn Form() -> impl IntoElement {
                         "KeyboardAvoidingView",
                         false,
                         |_: &()| {
-                            nav::push("message-bar", || {
-                                header(screen().title("Message bar")).child(MessageBar::element(()))
-                            });
+                            nav::push("message-bar", || titled("Message bar").child(message_bar()));
                         },
                     )),
             )
@@ -875,12 +868,12 @@ pub(crate) fn Form() -> impl IntoElement {
         .card(|| {
             Section::new("Selection and keys")
                 .note("onSelectionChange")
-                .child(SelectionDemo::element(()))
+                .child(selection_demo())
         })
         .card(texts)
         .card(submit_card)
         .card(more)
-        .child(If::new(sheet, move || sheet_view(sheet, &fx[f::SHEET..])))
+        .child(when(sheet, move || sheet_view(sheet, &fx[f::SHEET..])))
 }
 
 /// The sheet of inputs (`open` while it shows), its fields animated by
@@ -891,54 +884,51 @@ fn sheet_view(open: Signal<bool>, fx: &[FieldFx]) -> Modal {
         .iter()
         .zip(fx)
         .map(|(label, fx)| field(fx, *label).render(|i| i.placeholder(format!("{label} field"))));
-    modal()
+    dialog()
         .presentation(ModalPresentation::PageSheet)
-        .on_request_close(close)
+        .on_cancel(close)
         .child(
-            SafeAreaView::element(SafeAreaViewProps::default())
-                .flex_1()
-                .bg(colors::BACKGROUND)
-                .child(
-                    scroll()
-                        .flex_1()
-                        .keyboard_dismiss_mode(KeyboardDismissMode::Interactive)
-                        .child(
-                            view()
-                                .p_4()
-                                .pb(px(40.0))
-                                .gap_4()
-                                .child(
-                                    view()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_3()
-                                        .pt_2()
-                                        .pl_1()
-                                        .child(
-                                            view()
-                                                .flex_1()
-                                                .gap(px(2.0))
-                                                .child(
-                                                    text("A sheet")
-                                                        .text_size(px(24.0))
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .letter_spacing(-0.4)
-                                                        .text_color(colors::TEXT),
-                                                )
-                                                .child(
-                                                    text("Its inputs stay above the keyboard too")
-                                                        .text_size(px(13.0))
-                                                        .text_color(colors::MUTED),
-                                                ),
-                                        )
-                                        .child(
-                                            Button::new("Done", close)
-                                                .variant(ButtonVariant::Secondary),
-                                        ),
-                                )
-                                .child(Inset::new().children(fields)),
-                        ),
-                ),
+            safe_area_view().flex_1().bg(colors::BACKGROUND).child(
+                scroll()
+                    .flex_1()
+                    .keyboard_dismiss_mode(KeyboardDismissMode::Interactive)
+                    .child(
+                        view()
+                            .p_4()
+                            .pb(px(40.0))
+                            .gap_4()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_3()
+                                    .pt_2()
+                                    .pl_1()
+                                    .child(
+                                        view()
+                                            .flex_1()
+                                            .gap(px(2.0))
+                                            .child(
+                                                text("A sheet")
+                                                    .text_size(px(24.0))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .letter_spacing(px(-0.4))
+                                                    .text_color(colors::TEXT),
+                                            )
+                                            .child(
+                                                text("Its inputs stay above the keyboard too")
+                                                    .text_size(px(13.0))
+                                                    .text_color(colors::MUTED),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("Done", close)
+                                            .variant(ButtonVariant::Secondary),
+                                    ),
+                            )
+                            .child(Inset::new().children(fields)),
+                    ),
+            ),
         )
 }
 
@@ -953,9 +943,9 @@ fn AutoGrow() -> impl IntoElement {
         .multiline()
         .render(|i| {
             i.placeholder("Type several lines")
-                .on_content_size_change(move |e: &Size| {
-                    size.set(format!("{}×{}", e.width.round(), e.height.round()));
-                    height.set(e.height.min(110.0));
+                .on_content_size_change(move |e: &Size<Points>| {
+                    size.set(format!("{}×{}", e.width.0.round(), e.height.0.round()));
+                    height.set(e.height.min(px(110.0)).0);
                 })
                 .h(move || px(height.get().max(20.0) + 26.0))
         })
@@ -993,7 +983,7 @@ fn SelectionDemo() -> impl IntoElement {
         .items_center()
         .gap(px(6.0))
         .min_h(px(28.0))
-        .child(If::new(
+        .child(when(
             move || keys.with(Vec::is_empty),
             || {
                 text("Keys you press show here")
@@ -1001,7 +991,7 @@ fn SelectionDemo() -> impl IntoElement {
                     .text_color(colors::FAINT)
             },
         ))
-        .child(Each::new(
+        .child(each(
             move || keys.with(|k| k.iter().cloned().enumerate().collect::<Vec<_>>()),
             |(i, _): &(usize, String)| *i,
             |key, _| {
@@ -1042,7 +1032,7 @@ fn SelectionDemo() -> impl IntoElement {
                 .render(|i| {
                     i.element_ref(&input)
                         .value(move || content.get())
-                        .on_change_text(move |v: &str| content.set(v.to_owned()))
+                        .on_change(move |v: &str| content.set(v.to_owned()))
                         .on_selection_change(move |s: &Selection| {
                             range.set(*s);
                             // The input has it: "Select all" sets it again.
@@ -1117,12 +1107,12 @@ fn MessageBar(cx: Scope<NoEvent>) -> impl IntoElement {
         });
     };
     // Messages are only added: a bubble is known by its place.
-    let bubbles = Each::new(
+    let bubbles = each(
         move || messages.with(|m| m.iter().cloned().enumerate().collect::<Vec<_>>()),
         |(i, _): &(usize, Message)| *i,
         |m, _| {
             let mine = m.with_untracked(|(_, (mine, _))| *mine);
-            appear(0).child(
+            appear().index(0).child(
                 view()
                     .map(|v| if mine { v.self_end() } else { v.self_start() })
                     .max_w(relative(0.8))
@@ -1153,7 +1143,7 @@ fn MessageBar(cx: Scope<NoEvent>) -> impl IntoElement {
         },
     );
     view().flex_1().child(
-        KeyboardAvoidingView::element(KeyboardAvoidingViewProps::default())
+        keyboard_avoiding_view()
             .flex_1()
             .bg(colors::BACKGROUND)
             .child(
@@ -1186,10 +1176,10 @@ fn MessageBar(cx: Scope<NoEvent>) -> impl IntoElement {
                     // it.
                     .pb(move || {
                         px(8.0
-                            + if keyboard_height() > 0.0 {
+                            + if keyboard_height() > px(0.0) {
                                 0.0
                             } else {
-                                cx.insets().bottom
+                                cx.insets().bottom.0
                             })
                     })
                     .bg(colors::SURFACE)
@@ -1198,9 +1188,9 @@ fn MessageBar(cx: Scope<NoEvent>) -> impl IntoElement {
                     .child(
                         input()
                             .value(move || draft.get())
-                            .on_change_text(move |v: &str| draft.set(v.to_owned()))
-                            .on_submit_editing(move |_: &str| send())
-                            .blur_on_submit(false)
+                            .on_change(move |v: &str| draft.set(v.to_owned()))
+                            .on_submit(move |_: &str| send())
+                            .submit_behavior(SubmitBehavior::Submit)
                             .placeholder("Message")
                             .placeholder_color(|| color(colors::FAINT))
                             .selection_color(|| color(colors::ACCENT))

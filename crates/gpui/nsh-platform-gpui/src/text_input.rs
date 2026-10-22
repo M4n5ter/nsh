@@ -33,9 +33,10 @@
 //! never overwritten. Programmatic changes (JS values) report nothing but
 //! the selection. Lengths and offsets JS sees are UTF-16 units.
 //!
-//! Focus is one field per surface. The window's (and the embedding app's)
+//! Focus is one view per surface. The window's (and the embedding app's)
 //! focus is followed apart from it: a surface that is not focused keeps
-//! its focused field (with no caret) and gets it back when focused again.
+//! its focused view (an input's caret is hidden) and gets it back when
+//! focused again.
 //!
 //! Return follows the config's `submit()`: a single line submits; a
 //! multiline input whose return submits does so on a plain return (or
@@ -54,7 +55,6 @@
 //! keyboard and have no meaning on the desktop: they are never shown.
 
 mod layout;
-mod model;
 
 use std::{
     cell::{Cell, RefCell},
@@ -65,15 +65,14 @@ use std::{
 
 use gpui::{Font, FontFeatures, FontStyle, FontWeight, SharedString, TextSystem, px};
 use nsh_core::{
-    AutoCapitalize, Color, EventKind, EventPayload, InputConfig, PayloadValue, Rect, ReturnKeyType,
-    SubmitBehavior, TextAlign, tailwind::state,
+    AutoCapitalize, Color, EventKind, EventPayload, InputConfig, NodeId, PayloadValue, Points,
+    ReturnKeyType, SubmitBehavior, TextAlign,
+    tailwind::state,
+    text_edit::{self as model, Composition, Model, Unit, key_of, pasted, utf16_to_byte},
 };
 use rustc_hash::FxHashMap;
 
-use self::{
-    layout::{Layout, Style},
-    model::{Composition, Model, Unit, key_of, pasted, utf16_to_byte},
-};
+use self::layout::{Layout, Style};
 use crate::{
     input::{KeyEvent, Modifiers, PointerKind},
     keys::{
@@ -102,6 +101,14 @@ enum Drag {
     Line(usize, usize),
 }
 
+/// The text input `view` holds now (`None`: it is no input).
+#[cfg(feature = "dev")]
+pub(crate) fn current_text(view: &crate::view::NshView) -> Option<String> {
+    let input = view.state().input.clone()?;
+    let text = input.model.borrow().text().to_owned();
+    Some(text)
+}
+
 /// The native side of an input view ([`crate::view::ViewState::input`]),
 /// and the editor it hosts.
 pub(crate) struct InputState {
@@ -116,13 +123,20 @@ pub(crate) struct InputState {
     /// A configuration was applied (auto focus happens on the first).
     configured: Cell<bool>,
     /// Content box; the whole view until the core sends one.
-    content: Cell<Option<Rect>>,
+    content: Cell<Option<nsh_core::Bounds<Points>>>,
     /// The size the editor was hosted (and last drawn) at.
     size: Cell<(f32, f32)>,
     /// User edits reported to the engine.
     count: Cell<u32>,
     /// Selection as last reported (UTF-16).
     reported: Cell<(u32, u32)>,
+    /// The composition as last reported (`onCompositionChange`): its text
+    /// while one is in progress.
+    composed: RefCell<Option<String>>,
+    /// A value from JS (text, count) that arrived while the input method
+    /// composed, applied when the composition ends: replacing the text
+    /// under a composition would drop it without the input method knowing.
+    pending: RefCell<Option<(String, u32)>>,
     /// The animated text color, if a native animation sets one.
     anim_color: Cell<Option<Color>>,
     /// It has the surface's focus.
@@ -158,6 +172,8 @@ impl InputState {
             size: Cell::new((0.0, 0.0)),
             count: Cell::new(0),
             reported: Cell::new((0, 0)),
+            composed: RefCell::new(None),
+            pending: RefCell::new(None),
             anim_color: Cell::new(None),
             focused: Cell::new(false),
             active: Cell::new(true),
@@ -208,18 +224,18 @@ impl InputState {
         let s = &config.style;
         let line_height = if !config.multiline {
             0.0
-        } else if s.line_height > 0.0 {
-            s.line_height
+        } else if s.line_height.0 > 0.0 {
+            s.line_height.0
         } else if s.line_height_multiple > 0.0 {
-            s.line_height_multiple * s.font_size
+            s.line_height_multiple * s.font_size.0
         } else {
             0.0
         };
         let style = Style {
             font: font(s),
-            size: s.font_size.max(1.0),
+            size: s.font_size.0.max(1.0),
             line_height,
-            spacing: s.letter_spacing,
+            spacing: s.letter_spacing.0,
         };
         *self.style.borrow_mut() = Some(style.clone());
         style
@@ -560,11 +576,75 @@ fn xalign(config: &InputConfig) -> f32 {
 
 // --- Focus -------------------------------------------------------------------
 
-/// A surface's focused field, and whether the surface has the window's
-/// focus.
+/// A keyboard target lives in one native view. Inline links retain their
+/// own node identity without adding a view or another focus owner.
+#[derive(Clone, PartialEq)]
+pub(crate) enum FocusTarget {
+    View(NshView),
+    TextLink(NshView, NodeId),
+}
+
+impl FocusTarget {
+    pub(crate) fn view(&self) -> &NshView {
+        match self {
+            Self::View(view) | Self::TextLink(view, _) => view,
+        }
+    }
+
+    pub(crate) fn id(&self) -> NodeId {
+        match self {
+            Self::View(view) => view.id(),
+            Self::TextLink(_, node) => *node,
+        }
+    }
+
+    pub(crate) fn link(&self) -> Option<nsh_core::TextLink> {
+        let Self::TextLink(view, node) = self else {
+            return None;
+        };
+        view.state()
+            .text
+            .as_ref()?
+            .text
+            .links
+            .iter()
+            .find(|link| link.node == *node)
+            .cloned()
+    }
+
+    pub(crate) fn valid(&self, surface: &Surface) -> bool {
+        crate::input::focusable(surface, self.view())
+            && match self {
+                Self::View(_) => true,
+                Self::TextLink(..) => self.link().is_some_and(|link| link.is_enabled()),
+            }
+    }
+
+    fn event(&self, surface: &Surface, kind: EventKind) {
+        match self {
+            Self::View(view) => send(surface, view, kind, || EventPayload::None),
+            Self::TextLink(..) => {
+                if self.link().is_some_and(|link| link.events.contains(kind)) {
+                    surface.event(self.id(), kind, EventPayload::None);
+                }
+            }
+        }
+    }
+
+    fn focused_state(&self, surface: &Surface, on: bool) {
+        match self {
+            Self::View(view) => crate::input::set_state(surface, view, state::FOCUSED, on),
+            Self::TextLink(..) => {
+                surface.control(|c| c.set_states(self.id(), if on { state::FOCUSED } else { 0 }))
+            }
+        }
+    }
+}
+
+/// A surface's sole keyboard target and its window activation.
 #[derive(Default)]
 struct Focus {
-    view: Option<NshView>,
+    target: Option<FocusTarget>,
     inactive: bool,
 }
 
@@ -616,65 +696,151 @@ pub(crate) fn set_accessible_value(surface: &Rc<Surface>, view: &NshView, text: 
     true
 }
 
-/// The field that has the keyboard focus.
-pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
-    let view = FOCUS.with(|f| f.borrow().get(&surface.key()).and_then(|f| f.view.clone()))?;
-    // A field the app removed loses the focus quietly (its node is gone).
-    if view.attached() && view.state().input.is_some() {
-        return Some(view);
+/// The view that has the surface's keyboard focus.
+pub(crate) fn focused_view(surface: &Surface) -> Option<NshView> {
+    focused_target(surface).map(|target| target.view().clone())
+}
+
+/// The mounted view or inline link that owns the keyboard focus.
+pub(crate) fn focused_target(surface: &Surface) -> Option<FocusTarget> {
+    let target = FOCUS.with(|f| {
+        f.borrow()
+            .get(&surface.key())
+            .and_then(|f| f.target.clone())
+    })?;
+    let view = target.view();
+    // A view the app removed loses the focus quietly (its node is gone).
+    if target.valid(surface) {
+        return Some(target);
     }
-    if let Some(input) = input_of(&view) {
+    if let Some(input) = input_of(view) {
         input.focused.set(false);
     }
+    target.focused_state(surface, false);
     FOCUS.with(|f| {
         if let Some(f) = f.borrow_mut().get_mut(&surface.key()) {
-            f.view = None;
+            f.target = None;
         }
     });
     blink::update();
     None
 }
 
-fn window_active(surface: &Surface) -> bool {
+/// Resolves a span from the current mounted text, never a retained range.
+pub(crate) fn link_target(surface: &Surface, node: NodeId) -> Option<FocusTarget> {
+    fn find(view: &NshView, node: NodeId) -> Option<FocusTarget> {
+        if view
+            .state()
+            .text
+            .as_ref()
+            .is_some_and(|text| text.text.links.iter().any(|link| link.node == node))
+        {
+            return Some(FocusTarget::TextLink(view.clone(), node));
+        }
+        view.child_views()
+            .iter()
+            .find_map(|child| find(child, node))
+    }
+    find(&surface.root, node)
+}
+
+/// The focused input, if the surface's keyboard focus belongs to one.
+/// Other focus owners must not register an input handler or accept IME text.
+pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
+    focused_view(surface).filter(|view| input_of(view).is_some())
+}
+
+pub(crate) fn window_active(surface: &Surface) -> bool {
     FOCUS.with(|f| f.borrow().get(&surface.key()).is_none_or(|f| !f.inactive))
 }
 
+/// The focused inline range of this view, derived from the sole owner.
+pub(crate) fn focused_link(view: &NshView) -> Option<nsh_core::TextLink> {
+    FOCUS.with_borrow(|focuses| {
+        focuses.values().find_map(|focus| {
+            let target = focus.target.as_ref()?;
+            (!focus.inactive && target.view() == view)
+                .then(|| target.link())
+                .flatten()
+        })
+    })
+}
+
+pub(crate) fn reveal_target(surface: &Rc<Surface>, target: &FocusTarget) {
+    if let Some(link) = target.link() {
+        if let Some(rect) = crate::text::range_rect(&target.view().state(), link.start, link.end) {
+            crate::scroll::reveal_rect(surface, target.view(), rect);
+        }
+    } else {
+        crate::scroll::reveal(surface, target.view());
+    }
+}
+
 /// Moves the surface's focus to `view` (or nowhere), reporting the blur of
-/// the field that had it, then the focus of the new one.
+/// the view that had it, then the focus of the new one. Callers validate
+/// eligibility and navigation scope before entering this transition.
 fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
-    let old = focused(surface);
-    if old.as_ref() == view {
+    set_focus_target(surface, view.cloned().map(FocusTarget::View));
+}
+
+/// All view and span transitions use the same native focus lifecycle.
+pub(crate) fn set_focus_target(surface: &Rc<Surface>, target: Option<FocusTarget>) {
+    if target.as_ref().is_some_and(|target| !target.valid(surface)) {
+        return;
+    }
+    // A native focus intent (pointer, Tab or explicit focus) supersedes
+    // an earlier autoFocus request that has not mounted yet.
+    surface.pending_auto_focus.borrow_mut().take();
+    if target.is_some() {
+        crate::native::focus_surface(surface);
+    }
+    let old = focused_target(surface);
+    let previous = crate::input::focus_chain(surface);
+    if old == target {
+        if target.is_some() {
+            // The host can own the window's focus while this view keeps the surface's.
+            // Draw again to apply the explicit surface focus intent queued above.
+            surface.sync_focus();
+            surface.invalidate();
+        }
         return;
     }
     if let Some(old) = &old {
-        if let Some(input) = input_of(old) {
+        let view = old.view();
+        if let Some(input) = input_of(view) {
             input.focused.set(false);
             input.drag.set(None);
             // What the input method composed is dropped with the focus
             // (the handler that would commit it is no longer registered).
             input.model.borrow_mut().composition = None;
             input.relayout();
+            report_composition(surface, view, &input);
         }
-        FOCUS.with(|f| f.borrow_mut().entry(surface.key()).or_default().view = None);
-        crate::input::set_state(surface, old, state::FOCUSED, false);
-        send(surface, old, EventKind::Blur, || EventPayload::None);
-        old.changed();
+        FOCUS.with(|f| f.borrow_mut().entry(surface.key()).or_default().target = None);
+        old.focused_state(surface, false);
+        old.event(surface, EventKind::Blur);
+        view.changed();
     }
-    if let Some(view) = view
-        && let Some(input) = input_of(view)
-    {
-        FOCUS.with(|f| f.borrow_mut().entry(surface.key()).or_default().view = Some(view.clone()));
-        input.focused.set(true);
-        input.active.set(window_active(surface));
-        input.wake_caret();
-        input.reveal();
-        crate::input::set_state(surface, view, state::FOCUSED, true);
-        send(surface, view, EventKind::Focus, || EventPayload::None);
-        // The scroll views around bring the field into view.
-        crate::scroll::reveal(surface, view);
+    if let Some(target) = target {
+        let view = target.view();
+        FOCUS.with(|f| {
+            f.borrow_mut().entry(surface.key()).or_default().target = Some(target.clone())
+        });
+        if let Some(input) = input_of(view) {
+            input.focused.set(true);
+            input.active.set(window_active(surface));
+            input.wake_caret();
+            input.reveal();
+        }
+        target.focused_state(surface, true);
+        target.event(surface, EventKind::Focus);
+        // The scroll views around bring the focused view into sight.
+        reveal_target(surface, &target);
         crate::access::focus_changed(surface, view);
         view.changed();
     }
+    crate::input::focus_within_changed(surface, &previous);
+    surface.sync_focus();
     blink::update();
     // The input handler is registered (or not) by the next frame.
     surface.invalidate();
@@ -717,8 +883,7 @@ pub(crate) fn surface_stopped(key: u64) {
     blink::update();
 }
 
-/// True while the surface's focused field takes text: the surface
-/// registers the window's input handler then.
+/// True while the surface's current focused field accepts text input.
 pub(crate) fn wants_text(surface: &Surface) -> bool {
     focused(surface)
         .and_then(|v| input_of(&v))
@@ -823,6 +988,7 @@ pub(crate) mod ime {
         } else {
             insert(surface, &view, &input, &text, true);
         }
+        report_composition(surface, &view, &input);
     }
 
     /// `replace_text_in_range`: typed or committed text replaces the
@@ -850,10 +1016,15 @@ pub(crate) mod ime {
             if composed {
                 input.reveal();
                 view.changed();
+                report_composition(surface, &view, &input);
             }
             return;
         }
         insert(surface, &view, &input, &text, true);
+        if composed {
+            // After the committed text's `onChangeText`.
+            report_composition(surface, &view, &input);
+        }
     }
 
     /// `replace_and_mark_text_in_range`: the composition becomes
@@ -890,6 +1061,7 @@ pub(crate) mod ime {
         input.wake_caret();
         input.reveal();
         view.changed();
+        report_composition(surface, &view, &input);
     }
 
     /// `bounds_for_range`: where the range shows, in window coordinates
@@ -920,8 +1092,11 @@ pub(crate) mod ime {
         let m = view.to_root()?;
         let (ox, oy) = surface.origin.get();
         let (Some(a), Some(b)) = (
-            m.map(content.x + x0, content.y + y0),
-            m.map(content.x + x1 + CARET_WIDTH, content.y + y0 + h),
+            m.map(content.origin.x.0 + x0, content.origin.y.0 + y0),
+            m.map(
+                content.origin.x.0 + x1 + CARET_WIDTH,
+                content.origin.y.0 + y0 + h,
+            ),
         ) else {
             return None;
         };
@@ -943,7 +1118,7 @@ pub(crate) mod ime {
         let m = view.to_root()?;
         let (x, y) = m.unproject(f32::from(point.x) - ox, f32::from(point.y) - oy)?;
         let content = content_rect(&view, &input);
-        let at = input.hit(x - content.x, y - content.y);
+        let at = input.hit(x - content.origin.x.0, y - content.origin.y.0);
         let model = input.model.borrow();
         Some(model::byte_to_utf16(model.text(), at) as usize)
     }
@@ -999,11 +1174,7 @@ fn composition(text: &str, selected: Option<Range<usize>>) -> Option<Composition
         }
         None => (text.len(), None),
     };
-    Some(Composition {
-        text: text.to_owned(),
-        cursor,
-        target,
-    })
+    Some(Composition::new(text.to_owned(), cursor, target))
 }
 
 /// What a field's config asks of input methods and on-screen keyboards.
@@ -1076,6 +1247,35 @@ fn report_selection(surface: &Surface, view: &NshView, input: &InputState) {
             ("end", PayloadValue::Number(range.1 as f64)),
         ])
     });
+}
+
+/// Reports the composition if it started, changed or ended since last
+/// reported (and JS listens); once it ended, applies the value JS set
+/// meanwhile. Called after every change of the composition, after the
+/// `onChangeText` of what it committed.
+fn report_composition(surface: &Surface, view: &NshView, input: &InputState) {
+    let now = input
+        .model
+        .borrow()
+        .composition
+        .as_ref()
+        .filter(|c| !c.text.is_empty())
+        .map(|c| c.text.clone());
+    if *input.composed.borrow() != now {
+        input.composed.replace(now.clone());
+        send(surface, view, EventKind::CompositionChange, || {
+            EventPayload::Map(vec![
+                ("composing", PayloadValue::Bool(now.is_some())),
+                ("text", PayloadValue::Str(now.unwrap_or_default())),
+            ])
+        });
+    }
+    if input.composed.borrow().is_none() {
+        let pending = input.pending.borrow_mut().take();
+        if let Some((text, count)) = pending {
+            set_value(view, input, &text, count);
+        }
+    }
 }
 
 /// After a user edit (`changed`: the text changed) or a caret movement:
@@ -1192,33 +1392,45 @@ pub(crate) fn config(surface: &Rc<Surface>, view: &NshView, config: &InputConfig
     place(view, &input);
 }
 
-/// Focuses the field once it is on screen (the batch that made it may
-/// insert it after configuring it).
+/// Focuses the field once it is mounted. An input may be configured before
+/// insertion; reconcile that request after the batch, in command order.
 fn auto_focus(surface: &Rc<Surface>, view: &NshView) {
+    surface.pending_auto_focus.borrow_mut().take();
     if view.attached() {
         return set_focus(surface, Some(view));
     }
-    let view = view.clone();
-    let mut frames = 0;
-    surface.on_frame(move |surface, _| {
-        frames += 1;
-        if view.attached() {
-            set_focus(surface, Some(&view));
-            return false;
-        }
-        frames < 30 && view.state().input.is_some()
-    });
+    *surface.pending_auto_focus.borrow_mut() = Some(view.clone());
+}
+
+/// Applies the latest still-live request before navigation chooses a
+/// default focus. Detached inputs wait for an insertion, not a frame retry.
+pub(crate) fn apply_auto_focus(surface: &Rc<Surface>) {
+    let Some(view) = surface.pending_auto_focus.borrow_mut().take() else {
+        return;
+    };
+    if surface.view(view.id()).as_ref() != Some(&view) {
+        return;
+    }
+    if view.attached() {
+        crate::input::focus_view(surface, &view);
+    } else {
+        *surface.pending_auto_focus.borrow_mut() = Some(view);
+    }
 }
 
 /// The content box in the view.
-fn content_rect(view: &NshView, input: &InputState) -> Rect {
+fn content_rect(view: &NshView, input: &InputState) -> nsh_core::Bounds<Points> {
     input.content.get().unwrap_or_else(|| {
         let f = view.state().frame;
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: f.width,
-            height: f.height,
+        nsh_core::Bounds {
+            origin: nsh_core::Point {
+                x: Points(0.0),
+                y: Points(0.0),
+            },
+            size: nsh_core::Size {
+                width: f.size.width,
+                height: f.size.height,
+            },
         }
     })
 }
@@ -1226,19 +1438,38 @@ fn content_rect(view: &NshView, input: &InputState) -> Rect {
 /// Hosts the editor at the content box.
 fn place(view: &NshView, input: &Rc<InputState>) {
     let content = content_rect(view, input);
-    if content.width <= 0.0 || content.height <= 0.0 {
+    if content.size.width.0 <= 0.0 || content.size.height.0 <= 0.0 {
         return;
     }
-    input.set_size((content.width, content.height));
+    input.set_size((content.size.width.0, content.size.height.0));
     let item: Rc<dyn Hosted> = input.clone();
     view.set_native(&item, content);
 }
 
 /// `InputValue`: JS's text, unless the user typed since JS saw `count`.
+/// While the input method composes, the value waits for the composition
+/// to end (the newest one; whether it is stale is decided then).
 pub(crate) fn value(view: &NshView, text: &str, count: u32) {
     let Some(input) = input_of(view) else {
         return;
     };
+    if input.composing() {
+        input.pending.replace(Some((text.to_owned(), count)));
+        return;
+    }
+    set_value(view, &input, text, count);
+}
+
+/// The value JS set that waits for the composition to end (tests).
+#[cfg(all(test, feature = "shot"))]
+pub(crate) fn pending_value(view: &NshView) -> Option<String> {
+    let input = input_of(view)?;
+    let pending = input.pending.borrow();
+    pending.as_ref().map(|(text, _)| text.clone())
+}
+
+/// Applies JS's `text` unless the user edited since JS saw `count`.
+fn set_value(view: &NshView, input: &InputState, text: &str, count: u32) {
     if count < input.count.get() || input.model.borrow().text() == text {
         return;
     }
@@ -1264,7 +1495,7 @@ pub(crate) fn animated(view: &NshView) {
 }
 
 /// `InputContent`: where the text goes inside the view.
-pub(crate) fn content(view: &NshView, content: Rect) {
+pub(crate) fn content(view: &NshView, content: nsh_core::Bounds<Points>) {
     let Some(input) = input_of(view) else {
         return;
     };
@@ -1290,36 +1521,42 @@ fn surface_of(view: &NshView) -> Option<Rc<Surface>> {
 /// `focus()`.
 pub(crate) fn focus(view: &NshView) {
     if let Some(surface) = surface_of(view) {
-        set_focus(&surface, Some(view));
+        focus_view(&surface, view);
     }
+}
+
+/// Focuses a caller-eligible view in its supplied surface.
+pub(crate) fn focus_view(surface: &Rc<Surface>, view: &NshView) {
+    set_focus(surface, Some(view));
 }
 
 /// `blur()`.
 pub(crate) fn blur(view: &NshView) {
-    if let Some(surface) = surface_of(view)
-        && focused(&surface).as_ref() == Some(view)
-    {
-        set_focus(&surface, None);
+    if let Some(surface) = surface_of(view) {
+        blur_view(&surface, view);
     }
 }
 
-/// Blurs whatever field has the focus.
+/// Blurs `view` only while it owns its supplied surface's focus.
+pub(crate) fn blur_view(surface: &Rc<Surface>, view: &NshView) {
+    if focused_view(surface).as_ref() == Some(view) {
+        set_focus(surface, None);
+    }
+}
+
+/// Blurs whatever view has the focus.
 pub(crate) fn blur_all(surface: &Rc<Surface>) {
     set_focus(surface, None);
 }
 
-/// Focuses `view`, reached with Tab: as in desktop dialogs, its text is
-/// selected.
-pub(crate) fn tab_to(view: &NshView) {
-    let Some(surface) = surface_of(view) else {
-        return;
-    };
-    set_focus(&surface, Some(view));
+/// Focuses a caller-eligible Tab stop, selecting text only for an input.
+pub(crate) fn tab_to_view(surface: &Rc<Surface>, view: &NshView) {
+    set_focus(surface, Some(view));
     if let Some(input) = input_of(view)
         && input.focused.get()
     {
         input.model.borrow_mut().select_all();
-        after_edit(&surface, view, &input, false);
+        after_edit(surface, view, &input, false);
     }
 }
 
@@ -1345,17 +1582,16 @@ pub(crate) fn set_selection(view: &NshView, start: u32, end: u32) {
     view.changed();
 }
 
-/// Characters typed into the focused field (the script's `type`), as the
+/// Characters typed into the focused field (the test agent's), as the
 /// input handler's `replace_text_in_range` brings them.
-#[allow(dead_code)] // For `crate::script`'s `type`.
+#[cfg(any(feature = "dev", all(test, feature = "shot")))]
 pub(crate) fn char_input(surface: &Rc<Surface>, text: &str) {
     ime::replace_text_in_range(surface, None, text);
 }
 
-/// An input method's composition in the focused field (the script's
-/// `mark`), as `replace_and_mark_text_in_range` makes it; empty text ends
-/// it.
-#[allow(dead_code)] // For `crate::script`'s `mark`.
+/// An input method's composition in the focused field, as
+/// `replace_and_mark_text_in_range` makes it; empty text ends it.
+#[cfg(all(test, feature = "shot"))]
 pub(crate) fn mark(surface: &Rc<Surface>, text: &str) {
     ime::replace_and_mark_text_in_range(surface, None, text, None);
 }
@@ -1366,7 +1602,7 @@ pub(crate) fn pointer(surface: &Rc<Surface>, view: &NshView, event: &ItemPointer
         return false;
     };
     let content = content_rect(view, &input);
-    let (x, y) = (event.x - content.x, event.y - content.y);
+    let (x, y) = (event.x - content.origin.x.0, event.y - content.origin.y.0);
     match event.kind {
         PointerKind::Down => {
             if input.composing() && focused(surface).as_ref() == Some(view) {
@@ -1515,7 +1751,11 @@ fn menu_items(input: &InputState, has_text: bool) -> Vec<crate::chrome::LocalIte
                     vk,
                     down: true,
                     repeat: false,
-                    modifiers: if cmd { command() } else { Modifiers::default() },
+                    modifiers: if cmd {
+                        command(s.environment.get().uses_apple_keys())
+                    } else {
+                        Modifiers::default()
+                    },
                 };
                 key(s, &event);
             }),
@@ -1540,8 +1780,8 @@ fn menu_items(input: &InputState, has_text: bool) -> Vec<crate::chrome::LocalIte
 }
 
 /// The modifiers of the platform's command key alone.
-fn command() -> Modifiers {
-    if cfg!(target_os = "macos") {
+fn command(apple: bool) -> Modifiers {
+    if apple {
         Modifiers {
             meta: true,
             ..Default::default()
@@ -1556,9 +1796,9 @@ fn command() -> Modifiers {
 
 /// The platform's command key (Ctrl; Command on macOS) is held, with no
 /// Alt.
-fn is_command(m: Modifiers) -> bool {
+fn is_command(m: Modifiers, apple: bool) -> bool {
     !m.alt
-        && if cfg!(target_os = "macos") {
+        && if apple {
             m.meta && !m.ctrl
         } else {
             m.ctrl && !m.meta
@@ -1567,12 +1807,8 @@ fn is_command(m: Modifiers) -> bool {
 
 /// How far the arrows and deletions with `m` go: a word with Ctrl (Option
 /// on macOS).
-fn unit_of(m: Modifiers) -> Unit {
-    let word = if cfg!(target_os = "macos") {
-        m.alt
-    } else {
-        m.ctrl
-    };
+fn unit_of(m: Modifiers, apple: bool) -> Unit {
+    let word = if apple { m.alt } else { m.ctrl };
     if word { Unit::Word } else { Unit::Char }
 }
 
@@ -1592,8 +1828,8 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         let c = input.config.borrow();
         (c.editable, c.secure, c.multiline)
     };
-    let mac = cfg!(target_os = "macos");
-    let unit = unit_of(m);
+    let mac = surface.environment.get().uses_apple_keys();
+    let unit = unit_of(m, mac);
     let vk = event.vk;
     // Movements: the caret goes, the text stays.
     let moved = |f: &dyn Fn(&mut Model)| {
@@ -1654,13 +1890,8 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
                 if mac && m.meta && !model.has_selection() {
                     // Command+Backspace deletes to the line's start.
                     let caret = model.caret();
-                    let to = if vk == VK_BACK {
-                        model.text()[..caret].rfind('\n').map_or(0, |i| i + 1)
-                    } else {
-                        model.text()[caret..]
-                            .find('\n')
-                            .map_or(model.text().len(), |i| caret + i)
-                    };
+                    let (start, end) = model.line_at(caret);
+                    let to = if vk == VK_BACK { start } else { end };
                     model.move_to(to, true);
                 }
                 (model.delete(unit, vk == VK_DELETE), empty)
@@ -1677,7 +1908,10 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         _ if vk == VK_RETURN => {
             let behavior = input.config.borrow().submit();
             match return_key(behavior, multiline, m) {
-                None => insert(surface, &view, &input, "\n", true),
+                None => {
+                    let ending = model::line_ending(input.model.borrow().text());
+                    insert(surface, &view, &input, ending, true);
+                }
                 Some(blur) => submit(surface, &view, &input, blur),
             }
             true
@@ -1690,7 +1924,7 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
             }
             false
         }
-        _ if is_command(m) => match vk {
+        _ if is_command(m, mac) => match vk {
             0x41 => moved(&|model| model.select_all()),
             0x43 => {
                 copy(&input, secure);
@@ -1851,7 +2085,8 @@ mod blink {
             f.borrow()
                 .iter()
                 .filter(|(key, f)| !f.inactive && Surface::by_key(**key).is_some())
-                .filter_map(|(_, f)| f.view.clone())
+                .filter_map(|(_, f)| f.target.as_ref().map(|target| target.view().clone()))
+                .filter(|view| view.attached() && input_of(view).is_some())
                 .collect()
         })
     }
@@ -1973,11 +2208,12 @@ mod tests {
 
     #[test]
     fn command_keys() {
-        let cmd = command();
-        assert!(is_command(cmd));
-        assert!(!is_command(Modifiers { alt: true, ..cmd }));
-        assert!(!is_command(Modifiers::default()));
-        assert_eq!(unit_of(Modifiers::default()), Unit::Char);
+        let apple = cfg!(target_os = "macos");
+        let cmd = command(apple);
+        assert!(is_command(cmd, apple));
+        assert!(!is_command(Modifiers { alt: true, ..cmd }, apple));
+        assert!(!is_command(Modifiers::default(), apple));
+        assert_eq!(unit_of(Modifiers::default(), apple), Unit::Char);
     }
 
     /// A stopped surface's focus is dropped, and carets of surfaces that
@@ -1990,7 +2226,7 @@ mod tests {
             f.borrow_mut().insert(
                 key,
                 Focus {
-                    view: Some(view),
+                    target: Some(FocusTarget::View(view)),
                     inactive: false,
                 },
             )

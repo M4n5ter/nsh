@@ -1,15 +1,15 @@
 ---
-title: nsh/list
+title: List
 description: List, a virtualized and recycling list on a native scroll view, with all its props, events and ref methods.
-order: 4
+order: 2.1
 ---
 
-# nsh/list
+# List
 
-`nsh/list` exports `List`: a virtualized list on a native scroll view. Only the rows near the viewport exist, and their cells are reused as you scroll. Which rows exist, where they are, columns, sticky headers and viewability are all computed natively, so scrolling a list of ten thousand items runs no JS except the row bindings that change when a cell is reused.
+`nsh` exports `List`: a virtualized list on a native scroll view. Only the rows near the viewport exist, and their cells are reused as you scroll. Which rows exist, where they are, columns, sticky headers and viewability are all computed natively, so scrolling a list of ten thousand items runs no JS except the row bindings that change when a cell is reused.
 
 ```ts
-import { List, type ListProps, type ViewToken, type ViewabilityConfig } from "nsh/list";
+import { List, type ListProps, type ReadonlyListSource, type ViewToken, type ViewabilityConfig } from "nsh";
 ```
 
 See [Lists](../docs/lists.md) for the guide and [`<List>`](../elements/list.md) for the element's props.
@@ -21,8 +21,7 @@ function List<T>(props: ListProps<T>): YNode;
 ```
 
 ```tsx
-import { mount, Text, View } from "nsh";
-import { List } from "nsh/list";
+import { List, mount, Text, View } from "nsh";
 
 const contacts = Array.from({ length: 1000 }, (_, i) => ({ id: String(i), name: `Contact ${i}` }));
 
@@ -50,40 +49,57 @@ mount(App);
 
 ## Props
 
-`ListProps<T>` combines the list's own props with the scrolling props shared with `<Scroll>`.
+`ListProps<T>` combines the list's own props with the scrolling props shared with `<Scroll>` and the props every
+element takes, which go to the list's scroll view.
 
 ### Data and rendering
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `each` | `readonly T[]` | (required) | The items. Pass a signal's value (`each={items()}`) to follow changes; inserting items above the visible rows keeps those rows in place. |
+| `each` | `readonly T[] \| ReadonlyListSource<T>` | (required) | The items. Pass a signal's value (`each={items()}`) to follow changes; inserting array items above the visible rows keeps those rows in place. |
 | `children` | `(item: () => T, index: () => number) => JSX.Element` | (required) | Renders one row (see above). |
 | `estimatedItemSize` | `number` | `50` | The size of rows not measured yet, in points, along the list's axis. Close estimates make the scroll indicator and `scrollToIndex` more accurate. |
 | `numColumns` | `number` | `1` | Items per row (vertical lists): a grid. |
 | `horizontal` | `boolean` | `false` | Scrolls sideways. |
 | `inverted` | `boolean` | `false` | Lays out from the end, item 0 last (chat style); starts scrolled to the end and keeps its distance from the end as content changes. |
 | `stickyHeaderIndices` | `number[]` | | Items that stick to the start while scrolled past (one column, not inverted). |
-| `ListHeaderComponent` | `ListSlot` | | Rendered before the items. |
-| `ListFooterComponent` | `ListSlot` | | Rendered after the items. |
-| `ListEmptyComponent` | `ListSlot` | | Shown instead of the items while `each` is empty. |
-| `ItemSeparatorComponent` | `ListSlot` | | Rendered between items (one column). |
+| `header` | `ListSlot` | | Rendered before the items. |
+| `footer` | `ListSlot` | | Rendered after the items. |
+| `empty` | `ListSlot` | | Shown instead of the items while `each` is empty. |
+| `separator` | `ListSlot` | | Rendered between items (one column). |
 | `keyExtractor` | `(item: T, index: number) => string` | `item.key`, `item.id`, or the index | The key of an item in viewability tokens. |
 | `initialScrollIndex` | `number` | | Scrolls to this item before the first frame. |
-| `contentContainerStyle` | `ListContentStyle` | | Padding and gaps of the content: `padding`, `paddingHorizontal`, `paddingVertical`, `paddingTop`, `paddingRight`, `paddingBottom`, `paddingLeft`, `gap`, `rowGap`, `columnGap` (numbers). |
+| `contentStyle` | `ListContentStyle` | | Padding and gaps of the content: `padding`, `paddingHorizontal`, `paddingVertical`, `paddingTop`, `paddingRight`, `paddingBottom`, `paddingLeft`, `gap`, `rowGap`, `columnGap` (numbers). |
+| `contentClass` | `string` | | Padding and gaps of the content as classes (`p-*`, `gap-*`); `contentStyle` wins over them. |
 | `style` | `StyleProp<ViewStyle>` | | The list's own style (give it a size: `flex: 1` or a height). |
+| `testID` | `string` | | The id UI tests find the list's scroll view by (`nsh test`'s `id:`, XCUITest, UI Automator). |
 | `ref` | `YNode \| ((node: YNode) => void)` | | See [ref methods](#ref-methods). |
 
 `ListSlot` is a component (`Header`) or an element (`<Header />`).
+
+`ReadonlyListSource<T>` provides an indexed snapshot whose items are read as rows are rendered or reported viewable:
+
+```ts
+interface ReadonlyListSource<T> {
+  readonly length: number;
+  at(index: number): T;
+}
+```
+
+`length` is an integer from 0 through 4,294,967,295, the same range as an array's length. `at` receives an index in
+that range below `length`, with the source as its receiver. Keep a snapshot's length and contents fixed, and pass a
+new source object to replace it. A new source replaces the full item range; arrays keep their common-prefix and
+suffix identity comparisons. A source can produce each requested item directly from native data.
 
 ### Loading, refreshing and viewability
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `onEndReached` | `() => void` | | Called when the end comes within `onEndReachedThreshold` viewports: load more. |
-| `onEndReachedThreshold` | `number` | `1` | How close to the end (in viewport lengths) `onEndReached` fires. |
+| `onLoadMore` | `() => void` | | Called when the end comes within `loadMoreThreshold` viewports: load more. |
+| `loadMoreThreshold` | `number` | `1` | How close to the end (in viewport lengths) `onLoadMore` fires. |
 | `refreshing` | `boolean` | | The pull-to-refresh spinner shows. |
 | `onRefresh` | `() => void` | | Enables pull to refresh; set `refreshing` while you load. |
-| `onViewableItemsChanged` | `(info: { viewableItems: ViewToken<T>[]; changed: ViewToken<T>[] }) => void` | | Items that became or stopped being viewable. |
+| `onViewableItemsChange` | `(info: { viewableItems: ViewToken<T>[]; changed: ViewToken<T>[] }) => void` | | Items that became or stopped being viewable. |
 | `viewabilityConfig` | `ViewabilityConfig` | | When an item counts as viewable. |
 
 ```ts
@@ -108,8 +124,8 @@ interface ViewabilityConfig {
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `showsIndicator` | `boolean` | `true` | The scroll indicator shows. |
-| `scrollEnabled` | `boolean` | `true` | The user can scroll it. |
+| `scrollbar` | `boolean` | `true` | The scroll indicator shows. |
+| `scrollable` | `boolean` | `true` | The user can scroll it. |
 | `bounces` | `boolean` | `true` | Overscroll past the edges. |
 | `pagingEnabled` | `boolean` | `false` | Stops at multiples of the viewport. |
 | `snapToInterval` | `number` | `0` | Stops at multiples of this length (0: off). |
@@ -117,7 +133,7 @@ interface ViewabilityConfig {
 | `snapToAlignment` | `"start" \| "center" \| "end"` | `"start"` | Which point of an item aligns with the viewport with `snapToInterval`. |
 | `disableIntervalMomentum` | `boolean` | `false` | A fling moves one snap point at most. |
 | `decelerationRate` | `"normal" \| "fast" \| number` | platform | How fast a fling slows down (`0.998` / `0.99`, or the velocity kept per millisecond). |
-| `contentInset` | `{ top?, right?, bottom?, left? }` | | Room around the content. |
+| `contentInset` | `Partial<Edges>` | | Room around the content. |
 | `contentOffset` | `{ x?, y? }` | | Where it starts. |
 | `keyboardShouldPersistTaps` | `"never" \| "always" \| "handled" \| boolean` | `"never"` | Whether a tap dismisses the keyboard (`"never"`: the tap only dismisses it). |
 | `keyboardDismissMode` | `"none" \| "on-drag" \| "interactive"` | `"none"` | Whether dragging dismisses the keyboard. |
@@ -128,11 +144,11 @@ interface ViewabilityConfig {
 
 | Event | Payload | When |
 |---|---|---|
-| `onScroll` | `ScrollEvent`: `{ x, y, contentWidth, contentHeight, width, height, zoomScale }` | While scrolling. |
-| `onScrollBeginDrag` | `{ x, y }` | A drag starts. |
-| `onScrollEndDrag` | `{ x, y }` | The finger lifts. |
-| `onMomentumScrollBegin` | `{ x, y }` | A glide starts after the drag. |
-| `onMomentumScrollEnd` | `{ x, y }` | The glide ends (also when a new drag catches it). |
+| `onScroll` | `ScrollEvent`: `{ offset, contentSize, size, zoomScale }` | While scrolling. |
+| `onScrollDragStart` | `{ x, y }` | A drag starts. |
+| `onScrollDragEnd` | `{ x, y }` | The finger lifts. |
+| `onMomentumStart` | `{ x, y }` | A glide starts after the drag. |
+| `onMomentumEnd` | `{ x, y }` | The glide ends (also when a new drag catches it). |
 | `onScrollEnd` | `{ x, y }` | Scrolling came to rest. |
 
 Lists also take the props every element takes ([common props](../elements/index.md)).
@@ -149,15 +165,14 @@ A list's `ref` receives a `YNode` with these methods:
 | `scrollTo({ x?, y?, animated? })` | Scrolls to an offset. |
 
 ```tsx
-import { Text, View, type YNode } from "nsh";
-import { List } from "nsh/list";
+import { List, Text, View, type YNode } from "nsh";
 
 let list!: YNode;
 
 <View style={{ flex: 1 }}>
   <Text onPress={() => list.scrollToIndex({ index: 60, viewPosition: 0.5 })}>Jump to 60</Text>
   <List ref={list} each={items} numColumns={3} estimatedItemSize={90} style={{ flex: 1 }}
-        contentContainerStyle={{ padding: 12, gap: 8 }}>
+        contentStyle={{ padding: 12, gap: 8 }}>
     {(item) => <View style={{ height: 90, backgroundColor: "#e0e7ff" }}><Text>{item().title}</Text></View>}
   </List>
 </View>
@@ -173,10 +188,10 @@ A chat: newest message at the bottom, older messages loaded as you scroll up.
   inverted
   estimatedItemSize={44}
   style={{ flex: 1 }}
-  contentContainerStyle={{ padding: 12, gap: 6 }}
+  contentStyle={{ padding: 12, gap: 6 }}
   keyboardDismissMode="interactive"
-  onEndReached={loadOlder}
-  onEndReachedThreshold={0.5}
+  onLoadMore={loadOlder}
+  loadMoreThreshold={0.5}
 >
   {(m) => (
     <View style={{ alignSelf: m().mine ? "flex-end" : "flex-start", maxWidth: "75%", padding: 10, borderRadius: 14, backgroundColor: m().mine ? "#6366f1" : "#e2e8f0" }}>
@@ -206,9 +221,9 @@ const refresh = async () => {
 ```ts
 type ListItemsProps<T> = Pick<ListProps<T>,
   "each" | "children" | "keyExtractor" | "stickyHeaderIndices" | "initialScrollIndex"
-  | "onViewableItemsChanged" | "viewabilityConfig" | "refreshing" | "onRefresh"
-  | "onEndReached" | "onEndReachedThreshold"
-  | "ListHeaderComponent" | "ListFooterComponent" | "ListEmptyComponent">;
+  | "onViewableItemsChange" | "viewabilityConfig" | "refreshing" | "onRefresh"
+  | "onLoadMore" | "loadMoreThreshold"
+  | "header" | "footer" | "empty">;
 ```
 
-The data-and-rows half of `ListProps`: what you pass to a component that lays out a list itself, such as [`ListView`](../components/list-view.md) from `nsh/ui/mobile`.
+The data-and-rows half of `ListProps`: what you pass to a component of your own that lays out a list itself, such as a settings list that wraps `List` with its own padding and dividers.

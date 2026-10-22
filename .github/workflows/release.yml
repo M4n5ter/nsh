@@ -8,9 +8,12 @@ name: Release
 #   platform and, once all of them have built, creates a draft release with
 #   their archives; publish it from the releases page.
 # - Running it by hand without a tag builds the archives only (workflow
-#   artifacts): a dry run before tagging. With a tag it releases that tag.
-# - Pull requests that change this workflow or xtask build the archives
-#   only, so a broken distribution shows before a release.
+#   artifacts): a dry run before tagging, and the check of a change to this
+#   workflow or to how xtask builds the distribution. With a tag it releases
+#   that tag.
+#
+# Pull requests and the merge queue never run it: its three builds are CI's
+# longest and held the runners every queued pull request waited for.
 #
 # Asset names carry no version (`nsh-macos-arm64.tar.gz`, each with a
 # `.sha256`), so `releases/latest/download/<asset>` always resolves: the
@@ -22,11 +25,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  pull_request:
-    paths:
-      - ".github/workflows/release.yml"
-      - ".github/packages/nsh.json"
-      - "crates/xtask/**"
   workflow_dispatch:
     inputs:
       tag:
@@ -39,7 +37,7 @@ permissions:
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -146,7 +144,7 @@ jobs:
           cc="$llvm_bin/clang$suffix"
           ar="$llvm_bin/llvm-ar$suffix"
           if [[ "$RUNNER_OS" == Windows ]]; then
-            # rquickjs-sys canonicalizes its vendored WASI include directory
+            # quickjs-jit-sys canonicalizes its vendored WASI include directory
             # to a verbatim Windows path. Give clang ordinary drive paths
             # so nested includes such as bits/alltypes.h resolve correctly.
             cat > "$RUNNER_TEMP/nsh-wasm-clang.py" <<'PYTHON'
@@ -188,7 +186,7 @@ jobs:
             ${{ runner.os }}-release-cargo-
 
       # Compile the actual WASI headers before the native runtimes: a bare
-      # clang probe does not exercise rquickjs-sys's vendored include path.
+      # clang probe does not exercise quickjs-jit-sys's vendored include path.
       - name: Check the Windows web runtime
         if: runner.os == 'Windows'
         run: |
@@ -198,7 +196,7 @@ jobs:
           import pathlib
           import sys
           packages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["packages"]
-          package = next(p for p in packages if p["name"] == "rquickjs-sys")
+          package = next(p for p in packages if p["name"] == "quickjs-jit-sys")
           include = pathlib.Path(package["manifest_path"]).parent / "vendor/wasi-libc/include"
           for name in ("stdlib.h", "bits/alltypes.h"):
               header = include / name

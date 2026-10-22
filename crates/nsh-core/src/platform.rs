@@ -2,18 +2,9 @@
 //! keyboard, appearance, device) and the HTTP requests it carries out: the
 //! data both Rust components and JS read, with or without a JS runtime.
 
-/// Edge insets in points.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Insets {
-    /// Top.
-    pub top: f32,
-    /// Right.
-    pub right: f32,
-    /// Bottom.
-    pub bottom: f32,
-    /// Left.
-    pub left: f32,
-}
+pub mod clipboard;
+
+use crate::geometry::{Edges, Points, Size};
 
 /// The system appearance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,14 +40,14 @@ impl Appearance {
     }
 }
 
-/// The operating system (`Platform.OS`).
+/// The operating system (`platform.os`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     /// iOS, iPadOS, Mac Catalyst.
     Ios,
     /// Android.
     Android,
-    /// macOS (a desktop backend).
+    /// macOS.
     MacOs,
     /// Windows.
     Windows,
@@ -68,7 +59,7 @@ pub enum Os {
 }
 
 impl Os {
-    /// Its `Platform.OS` name.
+    /// Its `platform.os` name.
     pub fn name(self) -> &'static str {
         match self {
             Os::Ios => "ios",
@@ -80,17 +71,16 @@ impl Os {
         }
     }
 
-    /// The OS of a desktop backend (macOS, Windows, Linux): it has windows
-    /// and menus (`nsh/desktop`). Desktop behavior (`desktop={{…}}` props,
-    /// `Platform.select({ desktop })`) also covers desktop-class browsers:
-    /// [`Environment::desktop`].
+    /// A desktop OS (macOS, Windows, Linux). A surface's graphical desktop
+    /// behavior (`nsh/desktop`, `desktop={{…}}` props) also depends on its
+    /// renderer and browser idiom: [`Environment::desktop`].
     pub fn is_desktop(self) -> bool {
         matches!(self, Os::MacOs | Os::Windows | Os::Linux)
     }
 }
 
 impl Default for Os {
-    /// The mobile OS of this build (`nsh trace` behaves as iOS); desktop
+    /// The mobile OS of this build (headless runs, `nsh test`, behave as iOS); desktop
     /// backends set theirs.
     fn default() -> Self {
         if cfg!(target_os = "android") {
@@ -101,7 +91,30 @@ impl Default for Os {
     }
 }
 
-/// The kind of device (React Native's `Platform.isPad`, `isTV`).
+/// How a surface presents its UI, independently of its operating system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Renderer {
+    /// Platform views or a desktop graphics backend.
+    #[default]
+    Native,
+    /// HTML in a browser page.
+    Web,
+    /// Character cells in a terminal.
+    Terminal,
+}
+
+impl Renderer {
+    /// Its `platform.renderer` name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Web => "web",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
+/// The kind of device (`platform.idiom`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Idiom {
     /// A phone.
@@ -119,8 +132,9 @@ pub enum Idiom {
 }
 
 impl Idiom {
-    /// Whether desktop behavior applies on `os` in this idiom: a desktop
-    /// OS, or a browser in the desktop idiom (TS: `Platform.isDesktop`).
+    /// Whether `os` and this idiom describe a desktop: a desktop OS, or a
+    /// browser in the desktop idiom. [`Environment::desktop`] also checks
+    /// the surface's renderer.
     pub fn desktop_on(self, os: Os) -> bool {
         os.is_desktop() || (os == Os::Web && self == Idiom::Desktop)
     }
@@ -130,17 +144,17 @@ impl Idiom {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Environment {
     /// Size of the surface in points.
-    pub window: (f32, f32),
+    pub window: Size<Points>,
     /// Insets not covered by system UI (notch, home indicator, title bar).
-    pub safe_area: Insets,
+    pub safe_area: Edges<Points>,
     /// The title bar's area while the app hides it (desktops,
     /// [`crate::desktop::TitleBarStyle::Hidden`]): `top` is its height,
     /// `left` and `right` the widths the system's window controls take at
     /// its ends (`bottom` is 0); all 0 while the system shows its title
     /// bar.
-    pub title_bar: Insets,
+    pub title_bar: Edges<Points>,
     /// Height of the software keyboard over the surface; 0 when hidden.
-    pub keyboard_height: f32,
+    pub keyboard_height: Points,
     /// Duration of the keyboard's show / hide animation in seconds.
     pub keyboard_duration: f32,
     /// Light or dark appearance.
@@ -158,6 +172,11 @@ pub struct Environment {
     pub screen_reader: bool,
     /// The operating system.
     pub os: Os,
+    /// How this surface presents its UI (`platform.renderer`).
+    pub renderer: Renderer,
+    /// The backend supplies native keyboard-focus paths and matches scoped
+    /// key bindings against them. This is a host capability, not a JS signal.
+    pub native_focus_scopes: bool,
     /// The OS version: major and minor (iOS, desktops), Android's API level
     /// and 0.
     pub os_version: (u16, u16),
@@ -165,29 +184,42 @@ pub struct Environment {
     pub idiom: Idiom,
     /// A browser on an Apple platform (macOS, iOS): its keyboard shortcuts
     /// follow Apple's conventions ([`crate::keymap::apple_keys`]: `mod` is
-    /// Command, labels use ⌘). Only read for [`Os::Web`]; the other OSes
-    /// imply theirs.
+    /// Command, labels use ⌘). Only read for [`Os::Web`]; graphical native
+    /// backends infer theirs from the OS. Terminals use Control.
     pub apple_keyboard: bool,
+    /// The host receives terminal key sequences, including when its pixels are
+    /// rendered by a graphical backend. Command shortcuts use Control.
+    pub terminal_keyboard: bool,
     /// The user's locale (number and date formats: `Intl`'s default).
     pub locale: Locale,
 }
 
 impl Environment {
-    /// Desktop behavior applies: a desktop OS, or a browser in the desktop
-    /// idiom (`desktop={{…}}` props, `Platform.select({ desktop })`,
-    /// `Platform.isDesktop`).
+    /// Whether command shortcuts follow terminal Control-key conventions.
+    pub fn uses_terminal_keyboard(&self) -> bool {
+        self.terminal_keyboard || self.renderer == Renderer::Terminal
+    }
+
+    /// Whether command shortcuts follow Apple's Command-key conventions.
+    pub fn uses_apple_keys(&self) -> bool {
+        !self.uses_terminal_keyboard() && crate::keymap::apple_keys(self.os, self.apple_keyboard)
+    }
+
+    /// Graphical desktop behavior applies: a desktop OS with a graphical
+    /// renderer, or a browser in the desktop idiom (`desktop={{…}}` props,
+    /// `platform.select({ desktop })`).
     pub fn desktop(&self) -> bool {
-        self.idiom.desktop_on(self.os)
+        self.renderer != Renderer::Terminal && self.idiom.desktop_on(self.os)
     }
 }
 
 impl Default for Environment {
     fn default() -> Self {
         Self {
-            window: (0.0, 0.0),
-            safe_area: Insets::default(),
-            title_bar: Insets::default(),
-            keyboard_height: 0.0,
+            window: Size::default(),
+            safe_area: Edges::default(),
+            title_bar: Edges::default(),
+            keyboard_height: Points(0.0),
             keyboard_duration: 0.25,
             color_scheme: ColorScheme::Light,
             font_scale: 1.0,
@@ -196,10 +228,40 @@ impl Default for Environment {
             pixel_ratio: 1.0,
             screen_reader: false,
             os: Os::default(),
+            renderer: Renderer::Native,
+            native_focus_scopes: false,
             os_version: (0, 0),
             idiom: Idiom::Phone,
             apple_keyboard: false,
+            terminal_keyboard: false,
             locale: Locale::EN_US,
+        }
+    }
+}
+
+/// The settings an embedding app gives its surfaces in place of the
+/// system's (`None`: the system's): its own language and text size, for an
+/// app inside a native app that lets its users switch them. The platforms
+/// write them over what they read from the system ([`Self::apply`]), so the
+/// app's `Intl`, `locale()`, `fontScale()` and text follow them like a system
+/// change.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HostEnvironment {
+    /// The locale in place of the user's ([`Environment::locale`]).
+    pub locale: Option<Locale>,
+    /// The text size in place of the user's ([`Environment::font_scale`]);
+    /// values that are not finite and positive count as `None`.
+    pub font_scale: Option<f32>,
+}
+
+impl HostEnvironment {
+    /// Writes the settings `self` has over `env`'s.
+    pub fn apply(&self, env: &mut Environment) {
+        if let Some(locale) = self.locale {
+            env.locale = locale;
+        }
+        if let Some(scale) = self.font_scale.filter(|s| s.is_finite() && *s > 0.0) {
+            env.font_scale = scale;
         }
     }
 }
@@ -437,7 +499,78 @@ pub enum FetchOp {
 
 #[cfg(test)]
 mod tests {
-    use super::Locale;
+    use super::{Environment, HostEnvironment, Idiom, Locale, Os, Renderer};
+
+    #[test]
+    fn graphical_terminal_input_retains_control_shortcuts_on_apple_hosts() {
+        let desktop = Environment {
+            os: Os::MacOs,
+            ..Default::default()
+        };
+        assert!(desktop.uses_apple_keys());
+        let terminal = Environment {
+            terminal_keyboard: true,
+            ..desktop
+        };
+        assert!(!terminal.uses_apple_keys());
+        assert_eq!(terminal.renderer, desktop.renderer);
+        assert_eq!(terminal.os, Os::MacOs);
+    }
+
+    #[test]
+    fn renderer_separates_terminal_from_graphical_desktop_behavior() {
+        for os in [Os::MacOs, Os::Windows, Os::Linux] {
+            let native = Environment {
+                os,
+                idiom: Idiom::Desktop,
+                ..Environment::default()
+            };
+            assert!(native.desktop());
+            let terminal = Environment {
+                renderer: Renderer::Terminal,
+                ..native
+            };
+            assert_eq!(terminal.os, os);
+            assert!(!terminal.desktop());
+        }
+        let browser = Environment {
+            os: Os::Web,
+            renderer: Renderer::Web,
+            idiom: Idiom::Desktop,
+            ..Environment::default()
+        };
+        assert!(browser.desktop());
+        assert!(
+            !Environment {
+                idiom: Idiom::Phone,
+                ..browser
+            }
+            .desktop()
+        );
+    }
+
+    #[test]
+    fn a_host_environment_replaces_what_it_sets() {
+        let mut env = Environment {
+            font_scale: 1.25,
+            ..Environment::default()
+        };
+        HostEnvironment::default().apply(&mut env);
+        assert_eq!((env.locale, env.font_scale), (Locale::EN_US, 1.25));
+        let zh = Locale::parse("zh-Hans-CN").unwrap();
+        HostEnvironment {
+            locale: Some(zh),
+            font_scale: Some(f32::NAN),
+        }
+        .apply(&mut env);
+        assert_eq!((env.locale, env.font_scale), (zh, 1.25));
+        HostEnvironment {
+            locale: None,
+            font_scale: Some(1.5),
+        }
+        .apply(&mut env);
+        assert_eq!((env.locale, env.font_scale), (zh, 1.5));
+    }
 
     #[test]
     fn locales_parse_platform_identifiers() {

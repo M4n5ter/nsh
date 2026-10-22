@@ -42,6 +42,11 @@
     onLog: (level, message) => post({ type: "log", level, message }),
   };
   if (theme === "dark" || theme === "light") options.dark = theme === "dark";
+  // `?idiom=desktop` (or `phone`, `pad`): the device the app believes it
+  // runs on, whatever the frame's size and the pointer (the website's
+  // Mobile / Desktop switch).
+  const idiom = params.get("idiom");
+  if (idiom === "desktop" || idiom === "phone" || idiom === "pad") options.idiom = idiom;
   if (options.dark) document.documentElement.style.background = "#000";
 
   let loading;
@@ -78,7 +83,9 @@
     if (playground && data.type === "run" && typeof data.source === "string") {
       const p = await player();
       status.style.display = "none";
-      post({ type: "compiled", error: p.runSource(data.source, data.name ?? "App.tsx") });
+      // The page runs code its visitors write, on its main thread: with the
+      // limits of an embedded app, a loop that never ends is cut off.
+      post({ type: "compiled", error: p.runSource(data.source, data.name ?? "App.tsx", { limits: "" }) });
     }
   });
 

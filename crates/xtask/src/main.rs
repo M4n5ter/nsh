@@ -11,8 +11,13 @@
 //!   `NativeShellDev.xcframework`) into `dist/nsh/embed/ios`.
 //! - `web`: the WebAssembly runtime, its player and the website's demos
 //!   (`website/public/play` by default).
+//! - `compat`: holds this checkout to what NSH's releases froze, kept in
+//!   the `nsh-compat` repository, and runs the apps of `tests/compat/`;
+//!   `compat record <version>` records a release there
+//!   (docs/dev/compatibility.md).
 
 mod android;
+mod compat;
 mod dist;
 mod ios;
 mod run;
@@ -68,13 +73,26 @@ enum Task {
     /// Build the distribution in `dist/nsh`.
     Dist,
     /// Build only the iOS embedding XCFrameworks.
-    IosEmbed,
+    IosEmbed(ios::Options),
     /// Build the WebAssembly runtime and the website's demos.
     Web {
         /// Output directory.
         #[arg(long, default_value = "website/public/play")]
         out: std::path::PathBuf,
     },
+    /// Hold this checkout to what NSH's releases froze (the `nsh-compat`
+    /// repository), and run the apps of `tests/compat/`.
+    Compat {
+        #[command(subcommand)]
+        record: Option<CompatTask>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CompatTask {
+    /// Record this checkout as release `version` in `nsh-compat`, to commit
+    /// there.
+    Record { version: String },
 }
 
 fn main() -> std::process::ExitCode {
@@ -130,7 +148,11 @@ fn task(task: Task) -> anyhow::Result<()> {
         }
         Task::ClippyAndroid => android::clippy(),
         Task::Dist => dist::dist(),
-        Task::IosEmbed => ios::build().map(|out| term::note(out.display())),
+        Task::IosEmbed(options) => ios::build(options).map(|out| term::note(out.display())),
         Task::Web { out } => web::build(&out),
+        Task::Compat { record } => compat::compat(match &record {
+            Some(CompatTask::Record { version }) => Some(version),
+            None => None,
+        }),
     }
 }

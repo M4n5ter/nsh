@@ -4,8 +4,14 @@
 //! A scroll view only moves along its main axis (zooming is not
 //! supported: `zoomTo` and the zoom props are ignored). Its offset lives in
 //! [`ScrollState`] (`x` / `y`, 0 showing the start of the content inset)
-//! and is shown by its container's bounds origin, as `NSClipView` scrolls.
-//! Every change goes through [`moved_to`], which moves the bounds origin,
+//! and is shown by its container's layer's `sublayerTransform` while it
+//! moves; the container's bounds origin (as `NSClipView` scrolls) takes it
+//! once the view and the display link rest ([`commit_due`]), as
+//! `setBoundsOrigin:` walks the whole subtree. AppKit's geometry (hit
+//! tests, conversions, `visibleRect`) follows the bounds, so what asks it
+//! commits first ([`commit_pending`], [`commit_ancestors`]); NSH's own
+//! (picking, [`bounds_origin`]) follows the live offset.
+//! Every change goes through [`moved_to`], which moves the transform,
 //! pins the sticky cells, feeds the native scroll value in the same frame
 //! and queues a report to the engine. Reports are coalesced to one per
 //! frame by the view's frame callback, which also runs animated
@@ -26,20 +32,28 @@
 //!
 //! Mirrored (right to left) horizontal lists keep their offsets left to
 //! right: [`NshView::place`] puts each child at the mirror image of its
-//! frame, so the bounds origin is the offset negated, and wheels and the
+//! frame, so the shown origin is the offset negated, and wheels and the
 //! indicator are mirrored here.
 
 use std::{f32::consts::PI, rc::Rc};
 
-use nsh_core::{Command, EventKind, EventPayload, ScrollBehavior, Size, StickyCell, ViewKind};
+use nsh_core::{
+    Command, EventKind, EventPayload, Points, ScrollBehavior, Size, StickyCell, ViewKind,
+    geometry::point,
+    scroll::{
+        dragged, ease_out, indicator_alpha, indicator_span, projected, rate, reveal_delta,
+        snap_duration, sticky_shift, thumb_scroll,
+    },
+};
 use objc2::{MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_app_kit::{NSResponder, NSView};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGColor;
-use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSUserDefaults, ns_string};
 use objc2_quartz_core::CALayer;
 
 use crate::{
+    input::later,
     surface::Surface,
     view::{NshView, ScrollState, ViewState},
 };
@@ -49,10 +63,6 @@ const WHEEL_IDLE: f64 = 150.0;
 /// After a trackpad gesture ends, the system's momentum begins within this
 /// long (ms), or there is none.
 const MOMENTUM_WAIT: f64 = 100.0;
-/// The indicator stays this long (ms) after the last scroll...
-const INDICATOR_HOLD: f64 = 700.0;
-/// ...then fades out in this long.
-const INDICATOR_FADE: f64 = 300.0;
 /// How far past the top a release must be to trigger a refresh.
 const REFRESH_PULL: f32 = 64.0;
 /// Space kept above the content while refreshing (the spinner's).
@@ -137,6 +147,14 @@ pub(crate) struct Live {
     spinner: Option<Retained<CALayer>>,
     /// Trackpad offsets waiting to be shown ([`Resampled`]).
     resampled: Option<Resampled>,
+    /// When the moving offset should be committed to the container's
+    /// bounds (ms; [`COMMIT_MS`] after the last move).
+    commit_at: f64,
+    /// A bounds-commit task is scheduled.
+    commit_armed: bool,
+    /// Since when the armed commit found the view at rest (ms): it waits
+    /// for the display link to rest at most [`REST_WAIT`] from then.
+    rested_at: Option<f64>,
 }
 
 /// Where trackpad events (gestures and their momentum) put the offset, by
@@ -205,123 +223,13 @@ impl Resampled {
     }
 }
 
-// Pure logic.
-
-/// The rubber band of iOS: how far content dragged `over` points past an
-/// edge of a `dim`-point viewport moves.
-fn rubber(over: f32, dim: f32) -> f32 {
-    let dim = dim.max(1.0);
-    (1.0 - 1.0 / (over * 0.55 / dim + 1.0)) * dim
-}
-
-/// Position on a drag that went to `raw`, with `[min, max]` the limits.
-fn dragged(raw: f32, min: f32, max: f32, dim: f32, bounces: bool) -> f32 {
-    if raw < min {
-        if bounces {
-            min - rubber(min - raw, dim)
-        } else {
-            min
-        }
-    } else if raw > max {
-        if bounces {
-            max + rubber(raw - max, dim)
-        } else {
-            max
-        }
-    } else {
-        raw
-    }
-}
-
-/// The deceleration rate: velocity kept per ms.
-fn rate(behavior: &ScrollBehavior) -> f32 {
-    if behavior.deceleration > 0.0 && behavior.deceleration < 1.0 {
-        behavior.deceleration
-    } else if behavior.snaps() || behavior.paging {
-        0.99
-    } else {
-        0.998
-    }
-}
-
-/// Where a glide at `v` from `offset` comes to rest.
-fn projected(offset: f32, v: f32, rate: f32) -> f32 {
-    offset - v / rate.ln()
-}
-
-/// How far a sticky cell moves at `offset`.
-fn sticky_shift(offset: f32, start: f32, end: f32) -> f32 {
-    (offset - start).clamp(0.0, (end - start).max(0.0))
-}
-
-/// Cubic ease out.
-fn ease_out(t: f64) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    (1.0 - (1.0 - t).powi(3)) as f32
-}
-
-/// How long an eased move of `distance` that starts at speed `v` (points
-/// per ms, in its direction) takes: ease out starts at 3 × distance /
-/// duration, which then matches the release.
-fn snap_duration(distance: f32, v: f32) -> f64 {
-    if distance.abs() < 0.5 {
-        return 0.0;
-    }
-    if v * distance > 0.0 {
-        (3.0 * distance.abs() / v.abs()).clamp(180.0, 600.0) as f64
-    } else {
-        ANIMATION
-    }
-}
-
-/// The indicator's opacity `since` ms after it was shown.
-fn indicator_alpha(since: f64) -> f32 {
-    if since < INDICATOR_HOLD {
-        1.0
-    } else {
-        (1.0 - (since - INDICATOR_HOLD) / INDICATOR_FADE).max(0.0) as f32
-    }
-}
-
-/// The indicator along the main axis: `(start, length)` in a viewport of
-/// `viewport` points showing `total` points at `offset`, or `None` when
-/// everything fits.
-fn indicator_span(viewport: f32, total: f32, offset: f32) -> Option<(f32, f32)> {
-    /// Short enough to see where it is in long lists, long enough to see.
-    const MIN_LENGTH: f32 = 32.0;
-    if total <= viewport + 0.5 || viewport <= 4.0 * INDICATOR_MARGIN {
-        return None;
-    }
-    let track = viewport - 2.0 * INDICATOR_MARGIN;
-    let max = total - viewport;
-    // Overscrolling shrinks it, as macOS's overlay scrollers do.
-    let over = if offset < 0.0 {
-        -offset
-    } else {
-        (offset - max).max(0.0)
-    };
-    let len = (track * viewport / total - over).max(MIN_LENGTH).min(track);
-    let t = (offset / max).clamp(0.0, 1.0);
-    Some((INDICATOR_MARGIN + (track - len) * t, len))
-}
-
-/// How far the offset moves when the thumb moves by `d` points: the
-/// thumb's travel (`track - length`) spans the whole scroll range.
-fn thumb_scroll(d: f32, range: f32, travel: f32) -> f32 {
-    if travel > 0.0 {
-        d * range / travel
-    } else {
-        0.0
-    }
-}
-
 // Accessors.
 
 fn viewport(state: &ViewState, horizontal: bool) -> f32 {
     if horizontal {
-        state.frame.width
+        state.frame.size.width.0
     } else {
-        state.frame.height
+        state.frame.size.height.0
     }
 }
 
@@ -335,7 +243,7 @@ fn limits(state: &ViewState) -> (f32, f32) {
     let Some(s) = &state.scroll else {
         return (0.0, 0.0);
     };
-    let max = s.max((state.frame.width, state.frame.height));
+    let max = s.max((state.frame.size.width.0, state.frame.size.height.0));
     let min = if !s.horizontal && s.live.refreshing {
         -REFRESH_SPACE
     } else {
@@ -350,8 +258,8 @@ fn reported(state: &ViewState) -> (f32, f32) {
     let Some(s) = &state.scroll else {
         return (0.0, 0.0);
     };
-    let (mx, my) = s.max((state.frame.width, state.frame.height));
-    let inset = s.behavior.content_inset;
+    let (mx, my) = s.max((state.frame.size.width.0, state.frame.size.height.0));
+    let inset = s.behavior.content_inset.map(|v| v.0);
     (
         s.x.clamp(0.0, mx) - inset.left,
         s.y.clamp(0.0, my) - inset.top,
@@ -359,7 +267,7 @@ fn reported(state: &ViewState) -> (f32, f32) {
 }
 
 /// Milliseconds on the display link's clock.
-fn now() -> f64 {
+pub(crate) fn now() -> f64 {
     objc2_quartz_core::CACurrentMediaTime() * 1000.0
 }
 
@@ -435,10 +343,10 @@ fn emit(surface: &Surface, view: &NshView, kind: EventKind) {
         let (x, y) = reported(&state);
         (state.id, x, y)
     };
-    surface.event(id, kind, EventPayload::Scroll { x, y });
+    surface.event(id, kind, EventPayload::Scroll(point(Points(x), Points(y))));
 }
 
-/// Ends momentum or a snap a new input interrupts (`onMomentumScrollEnd`,
+/// Ends momentum or a snap a new input interrupts (`onMomentumEnd`,
 /// as UIKit sends when a drag catches a glide).
 fn interrupt(surface: &Rc<Surface>, view: &NshView) {
     settle(surface, view);
@@ -448,7 +356,7 @@ fn interrupt(surface: &Rc<Surface>, view: &NshView) {
     );
     set_phase(view, Phase::Idle);
     if momentum {
-        emit(surface, view, EventKind::MomentumScrollEnd);
+        emit(surface, view, EventKind::MomentumEnd);
     }
 }
 
@@ -505,18 +413,169 @@ fn settle(surface: &Rc<Surface>, view: &NshView) {
 
 // Moving.
 
-/// Shows the offset: the container's bounds origin.
-fn apply_offset(view: &NshView) {
-    let origin = {
-        let state = view.state();
-        let Some(s) = &state.scroll else { return };
-        let inset = s.behavior.content_inset;
-        let x = s.x - inset.left;
-        // Mirrored children are placed from the right: the offset runs the
-        // other way.
-        (if s.mirrored { -x } else { x }, s.y - inset.top)
+/// The container bounds origin that shows the scroll offset. Mirrored
+/// children are placed from the right: the offset runs the other way.
+pub(crate) fn bounds_origin(view: &NshView) -> (f32, f32) {
+    let state = view.state();
+    let Some(s) = &state.scroll else {
+        return (0.0, 0.0);
     };
-    view.set_bounds_origin(origin.0, origin.1);
+    let inset = s.behavior.content_inset.map(|v| v.0);
+    let x = s.x - inset.left;
+    (if s.mirrored { -x } else { x }, s.y - inset.top)
+}
+
+/// A bounds commit follows the last move by this long (ms).
+const COMMIT_MS: u64 = 140;
+
+/// Shows the offset by translating the container layer's sublayers: the
+/// pixels move without any view geometry changing, so AppKit does not
+/// walk the subtree (`setBoundsOrigin` invalidates every descendant's
+/// geometry in the window — focus, tracking areas, cursor rects — and
+/// hosted views sync their remote state, per scroll step, which is the
+/// jank on long lists). The bounds commit once it settles ([`commit`])
+/// puts AppKit's model right for the price of one walk per scroll.
+fn apply_offset(surface: &Rc<Surface>, view: &NshView) {
+    let origin = bounds_origin(view);
+    let committed = view.container_bounds_origin();
+    view.set_layer_scroll(committed.0 - origin.0, committed.1 - origin.1);
+    arm_commit(surface, view);
+}
+
+/// Schedules the trailing bounds commit, `COMMIT_MS` after the offset
+/// last moved (`s.live.commit_at`).
+fn arm_commit(surface: &Rc<Surface>, view: &NshView) {
+    let (key, id) = {
+        let mut state = view.state_mut();
+        let Some(s) = state.scroll.as_mut() else {
+            return;
+        };
+        s.live.commit_at = now() + COMMIT_MS as f64;
+        if std::mem::replace(&mut s.live.commit_armed, true) {
+            return;
+        }
+        (surface.key(), state.id)
+    };
+    later(COMMIT_MS, move || commit(key, id));
+}
+
+/// The longest a bounds commit waits for the display link to rest once the
+/// view is at rest (ms): past the indicator's fade, so a scroll alone
+/// commits when nothing draws, while an animation that keeps the link
+/// running (a spinner) does not hold AppKit's model back for long.
+const REST_WAIT: f64 = 1000.0;
+
+/// Whether the armed bounds commit lands at `t` (ms): the offset has not
+/// moved for [`COMMIT_MS`] (`commit_at`) and no scroll phase runs (`idle`;
+/// input and glides go on as long as they last, each frame moving only the
+/// layer transform), then once the display link rests (`link_busy` false)
+/// or [`REST_WAIT`] after the view came to rest (`rested_at`, kept here).
+fn commit_due(
+    t: f64,
+    commit_at: f64,
+    idle: bool,
+    link_busy: bool,
+    rested_at: &mut Option<f64>,
+) -> bool {
+    if commit_at - t > 1.0 || !idle {
+        *rested_at = None;
+        return false;
+    }
+    let since = *rested_at.get_or_insert(t);
+    !link_busy || t - since >= REST_WAIT
+}
+
+/// Commits every pending scroll offset of `surface` to its container's
+/// bounds now: before anything asks AppKit where views are (a press's hit
+/// test, a conversion of rectangles), which follows the bounds, not the
+/// layer transforms showing the offsets meanwhile. The armed commits still
+/// run, and find nothing left to move.
+pub(crate) fn commit_pending(surface: &Surface) {
+    let Ok(mounter) = surface.mounter.try_borrow() else {
+        return;
+    };
+    let pending: Vec<NshView> = mounter
+        .views
+        .values()
+        .filter(|v| {
+            v.state()
+                .scroll
+                .as_ref()
+                .is_some_and(|s| s.live.commit_armed)
+        })
+        .cloned()
+        .collect();
+    drop(mounter);
+    for view in pending {
+        commit_now(&view);
+    }
+}
+
+/// [`commit_pending`] for the scroll views around `view` only (what
+/// AppKit's geometry of `view` depends on).
+pub(crate) fn commit_ancestors(view: &NshView) {
+    for v in std::iter::successors(Some(view.clone()), NshView::parent_view) {
+        if v.state()
+            .scroll
+            .as_ref()
+            .is_some_and(|s| s.live.commit_armed)
+        {
+            commit_now(&v);
+        }
+    }
+}
+
+fn commit_now(view: &NshView) {
+    let origin = bounds_origin(view);
+    crate::surface::quiet(|| view.commit_bounds_origin(origin.0, origin.1));
+}
+
+/// Moves the scroll offset the layer transform has been showing into the
+/// container's bounds: a single subtree walk updates tracking areas,
+/// cursor rects and accessibility with where things really are.
+fn commit(key: u64, id: nsh_core::NodeId) {
+    let Some(surface) = Surface::with_key(key) else {
+        return;
+    };
+    let Ok(mounter) = surface.mounter.try_borrow() else {
+        // A batch is being applied: try again shortly.
+        later(20, move || commit(key, id));
+        return;
+    };
+    let Some(view) = mounter.views.get(&id).cloned() else {
+        return;
+    };
+    drop(mounter);
+    // `setBoundsOrigin` walks the whole subtree (descendants' window
+    // geometry, tracking areas, cursor rects, hosted views' remote
+    // state): on a live frame that walk drops it, so the commit waits
+    // for the display link to rest — the input ended and nothing draws.
+    let idle = phase(&view) == Phase::Idle;
+    let link_busy = surface.wants_frames();
+    let due = {
+        let mut state = view.state_mut();
+        let Some(s) = state.scroll.as_mut() else {
+            return;
+        };
+        let due = commit_due(
+            now(),
+            s.live.commit_at,
+            idle,
+            link_busy,
+            &mut s.live.rested_at,
+        );
+        if due {
+            s.live.commit_armed = false;
+            s.live.rested_at = None;
+        }
+        due
+    };
+    if !due {
+        later(32, move || commit(key, id));
+        return;
+    }
+    let origin = bounds_origin(&view);
+    crate::surface::quiet(|| view.commit_bounds_origin(origin.0, origin.1));
 }
 
 /// Moves `view`'s main axis offset to `pos` (not clamped: drags rubber
@@ -542,11 +601,11 @@ fn moved_to(surface: &Rc<Surface>, view: &NshView, pos: f32) {
         (state.id, x, y)
     };
     crate::surface::quiet(|| {
-        apply_offset(view);
+        apply_offset(surface, view);
         pin_sticky(surface, view);
         update_overlays(view);
     });
-    crate::input::content_moved(surface);
+    crate::input::content_moved(surface, true);
     if surface.anim.borrow_mut().scrolled(id, x, y) && surface.mounter.try_borrow().is_ok() {
         // While a batch is applied the surface writes animations after it.
         surface.write_animations();
@@ -572,7 +631,7 @@ fn report(surface: &Surface, view: &NshView) {
         let (x, y) = reported(&state);
         (state.id, x, y, applied)
     };
-    surface.control(|c| c.scroll(id, x, y, applied));
+    surface.control(|c| c.scroll(id, point(Points(x), Points(y)), applied));
 }
 
 /// Eases to `to` (clamped to the rest limits).
@@ -592,7 +651,7 @@ fn animate_to(
         set_phase(view, Phase::Idle);
         moved_to(surface, view, to);
         if momentum {
-            emit(surface, view, EventKind::MomentumScrollEnd);
+            emit(surface, view, EventKind::MomentumEnd);
         }
         if end {
             emit(surface, view, EventKind::ScrollEnd);
@@ -624,9 +683,9 @@ fn release(surface: &Rc<Surface>, view: &NshView, v: f32, snap_velocity: f32) {
         let (min, max) = limits(&state);
         let pos = main(s);
         let lead = if s.horizontal {
-            s.behavior.content_inset.left
+            s.behavior.content_inset.left.0
         } else {
-            s.behavior.content_inset.top
+            s.behavior.content_inset.top.0
         };
         let dim = viewport(&state, s.horizontal);
         let snap_velocity = if snap_velocity == 0.0 {
@@ -638,13 +697,13 @@ fn release(surface: &Rc<Surface>, view: &NshView, v: f32, snap_velocity: f32) {
         let target = s
             .behavior
             .snap_target(
-                pos - lead,
-                projected(pos, v, rate(&s.behavior)) - lead,
+                Points(pos - lead),
+                projected(Points(pos), v, rate(&s.behavior)) - Points(lead),
                 snap_velocity,
-                dim,
-                max + dim - lead,
+                Points(dim),
+                Points(max + dim - lead),
             )
-            .map(|t| t + lead);
+            .map(|t| t.0 + lead);
         (pos, min, max, target)
     };
     if pos < min - 0.5 || pos > max + 0.5 {
@@ -657,9 +716,9 @@ fn release(surface: &Rc<Surface>, view: &NshView, v: f32, snap_velocity: f32) {
             true,
         );
     } else if let Some(target) = target {
-        let duration = snap_duration(target - pos, v);
+        let duration = snap_duration(Points(target - pos), v);
         if duration > 0.0 {
-            emit(surface, view, EventKind::MomentumScrollBegin);
+            emit(surface, view, EventKind::MomentumStart);
         }
         animate_to(surface, view, target, duration, duration > 0.0, true);
     } else {
@@ -739,7 +798,7 @@ fn tick(surface: &Rc<Surface>, view: &NshView, now: f64) -> bool {
             if t >= 1.0 {
                 set_phase(view, Phase::Idle);
                 if momentum {
-                    emit(surface, view, EventKind::MomentumScrollEnd);
+                    emit(surface, view, EventKind::MomentumEnd);
                 }
                 if end {
                     emit(surface, view, EventKind::ScrollEnd);
@@ -886,13 +945,14 @@ fn overlay_layer(
 /// travel along its track, or `None` when the content fits.
 fn thumb(s: &ScrollState, w: f32, h: f32) -> Option<(CGRect, f32)> {
     const EDGE: f32 = 2.0;
-    let inset = s.behavior.content_inset;
+    let inset = s.behavior.content_inset.map(|v| v.0);
     let (dim, total, offset) = if s.horizontal {
         (w, s.content.0 + inset.left + inset.right, s.x)
     } else {
         (h, s.content.1 + inset.top + inset.bottom, s.y)
     };
-    let (start, len) = indicator_span(dim, total, offset)?;
+    let (start, len) = indicator_span(Points(dim), Points(total), Points(offset))?;
+    let (start, len) = (start.0, len.0);
     let frame = if s.horizontal {
         let x = if s.mirrored { w - start - len } else { start };
         rect(x, h - INDICATOR_THICK - EDGE, len, INDICATOR_THICK)
@@ -905,7 +965,7 @@ fn thumb(s: &ScrollState, w: f32, h: f32) -> Option<(CGRect, f32)> {
 /// Updates the indicator and the refresh spinner of `view` to its offset.
 fn update_overlays(view: &NshView) {
     let mut state = view.state_mut();
-    let (w, h) = (state.frame.width, state.frame.height);
+    let (w, h) = (state.frame.size.width.0, state.frame.size.height.0);
     let refresh_listened = state.events.contains(EventKind::Refresh);
     let Some(s) = state.scroll.as_mut() else {
         return;
@@ -977,7 +1037,7 @@ fn update_overlays(view: &NshView) {
     } else {
         (-s.y / REFRESH_PULL).min(1.0)
     };
-    let cy = s.behavior.content_inset.top - s.y - REFRESH_SPACE / 2.0;
+    let cy = s.behavior.content_inset.top.0 - s.y - REFRESH_SPACE / 2.0;
     layer.setBounds(rect(0.0, 0.0, 0.0, 0.0));
     layer.setPosition(CGPoint::new((w / 2.0) as f64, cy as f64));
     let shown = ((progress * SPOKES as f32).ceil() as usize).min(SPOKES);
@@ -1019,7 +1079,8 @@ const SPOKES: usize = 8;
 
 // Sticky cells.
 
-/// Calls `f` with `view`'s child of node `id`.
+/// Calls `f` with the view of node `id` in `view` (a child, or for a list
+/// in the scroll view's viewport, the list's).
 fn with_cell(surface: &Surface, view: &NshView, id: nsh_core::NodeId, f: impl FnOnce(&NshView)) {
     if let Ok(mounter) = surface.mounter.try_borrow() {
         if let Some(cell) = mounter.views.get(&id) {
@@ -1027,9 +1088,19 @@ fn with_cell(surface: &Surface, view: &NshView, id: nsh_core::NodeId, f: impl Fn
         }
         return;
     }
-    // While a batch is applied: look among the children.
-    if let Some(cell) = view.child_views().into_iter().find(|c| c.id() == id) {
-        f(&cell);
+    // While a batch is applied: look among the children, then deeper (the
+    // cells of a list in the scroll view's viewport are in the list).
+    let mut views = view.child_views();
+    if let Some(cell) = views.iter().find(|c| c.id() == id) {
+        f(cell);
+        return;
+    }
+    while let Some(v) = views.pop() {
+        if v.id() == id {
+            f(&v);
+            return;
+        }
+        views.extend(v.child_views());
     }
 }
 
@@ -1042,14 +1113,14 @@ fn pin_sticky(surface: &Surface, view: &NshView) {
             return;
         }
         let lead = if s.horizontal {
-            s.behavior.content_inset.left
+            s.behavior.content_inset.left.0
         } else {
-            s.behavior.content_inset.top
+            s.behavior.content_inset.top.0
         };
         (s.sticky.clone(), main(s) - lead, s.horizontal)
     };
     for c in &cells {
-        let t = sticky_shift(offset, c.start, c.end);
+        let t = sticky_shift(Points(offset), c.start, c.end).0;
         let shift = if horizontal { (t, 0.0) } else { (0.0, t) };
         with_cell(surface, view, c.cell, |cell| {
             let changed = {
@@ -1127,20 +1198,20 @@ pub(crate) fn config(
             child.place();
         }
     }
-    apply_offset(view);
+    apply_offset(_surface, view);
     update_overlays(view);
 }
 
 /// `ScrollContent`. Content that shrank below the offset pulls it back on
 /// the next frame, once the rest of the batch (the `ScrollBy` that keeps
 /// the visible content in place) is applied.
-pub(crate) fn content(surface: &Rc<Surface>, view: &NshView, size: Size) {
+pub(crate) fn content(surface: &Rc<Surface>, view: &NshView, size: Size<Points>) {
     let past = {
         let mut state = view.state_mut();
         let Some(s) = state.scroll.as_mut() else {
             return;
         };
-        s.content = (size.width, size.height);
+        s.content = (size.width.0, size.height.0);
         let pos = main(s);
         pos > limits(&state).1 + 0.5
     };
@@ -1206,6 +1277,34 @@ pub(crate) fn scroll_by(surface: &Rc<Surface>, view: &NshView, dx: f32, dy: f32)
     report(surface, view);
 }
 
+/// Scrolls `view` at rest by `(dx, dy)` along its axis, within its rest
+/// limits: a selection dragged past its edge. False if it did not move.
+pub(crate) fn autoscroll(surface: &Rc<Surface>, view: &NshView, dx: f32, dy: f32) -> bool {
+    let (from, to) = {
+        let state = view.state();
+        let Some(s) = &state.scroll else {
+            return false;
+        };
+        if !matches!(s.live.phase, Phase::Idle) {
+            return false;
+        }
+        let (min, max) = limits(&state);
+        let from = main(s);
+        // Mirrored lists keep left-to-right offsets.
+        let d = match (s.horizontal, s.mirrored) {
+            (true, true) => -dx,
+            (true, false) => dx,
+            _ => dy,
+        };
+        (from, (from + d).clamp(min, max.max(min)))
+    };
+    if to == from {
+        return false;
+    }
+    moved_to(surface, view, to);
+    true
+}
+
 /// `StickyCells`.
 pub(crate) fn sticky(surface: &Rc<Surface>, view: &NshView, cells: Vec<StickyCell>) {
     let old = {
@@ -1248,7 +1347,7 @@ pub(crate) fn behavior(_surface: &Rc<Surface>, view: &NshView, behavior: &Scroll
         inset
     };
     if inset {
-        apply_offset(view);
+        apply_offset(_surface, view);
         update_overlays(view);
     }
 }
@@ -1290,13 +1389,13 @@ pub(crate) fn command(surface: &Rc<Surface>, view: &NshView, command: &Command) 
         let Some(s) = state.scroll.as_mut() else {
             return;
         };
-        let inset = s.behavior.content_inset;
+        let inset = s.behavior.content_inset.map(|v| v.0);
         let (target, animated) = match *command {
             Command::ScrollTo { x, y, animated } => (
                 if s.horizontal {
-                    x + inset.left
+                    x.0 + inset.left
                 } else {
-                    y + inset.top
+                    y.0 + inset.top
                 },
                 animated,
             ),
@@ -1364,7 +1463,7 @@ pub(crate) fn grabs_thumb(view: &NshView, x: f32, y: f32) -> bool {
     if !s.indicator || !s.behavior.enabled {
         return false;
     }
-    let (w, h) = (state.frame.width, state.frame.height);
+    let (w, h) = (state.frame.size.width.0, state.frame.size.height.0);
     let Some((frame, _)) = thumb(s, w, h) else {
         return false;
     };
@@ -1377,13 +1476,17 @@ pub(crate) fn grabs_thumb(view: &NshView, x: f32, y: f32) -> bool {
         && (start - THUMB_SLOP..=start + len + THUMB_SLOP).contains(&along)
 }
 
-/// The mouse moved over `view`: its indicator shows (and fades again
-/// once the mouse rests), as overlay scroll bars do, so that a mouse user
-/// sees it can scroll and where its scroll bar is.
+/// Reveal the indicator on hover unless the user only wants it while scrolling.
 pub(crate) fn hovered(surface: &Rc<Surface>, view: &NshView) {
+    if NSUserDefaults::standardUserDefaults()
+        .stringForKey(ns_string!("AppleShowScrollBars"))
+        .is_some_and(|setting| setting.isEqualToString(ns_string!("WhenScrolling")))
+    {
+        return;
+    }
     {
         let mut state = view.state_mut();
-        let (w, h) = (state.frame.width, state.frame.height);
+        let (w, h) = (state.frame.size.width.0, state.frame.size.height.0);
         let Some(s) = state.scroll.as_mut() else {
             return;
         };
@@ -1415,7 +1518,7 @@ pub(crate) fn thumb_begin(surface: &Rc<Surface>, view: &NshView) {
         s.live.dark = surface.environment.get().color_scheme == nsh_engine::ColorScheme::Dark;
     }
     update_overlays(view);
-    emit(surface, view, EventKind::ScrollBeginDrag);
+    emit(surface, view, EventKind::ScrollDragStart);
 }
 
 /// The grabbed indicator was dragged by `(dx, dy)` points since it was
@@ -1428,7 +1531,8 @@ pub(crate) fn thumb_move(surface: &Rc<Surface>, view: &NshView, dx: f32, dy: f32
     let pos = {
         let state = view.state();
         let Some(s) = &state.scroll else { return };
-        let Some((_, travel)) = thumb(s, state.frame.width, state.frame.height) else {
+        let Some((_, travel)) = thumb(s, state.frame.size.width.0, state.frame.size.height.0)
+        else {
             return;
         };
         let (min, max) = limits(&state);
@@ -1439,7 +1543,7 @@ pub(crate) fn thumb_move(surface: &Rc<Surface>, view: &NshView, dx: f32, dy: f32
         } else {
             dx
         };
-        (start + thumb_scroll(d, max, travel)).clamp(min, max.max(min))
+        (start + thumb_scroll(Points(d), Points(max), Points(travel)).0).clamp(min, max.max(min))
     };
     moved_to(surface, view, pos);
 }
@@ -1455,7 +1559,7 @@ pub(crate) fn thumb_end(surface: &Rc<Surface>, view: &NshView) {
         s.live.shown = now();
     }
     ensure_ticking(surface, view);
-    emit(surface, view, EventKind::ScrollEndDrag);
+    emit(surface, view, EventKind::ScrollDragEnd);
     release(surface, view, 0.0, 0.0);
 }
 
@@ -1491,7 +1595,7 @@ pub(crate) fn wheel_begin(surface: &Rc<Surface>, view: &NshView) {
             raw,
         },
     );
-    emit(surface, view, EventKind::ScrollBeginDrag);
+    emit(surface, view, EventKind::ScrollDragStart);
 }
 
 /// A wheel or trackpad scroll by `(dx, dy)` points (positive: the content
@@ -1524,12 +1628,13 @@ pub(crate) fn wheel(surface: &Rc<Surface>, view: &NshView, dx: f32, dy: f32, tim
             // Trackpads stretch past the edges, as macOS does.
             let raw = raw + d;
             let to = dragged(
-                raw,
-                min,
-                max.max(min),
-                viewport(&state, s.horizontal),
+                Points(raw),
+                Points(min),
+                Points(max.max(min)),
+                Points(viewport(&state, s.horizontal)),
                 s.behavior.bounces,
-            );
+            )
+            .0;
             (to, total + d, raw)
         } else {
             // Past an edge (the refresh space) wheels only move back.
@@ -1573,7 +1678,7 @@ pub(crate) fn wheel_end(surface: &Rc<Surface>, view: &NshView, vx: f32, vy: f32)
     };
     set_phase(view, Phase::Idle);
     if gesture {
-        emit(surface, view, EventKind::ScrollEndDrag);
+        emit(surface, view, EventKind::ScrollDragEnd);
         pulled_to_refresh(surface, view);
     }
     // After the refresh check: refreshing lowers the top limit.
@@ -1603,7 +1708,7 @@ pub(crate) fn momentum_begin(surface: &Rc<Surface>, view: &NshView) -> bool {
         return false;
     }
     set_phase(view, Phase::Momentum);
-    emit(surface, view, EventKind::MomentumScrollBegin);
+    emit(surface, view, EventKind::MomentumStart);
     true
 }
 
@@ -1631,7 +1736,7 @@ pub(crate) fn momentum_end(surface: &Rc<Surface>, view: &NshView) {
         return;
     }
     set_phase(view, Phase::Idle);
-    emit(surface, view, EventKind::MomentumScrollEnd);
+    emit(surface, view, EventKind::MomentumEnd);
     emit(surface, view, EventKind::ScrollEnd);
 }
 
@@ -1757,27 +1862,12 @@ fn key_scroll_view(view: &NshView, horizontal: bool, dx: f32, dy: f32) -> Option
     chain.into_iter().nth(first)
 }
 
-/// Room kept around a view scrolled into view.
-const REVEAL_MARGIN: f32 = 16.0;
-
-/// How far a scroll view must move along an axis so that the span
-/// `[start, end)` (viewport coordinates) shows in `[0, viewport)`, with
-/// a margin; the start wins when the span does not fit.
-fn reveal_delta(start: f32, end: f32, viewport: f32) -> f32 {
-    let margin = REVEAL_MARGIN.min(viewport / 4.0);
-    if start < margin {
-        start - margin
-    } else if end > viewport - margin {
-        (end - (viewport - margin)).min(start - margin)
-    } else {
-        0.0
-    }
-}
-
 /// Scrolls the scroll views around `target` (animated) so that it shows,
 /// as iOS and Android do for the focused field. For the text fields: call
 /// it when one gets the keyboard focus.
 pub(crate) fn reveal(surface: &Rc<Surface>, target: &NshView) {
+    // The rectangles are AppKit's, which the bounds place.
+    commit_ancestors(target);
     // Content moved by the scroll views inside, which rectangles measured
     // now do not show yet.
     let (mut moved_x, mut moved_y) = (0.0, 0.0);
@@ -1814,7 +1904,7 @@ pub(crate) fn reveal(surface: &Rc<Surface>, target: &NshView) {
         };
         // Pending animations count from where they are headed.
         let start = start - (base - pos);
-        let delta = reveal_delta(start, start + len, dim);
+        let delta = reveal_delta(Points(start), Points(start + len), Points(dim)).0;
         let to = (base + delta).clamp(min, max.max(min));
         if (to - base).abs() < 0.5 {
             continue;
@@ -1832,6 +1922,44 @@ pub(crate) fn reveal(surface: &Rc<Surface>, target: &NshView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_scroll_commits_only_when_it_ends() {
+        let mut rested = None;
+        // Ten seconds of input or glide: never mid-scroll.
+        for t in (0..10_000).step_by(16) {
+            let t = t as f64;
+            assert!(!commit_due(t, t + 140.0, false, true, &mut rested));
+        }
+        // The offset still moved recently: not yet.
+        assert!(!commit_due(10_000.0, 10_100.0, true, false, &mut rested));
+        // At rest, with the display link resting too.
+        assert!(commit_due(10_200.0, 10_100.0, true, false, &mut rested));
+    }
+
+    #[test]
+    fn a_running_animation_holds_a_commit_only_briefly() {
+        let mut rested = None;
+        assert!(!commit_due(1000.0, 900.0, true, true, &mut rested));
+        assert!(!commit_due(
+            1000.0 + REST_WAIT - 32.0,
+            900.0,
+            true,
+            true,
+            &mut rested
+        ));
+        assert!(commit_due(
+            1000.0 + REST_WAIT,
+            900.0,
+            true,
+            true,
+            &mut rested
+        ));
+        // Input again starts the wait over.
+        let mut rested = Some(0.0);
+        assert!(!commit_due(5000.0, 4900.0, false, true, &mut rested));
+        assert_eq!(rested, None);
+    }
 
     #[test]
     fn resampling_moves_evenly_between_events() {
@@ -1857,50 +1985,6 @@ mod tests {
     }
 
     #[test]
-    fn rubber_band_resists() {
-        assert_eq!(dragged(50.0, 0.0, 100.0, 400.0, true), 50.0);
-        let over = dragged(-100.0, 0.0, 100.0, 400.0, true);
-        assert!(over < 0.0 && over > -100.0, "{over}");
-        let more = dragged(-400.0, 0.0, 100.0, 400.0, true);
-        assert!(more < over && more > -400.0 * 0.55);
-        assert_eq!(dragged(-100.0, 0.0, 100.0, 400.0, false), 0.0);
-        assert_eq!(dragged(300.0, 0.0, 100.0, 400.0, false), 100.0);
-        assert!(dragged(150.0, 0.0, 100.0, 400.0, true) > 100.0);
-    }
-
-    #[test]
-    fn sticky_shift_clamps() {
-        assert_eq!(sticky_shift(0.0, 100.0, 300.0), 0.0);
-        assert_eq!(sticky_shift(150.0, 100.0, 300.0), 50.0);
-        assert_eq!(sticky_shift(500.0, 100.0, f32::INFINITY), 400.0);
-    }
-
-    #[test]
-    fn indicator_geometry() {
-        assert_eq!(indicator_span(400.0, 400.0, 0.0), None);
-        let (s0, l0) = indicator_span(400.0, 1600.0, 0.0).unwrap();
-        assert_eq!(s0, 2.0);
-        assert!((l0 - 99.0).abs() < 0.01);
-        let (_, l2) = indicator_span(400.0, 1600.0, -50.0).unwrap();
-        assert!(l2 < l0);
-        assert_eq!(indicator_alpha(INDICATOR_HOLD + INDICATOR_FADE), 0.0);
-    }
-
-    #[test]
-    fn thumb_follows_the_pointer() {
-        // The thumb's travel spans the scroll range: moving it by its
-        // whole travel scrolls to the end, and it ends that far along.
-        let (s0, l0) = indicator_span(400.0, 1600.0, 0.0).unwrap();
-        let travel = 400.0 - 2.0 * INDICATOR_MARGIN - l0;
-        let end = thumb_scroll(travel, 1200.0, travel);
-        assert!((end - 1200.0).abs() < 0.01);
-        let (s1, _) = indicator_span(400.0, 1600.0, end).unwrap();
-        assert!((s1 - s0 - travel).abs() < 0.01);
-        assert!(thumb_scroll(-10.0, 1200.0, travel) < 0.0);
-        assert_eq!(thumb_scroll(10.0, 1200.0, 0.0), 0.0);
-    }
-
-    #[test]
     fn scroll_keys() {
         assert_eq!(
             key_move(keys::DOWN, false, false),
@@ -1917,12 +2001,5 @@ mod tests {
             350.0
         );
         assert_eq!(key_target(KeyMove::End, 0.0, 400.0, 0.0, 1000.0), 1000.0);
-    }
-
-    #[test]
-    fn reveal_deltas() {
-        assert_eq!(reveal_delta(100.0, 140.0, 400.0), 0.0);
-        assert_eq!(reveal_delta(-30.0, 10.0, 400.0), -46.0);
-        assert_eq!(reveal_delta(200.0, 900.0, 400.0), 184.0);
     }
 }

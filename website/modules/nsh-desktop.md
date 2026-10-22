@@ -1,14 +1,24 @@
 ---
 title: nsh/desktop
-description: "Desktop-only APIs: the window (title, title bar, maximize, full screen), a title bar of the app's own with draggable regions, the application menu, context menus and keyboard shortcuts."
+description: "Desktop window APIs, application and context menus, keyboard shortcuts, and terminal titles and menus."
 order: 12.5
 ---
 
 # nsh/desktop
 
-`nsh/desktop` holds what only desktops have: the window and its title bar, the application menu and context menus. It works on macOS, Windows and Linux. The module can be imported on every platform, so one bundle runs everywhere: on iOS and Android its functions do nothing, and `isAvailable` tells you whether you are on a desktop.
+`nsh/desktop` provides graphical desktop windows and title bars, the application menu and context menus on macOS, Windows and Linux. Terminal surfaces expose titles and menus through the same module. The module can be imported on every platform, so one bundle runs everywhere. `isAvailable` identifies surfaces with these title and menu APIs. Rust code draws a title bar of its own and closes the window with `nsh_core::ui::desktop` (`set_title_bar`, `title_bar`, `close_window`) and marks draggable views with `.window_drag(true)`; TSX imports `nsh/desktop`, which holds the window's other functions and the menus too.
 
-```ts
+```rust tabs
+use nsh_core::{
+    desktop::TitleBarStyle,
+    ui::{
+        desktop::{close_window, set_title_bar, title_bar},
+        prelude::*,
+    },
+};
+```
+
+```tsx tabs
 import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
 ```
 
@@ -18,7 +28,8 @@ import { isAvailable, Menu, titleBar, Window } from "nsh/desktop";
 const isAvailable: boolean;
 ```
 
-`true` on macOS, Windows and Linux; `false` elsewhere.
+`true` on graphical macOS, Windows and Linux backends and on terminal surfaces. `platform.idiom === "desktop" && !platform.isTerminal` identifies a
+graphical desktop; `platform.isTerminal` identifies the terminal renderer. See [Terminal](../docs/tui.md).
 
 ## Window
 
@@ -30,37 +41,71 @@ const Window: {
   toggleMaximize(): void;
   toggleFullScreen(): void;
   setFrame(frame: {
-    x?: number;
-    y?: number;
-    width?: number;
-    height?: number;
+    origin?: Partial<Point>;
+    size?: Partial<Size>;
     animated?: boolean;
+    anchorTop?: boolean;
   }): void;
   setLevel(level: "normal" | "floating" | "desktopIcon"): void;
+  orderFront(): void;
   close(): void;
 };
 ```
 
-| Member | Description |
-|---|---|
-| `setTitle(title)` | The window's title: the title bar, the taskbar or Dock, the window switcher. |
-| `setTitleBar(style, height?)` | `"hidden"` removes the system's title bar: the app fills the window up to its top edge and draws a title bar of its own. The system's window controls stay (macOS's traffic lights, Windows' minimize / maximize / close buttons, GTK's window buttons). `height` is your bar's height in points: the controls are centered in it (Windows' caption buttons fill it; on macOS `height` selects compact chrome up to 44 points and regular chrome above; size your bar using the actual height from `titleBar().height`, and AppKit places the traffic lights during live resizing. An embedding app's existing toolbar keeps its own style and height); without it they take the platform's height. `"default"` brings the system's title bar back. |
-| `minimize()` | Minimizes the window. |
-| `toggleMaximize()` | Maximizes the window, or restores it when it is maximized. |
-| `toggleFullScreen()` | Enters or leaves full screen. |
-| `setFrame(frame)` | Moves and sizes the window in points; omitted fields keep their values. On macOS and Windows, `width` and `height` include window decorations; on Linux they set GTK's default window size. `x` and `y` are the bottom left corner in macOS screen coordinates and the top left on Windows. `animated: true` enables macOS's resize animation (default: false). |
-| `setLevel(level)` | On macOS and Windows, `"floating"` keeps the window above normal windows and `"normal"` restores the normal level. `"desktopIcon"` selects macOS's desktop icon level; on Windows it moves the window to the bottom of the current z-order, where later activation can raise it. |
-| `close()` | Closes the window; the app ends with it. |
+The Rust column names the functions of `nsh_core::ui::desktop`.
+
+| Member | Rust | Description |
+|---|---|---|
+| `setTitle(title)` | | The window's title: the title bar, the taskbar or Dock, the window switcher. |
+| `setTitleBar(style, height?)` | `set_title_bar(TitleBarStyle::Hidden, Some(px(height)))` | `"hidden"` removes the system's title bar: the app fills the window up to its top edge and draws a title bar of its own. The system's window controls stay (macOS's traffic lights, Windows' minimize / maximize / close buttons, GTK's window buttons). `height` is your bar's height in points: the controls are centered in it (Windows' caption buttons fill it; on macOS `height` selects compact chrome up to 44 points and regular chrome above; size your bar using the actual height from `titleBar().height`, and AppKit places the traffic lights during live resizing. An embedding app's existing toolbar keeps its own style and height); without it they take the platform's height. `"default"` brings the system's title bar back (Rust: `set_title_bar(TitleBarStyle::Default, None)`). |
+| `minimize()` | | Minimizes the window. |
+| `toggleMaximize()` | | Maximizes the window, or restores it when it is maximized. |
+| `toggleFullScreen()` | | Enters or leaves full screen. |
+| `setFrame(frame)` | | Moves and sizes the window in points; omitted fields keep their values. On macOS and Windows, `size` (`width`, `height`) includes window decorations; on Linux it sets GTK's default window size. `origin` (`x`, `y`) is the bottom left corner in macOS screen coordinates and the top left on Windows. `animated: true` enables macOS's resize animation (default: false). `anchorTop: true` keeps the top edge where it is when `height` changes without a `y`: the window grows and shrinks at its bottom edge. |
+| `setLevel(level)` | | On macOS and Windows, `"floating"` keeps the window above normal windows and `"normal"` restores the normal level. `"desktopIcon"` selects macOS's desktop icon level (the window also sits on every space, out of Mission Control and Cmd+`); on Windows it moves the window to the bottom of the current z-order, where later activation can raise it. |
+| `orderFront()` | | Brings the window to the front of its level and focuses it (the app activates; macOS deminiaturizes, Windows restores minimized windows and sets foreground, GTK presents). The window keeps its level. On macOS, desktop-level surfaces stay behind other windows. GPUI activates its window; the window manager controls foreground requests on Linux. |
+| `close()` | `close_window()` | Closes the window; the app ends with it. |
 
 Window sizing is supported on macOS, Windows and Linux; positioning and levels on macOS and Windows. Linux's window manager controls placement and stacking. GPUI's host configures window bounds and level when opening the window.
+
+Terminal surfaces send `setTitle` through the host's title transport, and `close` closes the app. Their menus use
+terminal overlays: F10 opens the application menu, arrows navigate, Enter or Space selects, and Escape closes it.
 
 When sizing a window from content measured with `onLayout`, allow room for window decorations on macOS and Windows. `width` and `height` accept positive finite numbers; `x` and `y` accept finite numbers. Invalid fields keep their previous values.
 
 ## A title bar of your own
 
-With the title bar hidden, the app draws its own bar and says which parts of it move the window with `desktop={{ windowDrag: true }}`:
+With the title bar hidden, the app draws its own bar and says which parts of it move the window, with `.window_drag(true)` in Rust and `desktop={{ windowDrag: true }}` in TSX:
 
-```tsx
+```rust tabs
+use nsh_core::{
+    desktop::TitleBarStyle,
+    ui::{
+        desktop::{set_title_bar, title_bar},
+        prelude::*,
+    },
+};
+
+#[component]
+fn TitleBar() -> impl IntoElement {
+    set_title_bar(TitleBarStyle::Hidden, Some(px(40.0))); // a bar 40 points tall
+    view()
+        .window_drag(true)
+        .h(move || match title_bar().top {
+            top if top > px(0.0) => top,
+            _ => px(40.0),
+        })
+        .pl(move || title_bar().left + px(8.0)) // macOS's traffic lights
+        .pr(move || title_bar().right + px(8.0)) // the caption buttons on Windows, GTK's buttons
+        .flex_row()
+        .items_center()
+        .child(text("My App"))
+        .child(view().flex_1())
+        .child(input().placeholder("Search").w(px(180.0)))
+}
+```
+
+```tsx tabs
 import { Input, Text, View } from "nsh";
 import { titleBar, Window } from "nsh/desktop";
 
@@ -88,7 +133,7 @@ function TitleBar() {
 
 Pressing a view with `windowDrag` drags the window as the system's title bar would: a double click maximizes it (or does what the user set: on macOS, "Double-click a window's title bar to"), and on Windows and Linux a right click opens the window menu.
 
-- The nearest view that sets `windowDrag` decides: `desktop={{ windowDrag: false }}` keeps a part of a draggable view clickable.
+- The nearest view that sets `windowDrag` decides: `.window_drag(false)` (`desktop={{ windowDrag: false }}`) keeps a part of a draggable view clickable.
 - Text fields and views with press or touch handlers (`onPress`, `onTouch*`, responders) inside a draggable view stay clickable without it: the search field and any buttons in the example above work as usual.
 - `windowDrag` also works with the system's title bar: a sidebar or toolbar can move the window too.
 
@@ -98,7 +143,7 @@ Pressing a view with `windowDrag` drags the window as the system's title bar wou
 const titleBar: Accessor<{ height: number; left: number; right: number }>;
 ```
 
-The hidden title bar's area, in points (reactive): its `height`, and the widths the system's window controls take at its `left` and `right` ends. Lay your bar out with it so that nothing goes under the controls. All three are 0 while the system shows its title bar (and in full screen, and off desktops).
+The hidden title bar's area, in points (reactive): its `height`, and the widths the system's window controls take at its `left` and `right` ends. Lay your bar out with it so that nothing goes under the controls. All three are 0 while the system shows its title bar (and in full screen, and off desktops). Rust: `title_bar() -> Edges<Points>`, whose `top` is the height and `left` and `right` the controls' widths; reading it subscribes to changes.
 
 | | `height` | `left` | `right` |
 |---|---|---|---|
@@ -113,16 +158,16 @@ On Windows the caption buttons are drawn by NSH in Windows 11's style and follow
 ```ts
 const Menu: {
   setApplicationMenu(items: MenuItem[] | null): void;
-  popup(items: MenuItem[], at?: { x: number; y: number }): Promise<void>;
+  popup(items: MenuItem[], at?: Point): Promise<void>;
 };
 ```
 
 | Member | Description |
 |---|---|
 | `setApplicationMenu(items)` | Sets the application menu: one submenu per top-level item (`File`, `Edit`, ...). On macOS it is the menu bar, whose first menu is the app menu (AppKit titles it with the app's name). On Windows and Linux it is the window's menu bar, which is not shown while the title bar is hidden; its shortcuts still work, and a title bar of the app's own can open its menus with `Menu.popup`. `null` restores the platform's default menu. |
-| `popup(items, at?)` | Shows a context menu with its top left corner at `at` (the window's coordinates, in points), or at the pointer. The promise resolves once the menu closes, whether an item was chosen or not: a button that opened it can stay pressed until then. |
+| `popup(items, at?)` | Shows a context menu with its top left corner at `at` (the window's coordinates, in points: an `onContextMenu`'s `e.pagePosition`), or at the pointer. The promise resolves once the menu closes, whether an item was chosen or not: a button that opened it can stay pressed until then. |
 
-Call `setApplicationMenu` again to change the menu. Inside an `effect` it follows the signals it reads: a check mark or an enabled state that depends on app state stays current.
+Call `setApplicationMenu` again to change the menu. Inside an `effect` it follows the signals it reads: a check mark or a disabled state that depends on app state stays current.
 
 ### Menu items
 
@@ -133,7 +178,7 @@ type MenuItem =
       label?: string;
       role?: MenuRole;
       shortcut?: string;
-      enabled?: boolean;
+      disabled?: boolean;
       checked?: boolean;
       onSelect?: () => void;
       submenu?: MenuItem[];
@@ -145,7 +190,7 @@ type MenuItem =
 | `label` | What the item shows. A role's item has a label of its own without it. |
 | `onSelect` | Called when the item is chosen, by a click or its shortcut. |
 | `shortcut` | Its keyboard shortcut: modifiers and one key joined by `+`, such as `"mod+n"`, `"mod+shift+z"`, `"alt+f4"` or `"f11"`. The modifiers are in the table below. Keys are letters, digits and punctuation, written as the character the key types on a US keyboard without Shift (`,`, `/`; `"shift+/"` for `?`), or a name: `plus` (the `=` / `+` key, also `=`), `minus` (also `-`), `space`, `enter` (`return`), `escape` (`esc`), `tab`, `backspace`, `delete` (`del`), `insert`, the arrows `up`, `down`, `left`, `right` (`arrowup`, …), `home`, `end`, `pageup`, `pagedown`, `f1`–`f24`. Case does not matter (`"Mod+Shift+N"` is `"mod+shift+n"`; a capital letter is the same key, not Shift), and lowercase is the recommended style. An invalid shortcut (`"mod-n"`, `"mod++"`, `"mod+?"`) throws an error that gives the right spelling. `nsh/keymap` takes the same keystrokes. Menus show it in the platform's own style (`⇧⌘N` on macOS, `Ctrl+Shift+N` on Windows). |
-| `enabled` | `false` grays the item out (default `true`). |
+| `disabled` | `true` grays the item out (default `false`). |
 | `checked` | Set (to `true` or `false`) for an item with a check mark. |
 | `submenu` | Makes the item a submenu (it needs a `label`). |
 | `role` | A standard item the platform carries out (below). |
@@ -175,14 +220,14 @@ Roles:
 
 A role's item has the platform's label and shortcut unless it sets its own (macOS adds the app's name to `about`, `hide` and `quit`).
 
-Menu shortcuts come first, as in native apps: a key an item takes never reaches the focused text field or NSH's own keys. Only a binding of [`nsh/keymap`](./nsh-keymap) of the same keystroke comes before them. So give the editing shortcuts (`mod+c`, `mod+v`, `mod+x`, `mod+a`, `mod+z`) only to the edit roles, which pass them to the text field, and avoid keys without a modifier (`escape`, the arrows, letters), which would take them from text fields and from back navigation.
+Menu shortcuts come first, as in native apps: a key an item takes never reaches the focused text field or NSH's own keys. Only a binding of [`nsh/keymap`](./nsh-keymap) of the same keystroke comes before them. So give the editing shortcuts (`mod+c`, `mod+v`, `mod+x`, `mod+a`, `mod+z`) only to the edit roles, which pass them to the text field, and avoid keys without a modifier (`escape`, the arrows, letters), which would take them from text fields and from back navigation. On the GPUI backend, a native component with the keyboard focus sees each key first. A key it handles itself never reaches the keymap or the menu. A key it lets through reaches the keymap as if a text field were focused, then the menu.
 
 ```tsx
 import { effect, signal } from "nsh";
-import { Platform } from "nsh/device";
+import { platform } from "nsh/device";
 import { Menu } from "nsh/desktop";
 
-const mac = Platform.OS === "macos";
+const mac = platform.os === "macos";
 const wrap = signal(true);
 
 effect(() => {
