@@ -658,7 +658,7 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     };
     let empty = ACTIVE.with_borrow(|active| active.as_ref().unwrap().model.is_empty());
     let m = event.modifiers;
-    let command = if cfg!(target_os = "macos") {
+    let command = if surface.environment.get().uses_apple_keys() {
         m.meta && !m.ctrl
     } else {
         m.ctrl

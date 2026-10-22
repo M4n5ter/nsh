@@ -446,6 +446,12 @@ impl HasDisplayHandle for TerminalWindow {
 }
 
 impl PlatformWindow for TerminalWindow {
+    #[cfg(windows)]
+    fn get_raw_handle(&self) -> windows::Win32::Foundation::HWND {
+        // This is an offscreen target, not a native Win32 window.
+        windows::Win32::Foundation::HWND::default()
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.borrow().bounds
     }

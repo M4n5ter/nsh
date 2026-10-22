@@ -209,6 +209,13 @@ import -window root -display :170 whole.png        # the display, if the window'
 
 ## Externally presented frames
 
+`nsh-gpui-terminal` embeds the same GPUI scene in terminal hosts on Linux, macOS and Windows.
+It uses WGPU offscreen rendering (Metal on macOS; DirectX 12, Vulkan or GL on Windows)
+and the system fonts. `AppOptions::terminal_keyboard` keeps Control-based shortcuts
+for terminal embeddings while regular macOS windows retain Command shortcuts. The host negotiates the image protocol and real pixel geometry,
+then chooses between pixel presentation and its character renderer before starting the app.
+
+
 An embedding that presents GPUI pixels through a slower output forwards physical pointer, wheel and key input
 through GPUI's ordinary native event dispatch. The surface's existing `events.rs` and `input.rs` handle hit testing,
 focus, editing, capture, scrolling and application callbacks. Focus projections and callbacks reach the engine in

@@ -121,6 +121,8 @@ pub enum AppSource {
 pub struct AppOptions {
     /// Log per-commit timings.
     pub trace: bool,
+    /// Use Control-based terminal shortcuts while retaining graphical rendering.
+    pub terminal_keyboard: bool,
     /// Where bundled assets are (for [`AppSource::Bundle`]); dev servers
     /// serve them themselves.
     pub asset_base: Option<AssetBase>,
@@ -161,6 +163,7 @@ impl Default for AppOptions {
     fn default() -> Self {
         AppOptions {
             trace: false,
+            terminal_keyboard: false,
             asset_base: None,
             app_id: "com.longbridge.nsh.host".to_owned(),
             title: "nsh".to_owned(),
@@ -253,7 +256,10 @@ impl AppView {
         cx.observe_window_activation(window, |_, _, cx| cx.notify())
             .detach();
         bind_keys(cx);
-        let surface = Surface::new(initial_environment());
+        let surface = Surface::new(Environment {
+            terminal_keyboard: options.terminal_keyboard,
+            ..initial_environment()
+        });
         surface.appearance.set(options.appearance);
         if options.fps {
             *surface.stats.borrow_mut() = Some(Default::default());

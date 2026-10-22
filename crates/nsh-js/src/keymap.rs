@@ -88,7 +88,7 @@ fn os(cx: Ctx) -> nsh_core::platform::Os {
 /// the app's OS, or for a browser the platform it runs on. Terminals use Control.
 fn apple(cx: Ctx) -> bool {
     let environment = crate::env::current(cx);
-    environment.renderer != Renderer::Terminal && apple_keys(os(cx), environment.apple_keyboard)
+    !environment.uses_terminal_keyboard() && apple_keys(os(cx), environment.apple_keyboard)
 }
 
 /// The `keymap` object.
@@ -178,7 +178,7 @@ native! {
         let (when, repeat, within) = parse_options(cx, options)?;
         let (os, apple) = (os(cx), apple(cx));
         // A terminal uses the Control-based host shortcuts on every OS.
-        let reserved_os = if crate::env::current(cx).renderer == Renderer::Terminal {
+        let reserved_os = if crate::env::current(cx).uses_terminal_keyboard() {
             Os::Linux
         } else {
             os

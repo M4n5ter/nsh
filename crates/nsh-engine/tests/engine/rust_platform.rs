@@ -439,3 +439,19 @@ fn components_speak_move_the_reader_toast_and_set_the_status_bar() {
     // The reader's focus went to the note's view.
     assert_eq!(focused[0].0, texts["The note"]);
 }
+
+#[test]
+fn rust_graphical_terminal_keyboard_keeps_identity_and_control_shortcuts() {
+    for (terminal_keyboard, label) in [(false, "⌘K"), (true, "Ctrl+K")] {
+        let (_engine, rx, _) = start::<TerminalEnvironment>(Environment {
+            os: Os::MacOs,
+            idiom: Idiom::Desktop,
+            renderer: PlatformRenderer::Native,
+            terminal_keyboard,
+            ..Environment::default()
+        });
+        let shown = format!("macos native false true {label}");
+        let (texts, ..) = until(&rx, &shown);
+        assert!(texts.iter().any(|text| text == &shown), "{texts:?}");
+    }
+}

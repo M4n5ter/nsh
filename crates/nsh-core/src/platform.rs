@@ -187,11 +187,24 @@ pub struct Environment {
     /// Command, labels use ⌘). Only read for [`Os::Web`]; graphical native
     /// backends infer theirs from the OS. Terminals use Control.
     pub apple_keyboard: bool,
+    /// The host receives terminal key sequences, including when its pixels are
+    /// rendered by a graphical backend. Command shortcuts use Control.
+    pub terminal_keyboard: bool,
     /// The user's locale (number and date formats: `Intl`'s default).
     pub locale: Locale,
 }
 
 impl Environment {
+    /// Whether command shortcuts follow terminal Control-key conventions.
+    pub fn uses_terminal_keyboard(&self) -> bool {
+        self.terminal_keyboard || self.renderer == Renderer::Terminal
+    }
+
+    /// Whether command shortcuts follow Apple's Command-key conventions.
+    pub fn uses_apple_keys(&self) -> bool {
+        !self.uses_terminal_keyboard() && crate::keymap::apple_keys(self.os, self.apple_keyboard)
+    }
+
     /// Graphical desktop behavior applies: a desktop OS with a graphical
     /// renderer, or a browser in the desktop idiom (`desktop={{…}}` props,
     /// `platform.select({ desktop })`).
@@ -220,6 +233,7 @@ impl Default for Environment {
             os_version: (0, 0),
             idiom: Idiom::Phone,
             apple_keyboard: false,
+            terminal_keyboard: false,
             locale: Locale::EN_US,
         }
     }
@@ -486,6 +500,22 @@ pub enum FetchOp {
 #[cfg(test)]
 mod tests {
     use super::{Environment, HostEnvironment, Idiom, Locale, Os, Renderer};
+
+    #[test]
+    fn graphical_terminal_input_retains_control_shortcuts_on_apple_hosts() {
+        let desktop = Environment {
+            os: Os::MacOs,
+            ..Default::default()
+        };
+        assert!(desktop.uses_apple_keys());
+        let terminal = Environment {
+            terminal_keyboard: true,
+            ..desktop
+        };
+        assert!(!terminal.uses_apple_keys());
+        assert_eq!(terminal.renderer, desktop.renderer);
+        assert_eq!(terminal.os, Os::MacOs);
+    }
 
     #[test]
     fn renderer_separates_terminal_from_graphical_desktop_behavior() {

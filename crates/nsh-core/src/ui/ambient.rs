@@ -703,7 +703,7 @@ pub struct KeyOptions {
 fn apple_keys() -> bool {
     let (os, apple, terminal) = with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
-        .with_untracked(|e| (e.os, e.apple_keyboard, e.renderer == Renderer::Terminal));
+        .with_untracked(|e| (e.os, e.apple_keyboard, e.uses_terminal_keyboard()));
     !terminal && crate::keymap::apple_keys(os, apple)
 }
 
@@ -733,8 +733,11 @@ pub fn on_key_with(keystroke: &str, options: KeyOptions, handler: impl Fn(&str) 
     let os = os();
     let parsed = crate::keymap::Keystroke::parse_with(keystroke, apple_keys())
         .unwrap_or_else(|e| panic!("on_key: {e}"));
+    let terminal_keyboard = with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
+        .expect("the core sets the environment")
+        .with_untracked(|e| e.uses_terminal_keyboard());
     // A terminal uses the Control-based host shortcuts on every OS.
-    if let Some(why) = parsed.reserved(if is_terminal() { Os::Linux } else { os }) {
+    if let Some(why) = parsed.reserved(if terminal_keyboard { Os::Linux } else { os }) {
         panic!("on_key: {keystroke:?} cannot be bound: {why}");
     }
     let owner = Owner::current();

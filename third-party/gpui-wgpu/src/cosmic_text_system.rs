@@ -19,6 +19,7 @@ use swash::{
     scale::{Render, ScaleContext, Source, StrikeWith},
     zeno::{Format, Vector},
 };
+use unicode_properties::{UnicodeEmoji, emoji::EmojiStatus};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub struct CosmicTextSystem(RwLock<CosmicTextSystemState>);
@@ -130,6 +131,25 @@ impl CosmicTextSystem {
 
     pub fn new(system_font_fallback: &str) -> Self {
         let font_system = FontSystem::new();
+        // A headless host may run without the preferred desktop family.
+        // Resolve its default against the fonts actually loaded on this machine.
+        let database = font_system.db();
+        let default_face = database
+            .query(&cosmic_text::fontdb::Query {
+                families: &[Family::Name(system_font_fallback), Family::SansSerif],
+                ..Default::default()
+            })
+            .and_then(|id| database.face(id))
+            .or_else(|| {
+                database.faces().find(|face| {
+                    !face.monospaced && !check_is_known_emoji_font(&face.post_script_name)
+                })
+            })
+            .or_else(|| database.faces().next());
+        let system_font_fallback = default_face
+            .and_then(|face| face.families.first())
+            .map(|(family, _)| family.clone())
+            .unwrap_or_else(|| system_font_fallback.to_owned());
 
         Self(RwLock::new(CosmicTextSystemState {
             font_system,
@@ -139,7 +159,7 @@ impl CosmicTextSystem {
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             font_ids_by_family_cache: HashMap::default(),
-            system_font_fallback: system_font_fallback.to_string(),
+            system_font_fallback,
             missing_glyph_sink: None,
         }))
     }
@@ -697,6 +717,11 @@ impl CosmicTextSystemState {
         font_runs: &[FontRun],
     ) -> LineLayout {
         let mut attrs_list = AttrsList::new(&Attrs::new());
+        let emoji_font = text
+            .graphemes(true)
+            .any(prefers_color_emoji)
+            .then(|| self.color_emoji_font())
+            .flatten();
         let mut offs = 0;
         for run in font_runs {
             let run_end = offs + run.len;
@@ -741,6 +766,26 @@ impl CosmicTextSystemState {
                     Some(ix) => &fallback_attrs[ix],
                 };
                 attrs_list.add_span(span.start..span.end, attrs);
+            }
+            if let Some((emoji_id, emoji_properties)) = &emoji_font {
+                for (index, grapheme) in text[offs..run_end].grapheme_indices(true) {
+                    if prefers_color_emoji(grapheme)
+                        && grapheme
+                            .chars()
+                            .next()
+                            .is_some_and(|base| charmap_covers(&self.loaded_fonts, *emoji_id, base))
+                    {
+                        // Font fallback only replaces missing glyphs. A text face can
+                        // cover emoji with an outline, so select the color face for
+                        // the whole presentation cluster before shaping.
+                        attrs_list.add_span(
+                            offs + index..offs + index + grapheme.len(),
+                            &emoji_properties
+                                .attributes(*emoji_id, &emoji_properties.primary_family_name)
+                                .font_features(properties.features.clone()),
+                        );
+                    }
+                }
             }
             offs = run_end;
         }
@@ -846,6 +891,24 @@ impl CosmicTextSystemState {
             runs,
             len: text.len(),
         }
+    }
+
+    fn color_emoji_font(&mut self) -> Option<(FontId, FontMatchProperties)> {
+        let database_id = self
+            .loaded_fonts
+            .iter()
+            .find(|font| font.is_known_emoji_font)
+            .map(|font| font.font.id())
+            .or_else(|| {
+                self.font_system
+                    .db()
+                    .faces()
+                    .find(|face| check_is_known_emoji_font(&face.post_script_name))
+                    .map(|face| face.id)
+            })?;
+        let id = self.font_id_for_cosmic_id(database_id).ok()?;
+        self.font_match_properties(id)
+            .map(|properties| (id, properties))
     }
 
     fn missing_glyphs(
@@ -1200,8 +1263,31 @@ fn face_info_into_properties(
 }
 
 fn check_is_known_emoji_font(postscript_name: &str) -> bool {
-    // TODO: Include other common emoji fonts
-    postscript_name == "NotoColorEmoji"
+    matches!(
+        postscript_name,
+        "NotoColorEmoji" | "AppleColorEmoji" | "SegoeUIEmoji"
+    )
+}
+
+fn prefers_color_emoji(grapheme: &str) -> bool {
+    let Some(base) = grapheme.chars().next() else {
+        return false;
+    };
+    if grapheme.contains('\u{fe0e}') {
+        return false;
+    }
+    if !base.is_emoji_char() {
+        return false;
+    }
+    grapheme.contains('\u{fe0f}')
+        || grapheme.contains('\u{20e3}')
+        || matches!(
+            base.emoji_status(),
+            EmojiStatus::EmojiPresentation
+                | EmojiStatus::EmojiPresentationAndModifierBase
+                | EmojiStatus::EmojiPresentationAndEmojiComponent
+                | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+        )
 }
 
 #[cfg(test)]

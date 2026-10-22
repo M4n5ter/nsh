@@ -45,6 +45,8 @@ pub struct Environment {
     /// conventions ([`crate::keymap::apple_keys`]); graphical native
     /// backends infer theirs from the OS. Terminals use Control.
     pub apple_keyboard: bool,
+    /// The host receives terminal key sequences, even with graphical rendering.
+    pub terminal_keyboard: bool,
 }
 
 impl Default for Environment {
@@ -67,6 +69,14 @@ impl Default for Environment {
             idiom: Idiom::Phone,
             locale: Locale::EN_US,
             apple_keyboard: false,
+            terminal_keyboard: false,
         }
+    }
+}
+
+impl Environment {
+    /// Whether command shortcuts use terminal Control-key conventions.
+    pub fn uses_terminal_keyboard(&self) -> bool {
+        self.terminal_keyboard || self.renderer == Renderer::Terminal
     }
 }

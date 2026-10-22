@@ -3369,6 +3369,7 @@ dependencies = [
  "smallvec",
  "swash",
  "unicode-bidi",
+ "unicode-properties",
  "unicode-segmentation",
  "web-sys",
  "wgpu",
@@ -5279,6 +5280,7 @@ dependencies = [
  "image",
  "log",
  "raw-window-handle",
+ "windows 0.62.2",
 ]
 
 [[package]]

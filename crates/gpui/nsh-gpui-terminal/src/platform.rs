@@ -64,6 +64,8 @@ pub struct TerminalPlatform {
     error: RefCell<Option<String>>,
     clipboard: RefCell<Option<ClipboardItem>>,
     clipboard_write: RefCell<Option<ClipboardItem>>,
+    #[cfg(target_os = "macos")]
+    find_pasteboard: RefCell<Option<ClipboardItem>>,
     menus: RefCell<Vec<OwnedMenu>>,
     cursor: Cell<CursorStyle>,
     cursor_visible: Cell<bool>,
@@ -83,7 +85,15 @@ impl TerminalPlatform {
             background: BackgroundExecutor::new(dispatcher.clone()),
             foreground: ForegroundExecutor::new(dispatcher.clone()),
             dispatcher,
-            text: Arc::new(gpui_wgpu::CosmicTextSystem::new("DejaVu Sans")),
+            text: Arc::new(gpui_wgpu::CosmicTextSystem::new(
+                if cfg!(target_os = "macos") {
+                    "Helvetica"
+                } else if cfg!(windows) {
+                    "Segoe UI"
+                } else {
+                    "DejaVu Sans"
+                },
+            )),
             resources: RefCell::new(Some((renderer, sink))),
             window: RefCell::new(None),
             callbacks: RefCell::new(Callbacks::default()),
@@ -93,6 +103,8 @@ impl TerminalPlatform {
             error: RefCell::new(None),
             clipboard: RefCell::new(None),
             clipboard_write: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            find_pasteboard: RefCell::new(None),
             menus: RefCell::new(Vec::new()),
             cursor: Cell::new(CursorStyle::Arrow),
             cursor_visible: Cell::new(true),
@@ -448,10 +460,20 @@ impl Platform for TerminalPlatform {
         *self.clipboard_write.borrow_mut() = Some(item);
         (self.wake)();
     }
+    #[cfg(target_os = "linux")]
     fn read_from_primary(&self) -> Option<ClipboardItem> {
         None
     }
+    #[cfg(target_os = "linux")]
     fn write_to_primary(&self, _: ClipboardItem) {}
+    #[cfg(target_os = "macos")]
+    fn read_from_find_pasteboard(&self) -> Option<ClipboardItem> {
+        self.find_pasteboard.borrow().clone()
+    }
+    #[cfg(target_os = "macos")]
+    fn write_to_find_pasteboard(&self, item: ClipboardItem) {
+        *self.find_pasteboard.borrow_mut() = Some(item);
+    }
     fn write_credentials(&self, _: &str, _: &str, _: &[u8]) -> Task<Result<()>> {
         Task::ready(Err(anyhow!("terminal GPUI has no OS credential store")))
     }
@@ -511,6 +533,98 @@ mod tests {
                 wake.fetch_add(1, Ordering::SeqCst);
             }),
         )?;
+        // Resolve the same default font descriptor used by GPUI views, then
+        // exercise system fallback rather than assuming a Linux font exists.
+        let text = platform.text_system();
+        let font_id = text.font_id(&gpui::font(".SystemUIFont"))?;
+        assert!(text.glyph_for_char(font_id, 'M').is_some());
+        let has_color_emoji = text.all_font_names().iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "Apple Color Emoji" | "Segoe UI Emoji" | "Noto Color Emoji"
+            )
+        });
+        let sample = if has_color_emoji { "Maka 🐱" } else { "Maka" };
+        let line = text.layout_line(
+            sample,
+            px(16.0),
+            &[gpui::FontRun {
+                len: sample.len(),
+                font_id,
+            }],
+        );
+        assert!(line.width > px(0.0));
+        assert!(
+            line.runs
+                .iter()
+                .flat_map(|run| &run.glyphs)
+                .all(|glyph| glyph.id.0 != 0)
+        );
+        if has_color_emoji {
+            assert!(
+                line.runs
+                    .iter()
+                    .flat_map(|run| &run.glyphs)
+                    .any(|glyph| glyph.is_emoji)
+            );
+        }
+        for run in &line.runs {
+            for glyph in run.glyphs.iter().filter(|glyph| glyph.is_emoji) {
+                let params = gpui::RenderGlyphParams {
+                    font_id: run.font_id,
+                    glyph_id: glyph.id,
+                    font_size: px(16.0),
+                    subpixel_variant: point(0, 0),
+                    scale_factor: 1.0,
+                    is_emoji: true,
+                    subpixel_rendering: false,
+                    dilation: 0,
+                };
+                let bounds = text.glyph_raster_bounds(&params)?;
+                let (size, pixels) = text.rasterize_glyph(&params, bounds)?;
+                assert!(size.width.0 > 0 && size.height.0 > 0);
+                assert!(pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
+            }
+        }
+        if has_color_emoji {
+            for sample in ["©\u{fe0f}", "👩🏽‍💻", "1\u{fe0f}\u{20e3}"] {
+                let line = text.layout_line(
+                    sample,
+                    px(16.0),
+                    &[gpui::FontRun {
+                        len: sample.len(),
+                        font_id,
+                    }],
+                );
+                assert!(line.width > px(0.0), "{sample}");
+                assert!(!line.runs.is_empty(), "{sample}");
+                assert!(
+                    line.runs
+                        .iter()
+                        .flat_map(|run| &run.glyphs)
+                        .all(|glyph| glyph.id.0 != 0 && glyph.is_emoji),
+                    "the whole presentation cluster must use the color font: {sample}"
+                );
+            }
+        }
+        for sample in ["©", "©\u{fe0e}"] {
+            let line = text.layout_line(
+                sample,
+                px(16.0),
+                &[gpui::FontRun {
+                    len: sample.len(),
+                    font_id,
+                }],
+            );
+            assert!(line.width > px(0.0), "{sample}");
+            assert!(
+                line.runs
+                    .iter()
+                    .flat_map(|run| &run.glyphs)
+                    .all(|glyph| glyph.id.0 != 0 && !glyph.is_emoji),
+                "default text and explicit VS15 must retain the text font: {sample}"
+            );
+        }
         let presses = Rc::new(Cell::new(0));
         let pressed = presses.clone();
         let window = Rc::new(RefCell::new(None));

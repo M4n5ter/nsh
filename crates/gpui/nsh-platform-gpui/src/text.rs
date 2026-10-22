@@ -2819,7 +2819,7 @@ pub(crate) fn key(surface: &Rc<crate::surface::Surface>, event: &crate::input::K
         return false;
     };
     let m = event.modifiers;
-    let command = if cfg!(target_os = "macos") {
+    let command = if surface.environment.get().uses_apple_keys() {
         m.meta && !m.ctrl
     } else {
         m.ctrl

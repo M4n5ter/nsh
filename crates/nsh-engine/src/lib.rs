@@ -2251,6 +2251,7 @@ fn ui_environment(env: &Environment, window: Size<Points>) -> nsh_core::ui::Envi
         idiom: env.idiom,
         locale: env.locale,
         apple_keyboard: env.apple_keyboard,
+        terminal_keyboard: env.terminal_keyboard,
     }
 }
 
