@@ -1454,7 +1454,7 @@ impl Surface {
             path,
             px(if horizontal { 1.0 } else { 0.0 }),
             px(if horizontal { 0.0 } else { 1.0 }),
-            |id| axis(id),
+            axis,
             |id| axis(id).is_some(),
         )
     }
