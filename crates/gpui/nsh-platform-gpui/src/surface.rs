@@ -610,7 +610,7 @@ impl Surface {
         let mut focus_return = crate::focus_return::before_batch(self, batch);
         crate::access::prepare(batch);
         for item in &batch.items {
-            if let MountItem::Remove { id } = item
+            if let MountItem::Remove { id } | MountItem::Delete { id } = item
                 && let Some(root) = self.view(*id)
             {
                 crate::focus_return::retire_before(focus_return.as_mut(), &root);

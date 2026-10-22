@@ -2916,10 +2916,14 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_held_press_owner_cancels_after_its_hit_child_moves() {
+    fn retiring_a_held_press_owner_cancels_after_its_hit_child_moves() {
         use nsh_core::{MountItem, ViewKind};
 
-        for remove_owner in [false, true] {
+        for retirement in [
+            None,
+            Some(MountItem::Remove { id: 2 }),
+            Some(MountItem::Delete { id: 2 }),
+        ] {
             let surface = Surface::new(nsh_engine::Environment::default());
             surface.root.state_mut().frame = rect(0.0, 0.0, 400.0, 400.0);
             for (id, parent, frame) in [
@@ -2973,13 +2977,11 @@ mod tests {
                 },
             );
             // The hit child moved away, but the original press is still held
-            // by A. Removing A must revoke it before Up can fire press_out.
+            // by A. Removing or deleting A must revoke it before Up can
+            // fire press_out.
             assert_eq!(surface.input.pointers.borrow().len(), 1);
-            if remove_owner {
-                surface
-                    .mounter
-                    .borrow_mut()
-                    .apply(&surface, &MountItem::Remove { id: 2 });
+            if let Some(item) = retirement {
+                surface.mounter.borrow_mut().apply(&surface, &item);
                 assert!(surface.input.pointers.borrow().is_empty());
                 assert_eq!(owner.state().states & PRESSED, 0);
             } else {

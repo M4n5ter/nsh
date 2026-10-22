@@ -97,6 +97,12 @@ impl Mounter {
     }
 
     pub(crate) fn apply(&mut self, surface: &Rc<Surface>, item: &MountItem) {
+        if let MountItem::Remove { id } | MountItem::Delete { id } = item
+            && let Some(view) = self.views.get(*id)
+        {
+            crate::focus_return::retiring(surface, &view);
+            crate::input::retire_focus_within(surface, &view);
+        }
         match item {
             MountItem::Create { id, kind } => {
                 let view = NshView::new(*id, *kind);
@@ -149,8 +155,6 @@ impl Mounter {
             }
             MountItem::Remove { id } => {
                 if let Some(view) = &self.get(*id) {
-                    crate::focus_return::retiring(surface, view);
-                    crate::input::retire_focus_within(surface, view);
                     crate::navigation::removing(surface, view);
                     // A removal animation detaches the view when it ends.
                     if !crate::transition::removing(surface, view, self.layout_animation.as_ref()) {
