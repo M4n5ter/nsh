@@ -2223,7 +2223,7 @@ mod tests {
             f.borrow_mut().insert(
                 key,
                 Focus {
-                    view: Some(view),
+                    target: Some(FocusTarget::View(view)),
                     inactive: false,
                 },
             )
