@@ -40,11 +40,14 @@ submission/completion path; invalid destinations are rejected before submission.
 
 The renderer reuses its GPU target and a single cached, unmapped same-size
 staging allocation. Cache exchange never holds its lock through GPU work or
-pixel copying. Dropped tickets, mapping failures and timeouts cancel mapping
-and discard their allocation; only successful completion returns an unmapped
-buffer to the cache. Success does not establish terminal publication or a
-frame-rate guarantee. Adapter policy is unchanged, and diagnostics distinguish
-a software-emulated device.
+pixel copying. Dropped tickets, mapping failures and timeouts release the
+uncached buffer's last native handle, which cancels pending or active mapping.
+That native cleanup also accepts idle buffers after a failed mapping; an extra
+public `unmap` on an idle buffer would instead report an error. Only successful
+completion explicitly unmaps once and returns the allocation to the cache.
+Cached allocations have no custom unmap-on-drop behavior. Success does not
+establish terminal publication or a frame-rate guarantee. Adapter policy is
+unchanged, and diagnostics distinguish a software-emulated device.
 
 The archive omitted upstream's WGSL-validation test dev dependency; the local
 manifest restores Naga at the backend's exact 30.0.1 version with `wgsl-in`.

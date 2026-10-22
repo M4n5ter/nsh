@@ -2340,26 +2340,13 @@ impl HeadlessRenderTarget {
         feature = "offscreen"
     )
 ))]
+// The last native wgpu Buffer handle cancels pending/active mapping on drop.
+// Cached buffers are already unmapped; another public unmap would report an
+// Idle NotMapped error. Keep this allocation free of custom Drop behavior.
 struct HeadlessReadback {
     buffer: wgpu::Buffer,
     size: Size<DevicePixels>,
     padded_bytes_per_row: u32,
-}
-
-#[cfg(all(
-    not(target_family = "wasm"),
-    any(
-        test,
-        feature = "bench-support",
-        feature = "test-support",
-        feature = "offscreen"
-    )
-))]
-impl Drop for HeadlessReadback {
-    fn drop(&mut self) {
-        // Cancels even a pending map when its submitted frame is discarded.
-        self.buffer.unmap();
-    }
 }
 
 /// An owned GPU submission awaiting readback, independent of its renderer.
