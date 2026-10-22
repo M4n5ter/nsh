@@ -53,37 +53,6 @@ impl HintWatchToken {
     }
 }
 
-/// The outside-press observation and inside witness mounted by one Core.
-/// This grants no application callback authority. Only a path carrying an
-/// inside witness for every current outside watcher may suppress observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub struct PressWatchToken {
-    cohort: u64,
-    relation: u64,
-    inside: bool,
-}
-
-impl PressWatchToken {
-    pub(crate) fn new(cohort: u64, relation: u64, inside: bool) -> Self {
-        Self {
-            cohort,
-            relation,
-            inside,
-        }
-    }
-
-    /// These observations belong to the same unchanged outside-watcher set.
-    pub fn same_cohort(self, other: Self) -> bool {
-        self.cohort != 0 && self.cohort == other.cohort
-    }
-
-    /// A press below this node is inside every watcher in this cohort.
-    pub fn is_inside(self) -> bool {
-        self.cohort != 0 && self.inside
-    }
-}
-
 /// What an overlay is placed against (`anchor`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum OverlayAnchor {

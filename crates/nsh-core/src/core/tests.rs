@@ -12706,21 +12706,7 @@ fn overlays_hear_presses_outside_and_cancel_from_the_top() {
 }
 
 #[test]
-fn outside_press_witnesses_preserve_callbacks_and_retire_changed_inside_relations() {
-    fn mask(batch: &MountBatch, id: NodeId) -> crate::EventMask {
-        batch
-            .items
-            .iter()
-            .rev()
-            .find_map(|item| match item {
-                MountItem::Events {
-                    id: mounted,
-                    events,
-                } if *mounted == id => Some(*events),
-                _ => None,
-            })
-            .expect("the changed overlay watch must remount its facts")
-    }
+fn nested_overlays_report_outside_presses_from_the_native_touch_path() {
     let mut c = core();
     c.set_environment(crate::ui::Environment {
         os: crate::platform::Os::Linux,
@@ -12748,92 +12734,16 @@ fn outside_press_witnesses_preserve_callbacks_and_retire_changed_inside_relation
                 event: EventKind::PressOutside,
                 enabled: true,
             },
+            Op::Listen {
+                id: 6,
+                event: EventKind::PressOutside,
+                enabled: true,
+            },
         ],
     );
-    let original = c.commit().unwrap();
-    let popup = mask(&original, 4);
-    let anchor = mask(&original, 2).press_watch().unwrap();
-    let root = mask(&original, ROOT_ID).press_watch().unwrap();
-    assert!(!root.is_inside());
-    for id in [2, 4, 6] {
-        let events = mask(&original, id);
-        assert!(events.contains_listener(EventKind::Touch));
-        let token = events.press_watch().unwrap();
-        assert!(token.same_cohort(root) && token.is_inside());
-    }
-
-    // A real responder is never disguised as a native outside observation.
-    apply(
-        &mut c,
-        vec![Op::Listen {
-            id: 4,
-            event: EventKind::Touch,
-            enabled: true,
-        }],
-    );
-    let actual_touch = mask(&c.commit().unwrap(), 4);
-    assert!(actual_touch.contains_listener(EventKind::Touch));
-    assert!(actual_touch.press_watch().is_none());
-    assert!(((popup | actual_touch) | popup).press_watch().is_none());
-    assert!((popup | (actual_touch | popup)).press_watch().is_none());
-    apply(
-        &mut c,
-        vec![Op::Listen {
-            id: 4,
-            event: EventKind::Touch,
-            enabled: false,
-        }],
-    );
-    let restored = mask(&c.commit().unwrap(), 4);
-    assert!(restored.press_watch().unwrap().same_cohort(root));
-    assert_ne!(restored.press_watch(), popup.press_watch());
-
-    // A newly shown callback-free hint does not replace the outside owners.
-    add(&mut c, 8, Tag::Overlay, 2, &[]);
-    apply(
-        &mut c,
-        vec![
-            overlay_prop(8, crate::OverlayProp::Hint(Some(std::time::Duration::ZERO))),
-            overlay_prop(8, crate::OverlayProp::Open(Some(true))),
-        ],
-    );
-    let hint = c.commit().unwrap();
-    assert_eq!(mask(&hint, 2).press_watch(), Some(anchor));
-    assert!(mask(&hint, 2).hint_watch().is_some());
-    assert!(!mask(&hint, 2).contains_listener(EventKind::HoverIn));
-    assert!(
-        !hint
-            .items
-            .iter()
-            .any(|item| matches!(item, MountItem::Events { id: ROOT_ID, .. }))
-    );
-
-    // A nested outside listener makes its parent popup an outside region.
-    apply(
-        &mut c,
-        vec![Op::Listen {
-            id: 6,
-            event: EventKind::PressOutside,
-            enabled: true,
-        }],
-    );
-    let nested = c.commit().unwrap();
-    let nested_root = mask(&nested, ROOT_ID).press_watch().unwrap();
-    assert!(!root.same_cohort(nested_root));
-    assert!(!mask(&nested, 4).press_watch().unwrap().is_inside());
-    assert!(mask(&nested, 6).press_watch().unwrap().is_inside());
-    let nested_popup = mask(&nested, 6);
-    assert!(
-        ((popup | nested_popup) | nested_popup)
-            .press_watch()
-            .is_none()
-    );
-    assert!(
-        (popup | (nested_popup | nested_popup))
-            .press_watch()
-            .is_none()
-    );
+    c.commit();
     js_events(&mut c);
+    // A press in the parent popup is outside only the nested one.
     for (path, expected) in [
         (vec![4, ROOT_ID], vec![6]),
         (vec![6, ROOT_ID], vec![]),
@@ -12847,8 +12757,7 @@ fn outside_press_witnesses_preserve_callbacks_and_retire_changed_inside_relation
         assert_eq!(outside, expected);
     }
 
-    // Native overlays remain root siblings; logical reparenting still retires
-    // the old inside proof even when these native parent IDs do not change.
+    // Native overlays remain root siblings after their logical parent moves.
     add(&mut c, 10, Tag::View, ROOT_ID, &[]);
     apply(
         &mut c,
@@ -12864,13 +12773,14 @@ fn outside_press_witnesses_preserve_callbacks_and_retire_changed_inside_relation
             },
         ],
     );
-    let moved = c.commit().unwrap();
-    assert!(
-        !mask(&moved, ROOT_ID)
-            .press_watch()
-            .unwrap()
-            .same_cohort(nested_root)
-    );
+    c.commit();
+    js_events(&mut c);
+    c.component_event(ROOT_ID, EventKind::Touch, &touch_down(vec![4, ROOT_ID]));
+    let outside: Vec<_> = js_events(&mut c)
+        .into_iter()
+        .filter_map(|(id, kind, _)| (kind == EventKind::PressOutside).then_some(id))
+        .collect();
+    assert_eq!(outside, [6]);
 }
 
 #[test]

@@ -453,15 +453,8 @@ impl Node {
     /// presses (React Native's `Pressable` / touchables), so it shows no
     /// press feedback either, and opens no context menu: a secondary click
     /// on it goes on to the nearest enabled listener around it.
-    fn mounted_events(
-        &self,
-        hint_watch: Option<crate::overlay::HintWatchToken>,
-        press_watch: Option<crate::overlay::PressWatchToken>,
-    ) -> EventMask {
+    fn mounted_events(&self, hint_watch: Option<crate::overlay::HintWatchToken>) -> EventMask {
         let mut events = self.events;
-        let passive_press = press_watch.is_some()
-            && !events.contains_listener(EventKind::Touch)
-            && self.overlay_watched & overlay::watch::HINT_CALLBACK == 0;
         let passive_hint =
             self.overlay_watched & overlay::watch::HINT_CALLBACK == 0 && hint_watch.is_some();
         if self.overlay_watched & overlay::watch::PRESS != 0
@@ -473,9 +466,6 @@ impl Node {
                 EventKind::Touch,
                 hint_watch.expect("the passive hint watch"),
             );
-        }
-        if passive_press && self.overlay_watched & overlay::watch::PRESS != 0 {
-            events.watch_press(press_watch.expect("the native press watch"));
         }
         if self.states & crate::tailwind::state::DISABLED != 0 {
             for e in DISABLED_OFF {
@@ -3453,11 +3443,6 @@ impl<M: TextEngine> Core<M> {
                             .iter()
                             .find(|watch| watch.key == key)
                             .and_then(|watch| watch.token),
-                        self.overlay_state
-                            .watched
-                            .iter()
-                            .find(|watch| watch.key == key)
-                            .and_then(|watch| watch.press),
                     ),
                 });
             }

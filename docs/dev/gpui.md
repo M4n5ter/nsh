@@ -202,42 +202,28 @@ import -window root -display :170 whole.png        # the display, if the window'
 
 ## Externally presented frames
 
-An embedding that presents GPUI pixels through a slower output obtains an `InputSource` from
-`AppView::input_source`. Sample it inside the actual draw callback and pair that `InputSnapshot` with the same
-draw's pixels. The output writer publishes the pair after its successful presentation. The embedding keeps a
-bounded frame-token table until queued input releases each snapshot; unknown and retired tokens are rejected.
-Snapshots stay on the GPUI thread and retain native view identities and immutable hit geometry.
+An embedding that presents GPUI pixels through a slower output forwards physical pointer, wheel and key input
+through GPUI's ordinary native event dispatch. The surface's existing `events.rs` and `input.rs` handle hit testing,
+focus, editing, capture, scrolling and application callbacks. Focus projections and callbacks reach the engine in
+their existing FIFO order. Terminal input follows this same route as window input, independently of output
+completion or presentation receipts.
 
 For Kitty output, `nsh-gpui-terminal::kitty::KittyFrame::wire` contains one complete `q=1` upload followed by
 retirement of the old owned image. The sole output owner writes and flushes the whole wire indivisibly before
-publishing its native input snapshot with `mark_presented`. Success replies do not gate publication; the sole
-reader ends the graphics session on any negative reply for either owned slot, including a late error. The
-independent capability query still requires its own positive reply. A completed flush does not prove display vsync.
+recording completion with `mark_presented`. Frame tokens and this receipt identify output for diagnostics; they do
+not authorize or delay input. Success replies do not gate this receipt; the sole reader ends the graphics session
+on any negative reply for either owned slot, including a late error. The independent capability query still
+requires its own positive reply. A completed flush does not prove display vsync.
 
 Home and End stay on the nearest enabled Scroll containing the native focus, including when it is already at that
 edge or its content fits. Editors retain their own Home and End behavior. Arrow keys, page keys and wheels keep
 their existing scroll chaining.
 
-`InputSource::dispatch` routes an ordinary sealed press, discrete wheel or native key to its original owner. A wheel
-remains on that Scroll as its offset or content changes, including a zero-distance edge clamp. Keys retain their
-original native focus, ancestry, modal scope and keymap registration while unrelated pixels change. They use the
-existing native key route in order: typing then Return submits the Input's current text. A focused button's
-Return/Space retains its original `inputAction`; replacing the owner or winning binding rejects the old key.
-Selection ranges can change within the same text or SelectionArea owner. KeyUp releases the same surface/load's
-held key even when its KeyDown moved focus. Hosted controls, opaque window overrides and routes without a native
-focus owner or matching binding still require exact pixels. Stable keymap registrations keep their ordinary live
-handler semantics; an app that must retain a specific business target should capture it in an `inputAction` and
-rebind when it changes. `ExactFallback`
-requires the embedding's exact-frame GPUI path; `Rejected` never falls back. `cancel_capture` clears a leased
-pointer without callbacks when the embedding loses it. `editor_matches` only permits the original Input while it
-retains native and window focus. Use this AppView's existing text/paste handler immediately after the check, without
-another dispatch or pump. The query does not authorize KeyDown callbacks or keymap commands.
-
-On a physical mouse release, leave, focus loss or resize, an embedding that owns that reader can call
-`cancel_pointer` to end the existing NSH native capture and hover, including an Input selection or Scroll thumb.
-It silently forgets that contact in the original engine; it does not deliver an application responder-terminate
-callback. It does not pick a replacement owner or synthesize pointer coordinates. Registered GPUI components
-retain their own GPUI capture lifecycle. Rejecting a foreign frame alone does not authorize this cancellation.
+Typing then Return uses the existing native key route to submit the Input's current text. Physical pointer
+release, leave, focus loss and resize follow the native capture lifecycle, including an Input selection or Scroll
+thumb. Popovers and other overlays report outside presses through the normal Touch path and the core's current
+overlay hierarchy. Native tooltip observations continue through their existing engine FIFO without changing
+application callback subscriptions.
 
 ## Frame statistics: `--fps`
 
