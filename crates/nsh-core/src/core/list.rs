@@ -635,7 +635,7 @@ impl ListState {
     /// A parent-viewport list already arranged this owner correction.
     pub(super) fn anchor_by(&mut self, by: f32) {
         self.offset += by;
-        if let Some(Pin::Reading { at, .. }) = &mut self.pin {
+        if let Some(Pin::Following { at, .. } | Pin::Reading { at, .. }) = &mut self.pin {
             *at += by;
         }
         self.dirty = true;
@@ -1878,6 +1878,19 @@ mod tests {
         l.pin(Some(PinTarget::End), 4650.0, false, false);
         l.splice(0, 1, 0);
         assert!(!l.pinned());
+
+        // Forwarded relative correction shifts a running native animation's
+        // destination too; the owner must not retarget that same change.
+        let mut l = list(100, 50.0, 400.0);
+        l.pin(Some(PinTarget::End), 4600.0, true, false);
+        l.issue_scroll_to(4600.0);
+        l.measured(99, 70.0);
+        l.anchor_by(20.0);
+        l.issue_scroll_by(20.0);
+        assert_eq!(l.follow_pin(0.0), Follow::Stay);
+        l.reported(4620.0, 2);
+        l.measured(98, 60.0);
+        assert_eq!(l.follow_pin(0.0), Follow::By(10.0));
     }
 
     /// A list in its parent's viewport, 100 rows of 50, starting `start`
