@@ -12,6 +12,7 @@ use gpui::{
     AnyElement, App as GpuiApp, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     Styled, TestAppContext, VisualTestContext, Window, div,
 };
+use nsh_engine::Root;
 
 use crate::{App, AppOptions, AppView, Bundle, NativeComponent};
 
