@@ -777,6 +777,154 @@ pub(crate) fn flush_all(cx: &mut gpui::App) {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "js")]
+    #[gpui::test]
+    fn real_popover_inside_action_keeps_its_native_route_after_hover(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::time::{Duration, Instant};
+
+        use crate::{
+            InputDisposition, InputSource,
+            input::{PointerEvent, PointerKind},
+        };
+
+        const APP: &str = r#"
+            import { mount, signal, inputAction, View, Text } from 'nsh';
+            import { Popover, Button } from 'nsh/base';
+            const inside = signal(0);
+            const outside = signal(0);
+            const increment = () => inside.set(inside() + 1);
+            mount(() => View({style: {flex: 1}, children: [
+                Popover({open: true, popupStyle: {width: 240},
+                    onOpenChange: next => { if (!next) outside.set(outside() + 1); },
+                    trigger: Button({accessibilityLabel: 'Open popup',
+                        style: {width: 160, height: 40}, children: Text({children: 'Open popup'})}),
+                    children: Button({accessibilityLabel: 'Inside action', tooltip: 'Inside hint',
+                        onPress: inputAction(increment, null), style: {width: 200, height: 48},
+                        hoverStyle: {backgroundColor: '#334455'}, children: Text({children: 'Inside action'})})}),
+                Text({get accessibilityLabel() { return `Inside count ${inside()}`; }, children: () => `Inside count ${inside()}`}),
+                Text({get accessibilityLabel() { return `Outside count ${outside()}`; }, children: () => `Outside count ${outside()}`})
+            ]}));
+        "#;
+        fn target(view: &NshView, label: &str) -> Option<NshView> {
+            if view.state().props.accessibility.label.as_deref() == Some(label) {
+                return Some(view.clone());
+            }
+            view.with_children(|children| children.iter().find_map(|view| target(view, label)))
+        }
+        fn wait(surface: &Rc<Surface>, ready: impl Fn() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                surface.control(|control| {
+                    control.advance_clock(Duration::ZERO, move || tx.send(()).unwrap());
+                });
+                rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                surface.drain();
+                if ready() {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "real Popover did not settle");
+            }
+        }
+        cx.executor().allow_parking();
+        let (surface, _app) = cx.update(|cx| {
+            let app = crate::rt::init_test_app(cx);
+            let surface = Surface::new(nsh_engine::Environment::default());
+            surface.resized(640.0, 384.0, 1.0);
+            *surface.text_system.borrow_mut() = Some(cx.text_system().clone());
+            surface.start(
+                EngineConfig::new(nsh_engine::App::Js(nsh_engine::Bundle::source(APP.into()))),
+                false,
+            );
+            (surface, app)
+        });
+        wait(&surface, || {
+            target(&surface.root, "Inside action").is_some_and(|view| {
+                view.state().props.input_action.is_some() && view.state().frame.size.height.0 > 0.0
+            })
+        });
+        let button = target(&surface.root, "Inside action").unwrap();
+        let size = button.state().frame.size;
+        let (x, y) = button
+            .to_root()
+            .unwrap()
+            .map(size.width.0 / 2.0, size.height.0 / 2.0)
+            .unwrap();
+        let source = InputSource::new(&surface);
+        let snapshot = source.sample().unwrap();
+        crate::input::pointer(
+            &surface,
+            PointerEvent {
+                kind: PointerKind::Move,
+                x,
+                y,
+                button: 0,
+                pointer: 1,
+                touch: false,
+                pen: false,
+                time: surface.clock(),
+                modifiers: Default::default(),
+                clicks: 1,
+            },
+        );
+        // This is one physical burst: no pump or new snapshot between the
+        // hover and the two events belonging to the original visible button.
+        let position = gpui::point(gpui::px(x), gpui::px(y));
+        assert_eq!(
+            source.dispatch(
+                &snapshot,
+                &gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    position,
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                })
+            ),
+            InputDisposition::Handled
+        );
+        assert_eq!(
+            source.dispatch(
+                &snapshot,
+                &gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    position,
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                })
+            ),
+            InputDisposition::Handled
+        );
+        wait(&surface, || {
+            target(&surface.root, "Inside count 1").is_some()
+        });
+        assert!(target(&surface.root, "Outside count 0").is_some());
+        // Ordinary exact input outside the popup retains the original callback.
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            crate::input::pointer(
+                &surface,
+                PointerEvent {
+                    kind,
+                    x: 600.0,
+                    y: 300.0,
+                    button: 0,
+                    pointer: 1,
+                    touch: false,
+                    pen: false,
+                    time: surface.clock(),
+                    modifiers: Default::default(),
+                    clicks: 1,
+                },
+            );
+        }
+        wait(&surface, || {
+            target(&surface.root, "Outside count 1").is_some()
+        });
+        assert!(target(&surface.root, "Inside count 1").is_some());
+        surface.stop();
+    }
+
     fn focus_return_input(id: NodeId, parent: NodeId, auto_focus: bool) -> Vec<MountItem> {
         vec![
             MountItem::Create {
