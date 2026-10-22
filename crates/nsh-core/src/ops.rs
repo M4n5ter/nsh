@@ -4,7 +4,7 @@ use crate::{
     animation::AnimationOp,
     geometry::{Bounds, DevicePixels, Percentage, Point, Points, Size},
     js::host::HostProps,
-    overlay::{Align, HintWatchToken, OverlayAnchor, Placement, TooltipContent},
+    overlay::{Align, HintWatchToken, OverlayAnchor, Placement, PressWatchToken, TooltipContent},
     props::{AccessibilityProp, EdgeInsets, LayoutAnimation, PointerEvents},
     style::{Color, EllipsizeMode, Style, StylePatch},
     ui::PropEnum,
@@ -402,6 +402,7 @@ pub struct EventMask {
     listeners: u64,
     observations: u64,
     hint_watch: Option<HintWatchToken>,
+    press_watch: Option<PressWatchToken>,
 }
 
 impl std::ops::BitOr for EventMask {
@@ -411,11 +412,19 @@ impl std::ops::BitOr for EventMask {
     fn bitor(self, other: EventMask) -> EventMask {
         let conflicted = (self.observations != 0 && self.hint_watch.is_none())
             || (other.observations != 0 && other.hint_watch.is_none());
+        let press_conflicted = (self.contains_listener(EventKind::Touch)
+            && self.press_watch.is_none())
+            || (other.contains_listener(EventKind::Touch) && other.press_watch.is_none());
         EventMask {
             listeners: self.listeners | other.listeners,
             observations: self.observations | other.observations,
             hint_watch: match (self.hint_watch, other.hint_watch) {
                 _ if conflicted => None,
+                (Some(left), Some(right)) if left != right => None,
+                (left, right) => left.or(right),
+            },
+            press_watch: match (self.press_watch, other.press_watch) {
+                _ if press_conflicted => None,
                 (Some(left), Some(right)) if left != right => None,
                 (left, right) => left.or(right),
             },
@@ -443,6 +452,12 @@ impl EventMask {
         self.hint_watch
     }
 
+    /// A Touch listener consisting only of the core's outside-press watch.
+    /// Ordinary/exact input still reports it; a native inside lease may omit it.
+    pub const fn press_watch(self) -> Option<PressWatchToken> {
+        self.press_watch
+    }
+
     /// The raw bit set, indexed by `EventKind as u8`.
     #[inline]
     pub const fn bits(self) -> u64 {
@@ -452,6 +467,9 @@ impl EventMask {
     /// Adds or removes `event`.
     #[inline]
     pub fn set(&mut self, event: EventKind, enabled: bool) {
+        if event == EventKind::Touch {
+            self.press_watch = None;
+        }
         if enabled {
             self.listeners |= 1 << event as u8;
         } else {
@@ -461,6 +479,10 @@ impl EventMask {
                 self.hint_watch = None;
             }
         }
+    }
+
+    pub(crate) fn watch_press(&mut self, token: PressWatchToken) {
+        self.press_watch = Some(token);
     }
 
     /// Reports `event` for native presentation without adding a listener.

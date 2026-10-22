@@ -7,7 +7,10 @@
 use std::rc::Weak;
 
 use gpui::{MouseButton, PlatformInput, ScrollDelta};
-use nsh_core::{Bounds, EdgeInsets, ScrollBehavior, animation::GestureBinding, input::laid_out};
+use nsh_core::{
+    Bounds, EdgeInsets, ScrollBehavior, animation::GestureBinding, input::laid_out,
+    overlay::PressWatchToken,
+};
 
 use super::*;
 
@@ -139,6 +142,7 @@ struct HitNode {
     opaque_press: bool,
     opaque_wheel: bool,
     opaque_gesture: bool,
+    press_watch: Option<PressWitness>,
     target: Option<PointerTarget>,
     gesture: Option<GestureBinding>,
     scroll: Option<(bool, bool, ScrollBehavior)>,
@@ -152,6 +156,40 @@ struct RouteNode {
     view: NshView,
     matrix: Mat4,
     shape: PickGeometry,
+    press_watch: Option<PressWatchToken>,
+}
+
+#[derive(Clone, PartialEq)]
+struct PressWitness {
+    token: PressWatchToken,
+    owner: NativeOwner,
+}
+
+impl PressWitness {
+    fn matches(&self, surface: &Surface) -> bool {
+        self.owner.matches(surface)
+            && self.owner.owner.state().events.press_watch() == Some(self.token)
+    }
+}
+
+fn press_witness(path: impl Iterator<Item = PressWitness>) -> Result<Option<PressWitness>, ()> {
+    let mut cohort = None;
+    let mut inside = None;
+    for witness in path {
+        let token = witness.token;
+        if cohort.is_some_and(|previous: PressWatchToken| !previous.same_cohort(token)) {
+            return Err(());
+        }
+        cohort = Some(token);
+        if token.is_inside() && inside.is_none() {
+            inside = Some(witness);
+        }
+    }
+    if cohort.is_some() {
+        inside.map(Some).ok_or(())
+    } else {
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -163,6 +201,7 @@ pub(super) struct PressLease {
     viewport: (f32, f32),
     scale: f32,
     origin: (f32, f32),
+    watch: Option<PressWitness>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -174,6 +213,13 @@ enum PointerTarget {
 }
 
 impl PressLease {
+    pub(super) fn observes_inside(&self, events: nsh_core::EventMask) -> bool {
+        self.watch.as_ref().is_some_and(|witness| {
+            events
+                .press_watch()
+                .is_some_and(|token| token.same_cohort(witness.token))
+        })
+    }
     pub(super) fn binding_for(&self, view: &NshView) -> Option<u64> {
         match &self.target {
             PointerTarget::Action(binding) if self.route[0].view == *view => Some(*binding),
@@ -213,6 +259,10 @@ impl HitNode {
         let opaque_wheel = opaque(surface, view, false);
         let opaque_press = opaque(surface, view, true);
         let opaque_gesture = opaque_gesture(surface, view);
+        let press_watch = state.events.press_watch().map(|token| PressWitness {
+            token,
+            owner: NativeOwner::sample(view.clone()),
+        });
         let gesture = native_gesture(surface, view);
         let target = if native_input(surface, view) {
             Some(PointerTarget::Input)
@@ -268,6 +318,7 @@ impl HitNode {
             opaque_press,
             opaque_wheel,
             opaque_gesture,
+            press_watch,
             target,
             gesture,
             scroll,
@@ -302,10 +353,12 @@ fn route(view: &NshView) -> Option<Vec<RouteNode>> {
         .map(|view| {
             let matrix = view.to_root()?;
             let shape = PickGeometry::sample(&view.state())?;
+            let press_watch = view.state().events.press_watch();
             Some(RouteNode {
                 view,
                 matrix,
                 shape,
+                press_watch,
             })
         })
         .collect()
@@ -358,7 +411,8 @@ fn opaque_content_with_values(
     state.opacity() <= 0.0
         || opaque_native(&state)
         || mouse_callbacks(state.events)
-        || state.events.contains_listener(EventKind::Touch)
+        || (state.events.contains_listener(EventKind::Touch)
+            && state.events.press_watch().is_none())
         || state.events.contains(EventKind::PanStart)
         || state.events.contains(EventKind::PanEnd)
         || state.events.contains(EventKind::PinchStart)
@@ -387,6 +441,7 @@ fn opaque_content_with_values(
 fn opaque_gesture(surface: &Surface, view: &NshView) -> bool {
     let state = view.state();
     view.kind() == ViewKind::Input
+        || state.events.contains_listener(EventKind::Touch)
         || state.props.accessibility.state.disabled
         || has_press(state.events)
         || state.events.contains(EventKind::Blur)
@@ -668,6 +723,8 @@ impl InputSource {
         }
         let candidate = if kind == PointerKind::Down {
             frame.root.path(x, y).and_then(|path| {
+                let watch =
+                    press_witness(path.iter().filter_map(|node| node.press_watch.clone())).ok()?;
                 (!path.iter().any(|node| {
                     node.thumb.as_ref().is_some_and(|(matrix, thumb)| {
                         matrix
@@ -700,6 +757,7 @@ impl InputSource {
                     viewport: frame.viewport,
                     scale: frame.scale,
                     origin: frame.origin,
+                    watch,
                 })
             })
         } else {
@@ -736,10 +794,21 @@ impl InputSource {
             || route(owner).as_ref() != Some(&lease.route)
             || surface.view(owner.id()).as_ref() != Some(owner)
             || !focus_safe(surface, owner)
+            || lease
+                .watch
+                .as_ref()
+                .is_some_and(|witness| !witness.matches(surface))
             || live.as_ref().is_none_or(|hit| {
                 let path = chain(&hit.view);
+                let watch = press_witness(path.iter().filter_map(|view| {
+                    view.state().events.press_watch().map(|token| PressWitness {
+                        token,
+                        owner: NativeOwner::sample(view.clone()),
+                    })
+                }));
                 let (x, y) = contact.unwrap();
                 hit.item.is_some()
+                    || watch.as_ref() != Ok(&lease.watch)
                     || path.iter().any(|view| {
                         let (x, y) = local(view, x, y);
                         crate::scroll::grabs_thumb(view, x, y)
@@ -974,6 +1043,7 @@ impl InputSource {
             viewport: frame.viewport,
             scale: frame.scale,
             origin: frame.origin,
+            watch: None,
         };
         let live = pick(&surface.root, x, y, true);
         if !lease.native_matches(surface)

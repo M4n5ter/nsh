@@ -33,15 +33,15 @@ use taffy::NodeId as LayoutId;
 
 use super::{Core, Key, Kind, NO_KEY, definite};
 use crate::{
-    EventKind, EventPayload, NodeId, PayloadValue, Prop, ROOT_ID, Tag, TextEngine, TouchEvent,
-    TouchPhase,
+    EventKind, EventMask, EventPayload, NodeId, PayloadValue, Prop, ROOT_ID, Tag, TextEngine,
+    TouchEvent, TouchPhase,
     geometry::{Bounds, Point, Points, Size, px, rect},
     keymap::{KeyBinding, Keystroke, When},
     mount::MountItem,
     ops::{Op, OverlayProp},
     overlay::{
         HINT_DELAY, HintObservation, HintWatchToken, OverlayAnchor, OverlayConfig, Placed,
-        Placement, TooltipContent, inset, place,
+        Placement, PressWatchToken, TooltipContent, inset, place,
     },
     props::PointerEvents,
     ui::task::{Action, Task, act_after},
@@ -67,6 +67,24 @@ pub(super) struct Watch {
     layout: u64,
     hints: Vec<(NodeId, u64, u64)>,
     pub(super) token: Option<HintWatchToken>,
+    lineage: Vec<(NodeId, u64)>,
+    callbacks: (EventMask, bool),
+    pub(super) press: Option<PressWatchToken>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PressOwner {
+    key: Key,
+    lineage: Vec<(NodeId, u64)>,
+    host: Vec<(NodeId, u64)>,
+    anchor: Option<NodeId>,
+    anchor_lineage: Vec<(NodeId, u64)>,
+}
+
+#[derive(Debug)]
+struct PressCohort {
+    owners: Vec<PressOwner>,
+    revision: u64,
 }
 
 /// The classes of the bubble of an element's text `tooltip`: as little as
@@ -141,6 +159,7 @@ pub(super) struct Overlays {
     /// them (their anchors and root views), checked by id (keys are
     /// reused).
     pub(super) watched: Vec<Watch>,
+    press: Option<PressCohort>,
     /// A shown overlay listens to `onCancel`: Escape is bound and the back
     /// button listened to.
     pub(super) cancel: bool,
@@ -441,6 +460,9 @@ impl<M: TextEngine> Core<M> {
                 layout: 0,
                 hints: Vec::new(),
                 token: None,
+                lineage: Vec::new(),
+                callbacks: (EventMask::default(), false),
+                press: None,
             });
             if node.events.contains(EventKind::PressOutside) {
                 for id in [Some(host), anchor_node(state)].into_iter().flatten() {
@@ -452,6 +474,9 @@ impl<M: TextEngine> Core<M> {
                             layout: 0,
                             hints: Vec::new(),
                             token: None,
+                            lineage: Vec::new(),
+                            callbacks: (EventMask::default(), false),
+                            press: None,
                         });
                     }
                 }
@@ -459,9 +484,7 @@ impl<M: TextEngine> Core<M> {
         }
         watched.sort_unstable_by_key(|entry| (entry.key, entry.id));
         watched.dedup();
-        let old = std::mem::take(&mut self.overlay_state.watched);
-        self.rewatch(&old, &watched);
-        self.overlay_state.watched = watched;
+        let old_press = std::mem::take(&mut self.overlay_state.watched);
         // Hints only follow a pointer (the desktops).
         let mut hinting = Vec::new();
         if self
@@ -501,6 +524,9 @@ impl<M: TextEngine> Core<M> {
                                 .unwrap_or(0),
                         )],
                         token: None,
+                        lineage: Vec::new(),
+                        callbacks: (EventMask::default(), false),
+                        press: None,
                     });
                 }
             }
@@ -534,6 +560,84 @@ impl<M: TextEngine> Core<M> {
         }
         self.rewatch(&old, &hinting);
         self.overlay_state.hinting = hinting;
+        let mut owners: Vec<_> = self
+            .overlays
+            .iter()
+            .copied()
+            .filter_map(|key| {
+                let node = &self.nodes[key as usize];
+                let state = self.overlay(key)?;
+                let host = self.key(state.host?).ok()?;
+                if !node.events.contains(EventKind::PressOutside) {
+                    return None;
+                }
+                let anchor = anchor_node(state);
+                Some(PressOwner {
+                    key,
+                    lineage: self.press_lineage(key),
+                    host: self.press_lineage(host),
+                    anchor,
+                    anchor_lineage: anchor
+                        .and_then(|id| self.key(id).ok())
+                        .map(|key| self.press_lineage(key))
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+        owners.sort_unstable_by_key(|owner| owner.key);
+        let cohort = if owners.is_empty() {
+            self.overlay_state.press = None;
+            0
+        } else {
+            if self
+                .overlay_state
+                .press
+                .as_ref()
+                .is_none_or(|old| old.owners != owners)
+            {
+                self.overlay_state.press = Some(PressCohort {
+                    owners,
+                    revision: self.batches + 1,
+                });
+            }
+            self.overlay_state
+                .press
+                .as_ref()
+                .expect("the shown press watchers")
+                .revision
+        };
+        for entry in &mut watched {
+            entry.lineage = self.press_lineage(entry.key);
+            let node = &self.nodes[entry.key as usize];
+            entry.callbacks = (
+                node.events,
+                node.overlay_watched & watch::HINT_CALLBACK != 0,
+            );
+            let inside = self.overlay_state.press.as_ref().is_some_and(|cohort| {
+                cohort
+                    .owners
+                    .iter()
+                    .all(|owner| self.press_inside(owner.key, entry.id))
+            });
+            entry.press = old_press
+                .iter()
+                .find(|old| {
+                    old.key == entry.key
+                        && old.id == entry.id
+                        && old.lineage == entry.lineage
+                        && old.callbacks == entry.callbacks
+                        && old.press.is_some_and(|token| {
+                            token.same_cohort(PressWatchToken::new(cohort, 0, false))
+                                && token.is_inside() == inside
+                        })
+                })
+                .and_then(|old| old.press)
+                .or_else(|| {
+                    (cohort != 0).then(|| PressWatchToken::new(cohort, self.batches + 1, inside))
+                });
+        }
+        self.rewatch(&old_press, &watched);
+        self.overlay_state.watched = watched;
         if cancel != self.overlay_state.cancel {
             self.overlay_state.cancel = cancel;
             // The root's table and back listener are made again.
@@ -721,10 +825,9 @@ impl<M: TextEngine> Core<M> {
         let mut at = anchor;
         while at != NO_KEY {
             let node = &self.nodes[at as usize];
-            if node.overlay_watched & watch::PRESS != 0
-                || [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut]
-                    .into_iter()
-                    .any(|kind| node.events.contains(kind))
+            if [EventKind::Touch, EventKind::HoverIn, EventKind::HoverOut]
+                .into_iter()
+                .any(|kind| node.events.contains(kind))
             {
                 return true;
             }
@@ -1078,6 +1181,26 @@ impl<M: TextEngine> Core<M> {
         true
     }
 
+    fn press_lineage(&self, mut key: Key) -> Vec<(NodeId, u64)> {
+        let mut path = Vec::new();
+        while key != NO_KEY {
+            let node = &self.nodes[key as usize];
+            path.push((node.id, node.layout.map(u64::from).unwrap_or(0)));
+            key = node.parent;
+        }
+        path
+    }
+
+    fn press_inside(&self, watcher: Key, id: NodeId) -> bool {
+        id == self.nodes[watcher as usize].id
+            || self
+                .overlay(watcher)
+                .is_some_and(|state| anchor_node(state) == Some(id))
+            || self.key(id).is_ok_and(|key| {
+                self.nodes[key as usize].kind == Kind::Overlay && self.is_ancestor(watcher, key)
+            })
+    }
+
     /// A touch on the surface: `onPressOutside` of the shown overlays
     /// watching presses that a finger went down outside of.
     pub(super) fn overlay_touches(&mut self, touch: &TouchEvent) {
@@ -1101,14 +1224,7 @@ impl<M: TextEngine> Core<M> {
                     continue;
                 }
                 let id = node.id;
-                let anchor = anchor_node(state);
-                let inside = point.path.iter().any(|&p| {
-                    p == id
-                        || Some(p) == anchor
-                        || self.key(p).is_ok_and(|k| {
-                            self.nodes[k as usize].kind == Kind::Overlay && self.is_ancestor(key, k)
-                        })
-                });
+                let inside = point.path.iter().any(|&p| self.press_inside(key, p));
                 if inside {
                     continue;
                 }

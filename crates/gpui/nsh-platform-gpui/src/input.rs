@@ -1766,9 +1766,17 @@ fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Op
         // every later phase.
         let has_listener = reporting().any(|p| {
             p.path.iter().any(|id| {
-                surface
-                    .view(*id)
-                    .is_some_and(|view| view.state().events.contains_listener(EventKind::Touch))
+                surface.view(*id).is_some_and(|view| {
+                    let events = view.state().events;
+                    events.contains_listener(EventKind::Touch)
+                        && !(p.key == Key::Mouse
+                            && surface
+                                .input
+                                .presented_press
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|lease| lease.observes_inside(events)))
+                })
             })
         });
         if !has_listener {
