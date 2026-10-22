@@ -1100,6 +1100,18 @@ pub trait Accessible: Element {
         self.node().bind_attr(value, |a, value| a.value = value);
         self
     }
+
+    /// The actions assistive technologies offer on it (TS:
+    /// `accessibilityActions`): `increment` and `decrement` for an
+    /// adjustable element, `activate`, `longpress`, or the app's own with
+    /// a label; [`Interactive::on_accessibility_action`] hears them.
+    fn accessibility_actions(mut self, actions: Vec<crate::AccessibilityActionDef>) -> Self {
+        super::host::set(
+            self.node(),
+            Prop::Accessibility(AccessibilityProp::Actions(actions)),
+        );
+        self
+    }
 }
 
 /// What an element's tooltip can be ([`Interactive::tooltip`]): a text,

@@ -1083,8 +1083,9 @@ impl<M: TextEngine> Core<M> {
     pub fn apply(&mut self, op: Op) -> Result<(), ApplyError> {
         let _entered = self.components.runtime.enter();
         // Ops on a component's host go to its component, calls of a UI
-        // set's modules to the module. The surface's JS shortcuts and
-        // listeners are retained even before its first component exists.
+        // set's modules to the module; the components learn whether JS
+        // listens to the back button and JS's shortcuts even before one
+        // mounts, so a component's own join them rather than replace them.
         if self.components.instances.is_empty()
             && !matches!(
                 op,

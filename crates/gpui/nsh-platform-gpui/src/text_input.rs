@@ -678,7 +678,10 @@ fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
     let previous = crate::input::focus_chain(surface);
     if old.as_ref() == view {
         if view.is_some() {
+            // The host can own the window's focus while this view keeps the surface's.
+            // Draw again to apply the explicit surface focus intent queued above.
             surface.sync_focus();
+            surface.invalidate();
         }
         return;
     }

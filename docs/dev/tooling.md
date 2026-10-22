@@ -321,6 +321,9 @@ Headless runs play the platform's part NSH's protocol defines, and refuse what o
   them after each step itself (`answer_dialogs_myself`), so its JS handler runs on the test file's VM;
 - the clipboard holds text (`SetClipboard`, `ReadClipboard` answered with `onClipboard`), modals get `onShow` when
   inserted;
+- the app runs under what its `nsh.json` declares (`Bundle::with_capabilities_json`: `nsh test`'s compiler and an
+  app's runner, `Reply::Js::capabilities`, as `nsh build` writes `capabilities.json`), so headless refusals are a
+  device's;
 - images are not loaded: an image's size (`ImageInfo`) is answered with an error, as a failed load (a `TextView` asks
   for the sizes of its images); an image or files on the clipboard fail the step that asked (`Screen::take_unsupported`).
 
@@ -508,6 +511,10 @@ DOM, in `nsh.js`'s `testPage`). The CLI's agent sees the app through `RemoteScen
 through `DevServer::step`, and acts with the browser's trusted input over the DevTools protocol (`Input.dispatch*`:
 mouse presses, wheel events of 20 px a frame apart, key events with macOS's editing commands, as Playwright sends
 them), `history.back()` for back, `Emulation.*` for the viewport and the color scheme and `Page.captureScreenshot`.
+Headless Chromium finds no input device and reports `pointer: none` / `hover: none`, which `nsh.js`'s `measureIdiom`
+reads as a touch screen; `cdp.rs` launches it with `--blink-settings` giving it a fine, hovering pointer (as
+Playwright does), so the page measures as a browser with a mouse: the desktop idiom at least 600 wide, a phone below
+(`open`'s `width`).
 
 ## New apps (`nsh init --template`)
 
