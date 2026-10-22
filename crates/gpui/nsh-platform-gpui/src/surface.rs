@@ -831,11 +831,21 @@ mod tests {
         cx.executor().allow_parking();
         let (surface, _app) = cx.update(|cx| {
             let app = crate::rt::init_test_app(cx);
-            let surface = Surface::new(nsh_engine::Environment::default());
+            let mut environment = nsh_engine::Environment::default();
+            environment.os = nsh_core::Os::Linux;
+            environment.idiom = nsh_core::Idiom::Desktop;
+            environment.renderer = nsh_core::Renderer::Native;
+            let surface = Surface::new(environment);
+            surface.set_error_handler(Box::new(|error| {
+                panic!("real Popover startup failed: {error:?}");
+            }));
             surface.resized(640.0, 384.0, 1.0);
             *surface.text_system.borrow_mut() = Some(cx.text_system().clone());
             surface.start(
-                EngineConfig::new(nsh_engine::App::Js(nsh_engine::Bundle::source(APP.into()))),
+                EngineConfig {
+                    ui_sets: vec![nsh_base::registry()],
+                    ..EngineConfig::new(nsh_engine::App::Js(nsh_engine::Bundle::source(APP.into())))
+                },
                 false,
             );
             (surface, app)
