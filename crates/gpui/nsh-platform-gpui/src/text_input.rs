@@ -1763,13 +1763,8 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
                 if mac && m.meta && !model.has_selection() {
                     // Command+Backspace deletes to the line's start.
                     let caret = model.caret();
-                    let to = if vk == VK_BACK {
-                        model.text()[..caret].rfind('\n').map_or(0, |i| i + 1)
-                    } else {
-                        model.text()[caret..]
-                            .find('\n')
-                            .map_or(model.text().len(), |i| caret + i)
-                    };
+                    let (start, end) = model.line_at(caret);
+                    let to = if vk == VK_BACK { start } else { end };
                     model.move_to(to, true);
                 }
                 (model.delete(unit, vk == VK_DELETE), empty)
@@ -1786,7 +1781,10 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         _ if vk == VK_RETURN => {
             let behavior = input.config.borrow().submit();
             match return_key(behavior, multiline, m) {
-                None => insert(surface, &view, &input, "\n", true),
+                None => {
+                    let ending = model::line_ending(input.model.borrow().text());
+                    insert(surface, &view, &input, ending, true);
+                }
                 Some(blur) => submit(surface, &view, &input, blur),
             }
             true

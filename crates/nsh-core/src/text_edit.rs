@@ -117,7 +117,7 @@ impl Model {
         let caret = if at_end {
             text.len()
         } else {
-            floor(text, self.caret.min(text.len()))
+            caret_boundary(text, self.caret.min(text.len()))
         };
         self.text.clear();
         self.text.push_str(text);
@@ -133,8 +133,8 @@ impl Model {
     /// Selects from `anchor` to `caret` (clamped to the text, moved onto
     /// character boundaries).
     pub fn select(&mut self, anchor: usize, caret: usize) {
-        let anchor = floor(&self.text, anchor.min(self.text.len()));
-        let caret = floor(&self.text, caret.min(self.text.len()));
+        let anchor = caret_boundary(&self.text, anchor.min(self.text.len()));
+        let caret = caret_boundary(&self.text, caret.min(self.text.len()));
         if (anchor, caret) != (self.anchor, self.caret) {
             self.last = None;
         }
@@ -208,18 +208,19 @@ impl Model {
             }
             None => text,
         };
-        if fit.is_empty() && s == e {
+        let fit = &text[..caret_boundary(text, fit.len())];
+        if fit.is_empty() && (s == e || !text.is_empty()) {
             return None;
         }
         // A run of typing merges; a paste or a replaced selection does not.
-        let typing = s == e && fit.chars().count() == 1 && !fit.starts_with('\n');
+        let typing = s == e && fit.chars().count() == 1 && !matches!(fit, "\n" | "\r");
         self.record(if typing {
             EditKind::Typing
         } else {
             EditKind::Other
         });
         self.text.replace_range(s..e, fit);
-        let caret = s + fit.len();
+        let caret = after_caret_boundary(&self.text, s + fit.len());
         self.anchor = caret;
         self.caret = caret;
         Some(fit.to_owned())
@@ -250,8 +251,9 @@ impl Model {
             EditKind::Other
         });
         self.text.replace_range(s..e, "");
-        self.anchor = s;
-        self.caret = s;
+        let caret = after_caret_boundary(&self.text, s);
+        self.anchor = caret;
+        self.caret = caret;
         true
     }
 
@@ -295,10 +297,10 @@ impl Model {
 
     /// The line (between line breaks) at `at`, for triple clicks.
     pub fn line_at(&self, at: usize) -> (usize, usize) {
-        let at = at.min(self.text.len());
-        let start = self.text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let at = caret_boundary(&self.text, at.min(self.text.len()));
+        let start = self.text[..at].rfind(['\r', '\n']).map_or(0, |i| i + 1);
         let end = self.text[at..]
-            .find('\n')
+            .find(['\r', '\n'])
             .map_or(self.text.len(), |i| at + i);
         (start, end)
     }
@@ -388,7 +390,34 @@ pub fn floor(s: &str, mut at: usize) -> usize {
 
 /// The character before `at`.
 fn prev_char(s: &str, at: usize) -> usize {
-    s[..at].char_indices().next_back().map_or(0, |(i, _)| i)
+    if s[..at].ends_with("\r\n") {
+        at - 2
+    } else {
+        s[..at].char_indices().next_back().map_or(0, |(i, _)| i)
+    }
+}
+
+/// The editor treats a CRLF pair as one caret boundary while byte and
+/// UTF-16 conversion helpers retain their ordinary character semantics.
+fn caret_boundary(s: &str, at: usize) -> usize {
+    let at = floor(s, at);
+    if at > 0
+        && s.as_bytes()
+            .get(at - 1..=at)
+            .is_some_and(|pair| pair == b"\r\n")
+    {
+        at - 1
+    } else {
+        at
+    }
+}
+
+fn after_caret_boundary(s: &str, at: usize) -> usize {
+    if caret_boundary(s, at) == at {
+        at
+    } else {
+        at + 1
+    }
 }
 
 /// True when `c` joins the character before it into one cluster: marks,
@@ -424,6 +453,9 @@ pub fn next_cluster(s: &str, at: usize) -> usize {
     let Some((_, first)) = chars.next() else {
         return s.len();
     };
+    if first == '\r' && chars.peek().is_some_and(|&(_, c)| c == '\n') {
+        return at + 2;
+    }
     let mut prev = first;
     // Two regional indicators make one flag.
     let mut flag = regional(first);
@@ -445,7 +477,7 @@ pub fn next_cluster(s: &str, at: usize) -> usize {
 pub fn prev_cluster(s: &str, at: usize) -> usize {
     // Clusters are found forward from the line's start: flags pair up from
     // there.
-    let start = s[..at].rfind('\n').map_or(0, |i| i + 1);
+    let start = s[..at].rfind(['\r', '\n']).map_or(0, |i| i + 1);
     let mut pos = start;
     if at == start {
         return prev_char(s, at);
@@ -504,7 +536,7 @@ pub fn word_right(s: &str, at: usize) -> usize {
         }
     }
     while let Some(&(i, c)) = chars.peek() {
-        if c == '\n' && first != Class::Space {
+        if matches!(c, '\r' | '\n') && first != Class::Space {
             return at + i;
         }
         if class(c) != Class::Space {
@@ -545,20 +577,21 @@ pub fn word_at(s: &str, at: usize) -> (usize, usize) {
     let Some(c) = s[probe..].chars().next() else {
         return (at, at);
     };
-    if c == '\n' {
-        return (probe, probe);
+    if matches!(c, '\r' | '\n') {
+        let start = caret_boundary(s, probe);
+        return (start, start);
     }
     let kind = class(c);
     let mut start = probe;
     for (i, c) in s[..probe].char_indices().rev() {
-        if class(c) != kind || c == '\n' {
+        if class(c) != kind || matches!(c, '\r' | '\n') {
             break;
         }
         start = i;
     }
     let mut end = s.len();
     for (i, c) in s[probe..].char_indices() {
-        if class(c) != kind || c == '\n' {
+        if class(c) != kind || matches!(c, '\r' | '\n') {
             end = probe + i;
             break;
         }
@@ -604,16 +637,30 @@ pub fn clip_utf16(s: &str, max: usize) -> &str {
 
 /// The key an insertion reports (`onKeyPress`).
 pub fn key_of(text: &str) -> &str {
-    if text == "\n" { "Enter" } else { text }
+    if matches!(text, "\n" | "\r" | "\r\n") {
+        "Enter"
+    } else {
+        text
+    }
 }
 
-/// Pasted text for a field: Windows line breaks become `\n`, and a
-/// single-line field gets spaces instead.
+/// The first line ending in a document, or LF before it has one. Native
+/// Return keys use it without changing any existing or pasted bytes.
+pub fn line_ending(text: &str) -> &'static str {
+    match text.find(['\r', '\n']).map(|at| &text[at..]) {
+        Some(rest) if rest.starts_with("\r\n") => "\r\n",
+        Some(rest) if rest.starts_with('\r') => "\r",
+        _ => "\n",
+    }
+}
+
+/// Pasted text for a field: multiline text is literal; a single-line
+/// field gets spaces instead of line breaks.
 pub fn pasted(text: &str, multiline: bool) -> String {
-    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     if multiline {
-        text
+        text.to_owned()
     } else {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         text.trim_end_matches('\n').replace('\n', " ")
     }
 }
@@ -812,8 +859,39 @@ mod tests {
     }
 
     #[test]
+    fn multiline_file_bytes_and_crlf_caret_boundaries() {
+        let original = "  \t中\r\na\rb\n\n";
+        assert_eq!(pasted(original, true), original);
+        let mut m = model("a\r\nb");
+        m.move_to(2, false);
+        assert_eq!(m.caret(), 1);
+        m.step(Unit::Char, true, false);
+        assert_eq!(m.caret(), 3);
+        assert_eq!(m.line_at(3), (3, 4));
+        assert_eq!(m.line_at(1), (0, 1));
+        assert!(m.delete(Unit::Char, false));
+        assert_eq!(m.text(), "ab");
+        assert!(m.undo());
+        assert_eq!(m.text(), "a\r\nb");
+        m.move_to(1, false);
+        assert!(m.delete(Unit::Char, true));
+        assert_eq!(m.text(), "ab");
+        let mut limited = model("");
+        assert_eq!(limited.insert("a\r\nb", Some(2)).as_deref(), Some("a"));
+        assert_eq!(limited.text(), "a");
+        limited.select_all();
+        assert_eq!(limited.insert("\r\n", Some(1)), None);
+        assert_eq!(limited.text(), "a");
+        let mut joined = model("\nb");
+        joined.move_to(0, false);
+        joined.insert("\r", None);
+        assert_eq!(joined.text(), "\r\nb");
+        assert_eq!(joined.caret(), 2);
+    }
+
+    #[test]
     fn paste_normalization() {
-        assert_eq!(pasted("a\r\nb\r\n", true), "a\nb\n");
+        assert_eq!(pasted("a\r\nb\r\n", true), "a\r\nb\r\n");
         assert_eq!(pasted("a\r\nb\r\n", false), "a b");
         assert_eq!(key_of("\n"), "Enter");
         assert_eq!(key_of("x"), "x");

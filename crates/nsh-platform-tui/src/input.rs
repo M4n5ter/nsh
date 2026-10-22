@@ -1261,7 +1261,9 @@ impl Surface {
                 self.key_press(id, "Enter".into());
                 let submit = config.submit();
                 if config.multiline && (shift || alt || submit == SubmitBehavior::Newline) {
-                    self.edit_input(id, |editor, config| editor.replace("\n", config));
+                    self.edit_input(id, |editor, config| {
+                        editor.replace(nsh_core::text_edit::line_ending(editor.text()), config)
+                    });
                 } else {
                     if let Some(node) = self.node(id) {
                         let payload = EventPayload::Text {
@@ -4714,6 +4716,70 @@ mod tests {
         assert_eq!(surface.focus_path(), [8, 6, ROOT_ID]);
         key(&mut surface, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(command(&mut surface), Some(3.0));
+    }
+
+    #[test]
+    fn multiline_files_keep_raw_values_paste_and_return_line_endings() {
+        let mut surface = form();
+        surface.node_mut(2).unwrap().input = nsh_core::InputConfig {
+            multiline: true,
+            submit_behavior: Some(SubmitBehavior::Newline),
+            ..Default::default()
+        };
+        let original = "  A\t中\x1b\0\r\nB \r\n\r\n";
+        surface.input_value(2, original.into(), 0);
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(original)
+        );
+        assert_eq!(surface.input_context().unwrap().event_count, 0);
+        assert!(
+            !surface
+                .events
+                .iter()
+                .any(|event| matches!(event, SurfaceEvent::Event(2, EventKind::ChangeText, _)))
+        );
+        // Raw editing data is never emitted as terminal control sequences.
+        surface.focus = None;
+        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 12));
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(2, 0)].symbol(), "A");
+        assert_eq!(buffer[(4, 0)].symbol(), "中");
+        assert_eq!(buffer[(0, 1)].symbol(), "B");
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|cell| !cell.symbol().contains(char::is_control))
+        );
+        surface.focus = Some(2);
+        key(&mut surface, KeyCode::Char('x'), KeyModifiers::NONE);
+        key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(format!("{original}x\r\n").as_str())
+        );
+        let pasted = "\tP\rQ\nR\r\n \n";
+        surface.handle_event(Event::Paste(pasted.into()));
+        let edited = format!("{original}x\r\n{pasted}");
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(edited.as_str())
+        );
+        for _ in 0..3 {
+            key(&mut surface, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        }
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(original)
+        );
+        for _ in 0..3 {
+            key(&mut surface, KeyCode::Char('y'), KeyModifiers::CONTROL);
+        }
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(edited.as_str())
+        );
     }
 
     #[test]

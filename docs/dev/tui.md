@@ -168,7 +168,10 @@ Clipboard text is transferred in full through local storage, host callbacks
 and OSC 52 output; the selected operating system helper or terminal controls
 whether it accepts the transfer.
 Bracketed paste is one edit, and physical keys and paste preserve literal
-text. `input_context` exposes editing/autofill/correction hints to a host
+text. Multiline values and paste retain their line endings and whitespace;
+Return follows the first existing line ending, or uses LF in a new document.
+Rendering filters terminal control sequences without changing editing data.
+`input_context` exposes editing/autofill/correction hints to a host
 keyboard, omitting secure text; `apply_input_edit` validates its node,
 generation, UTF-16 selection, grapheme boundaries and maximum length.
 

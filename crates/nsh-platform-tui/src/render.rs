@@ -1820,7 +1820,7 @@ fn paint_input(
     let (mut row, mut column) = (0usize, 0usize);
     let alignments = input_line_offsets(node, focused, actual_columns);
     for (offset, grapheme) in text.grapheme_indices(true) {
-        if grapheme == "\n" {
+        if matches!(grapheme, "\n" | "\r" | "\r\n") {
             row += 1;
             column = 0;
             continue;
@@ -1931,7 +1931,7 @@ pub(crate) fn input_line_offsets(node: &Node, focused: bool, columns: usize) -> 
     let mut widths = Vec::new();
     let mut column = 0usize;
     for grapheme in text.graphemes(true) {
-        if grapheme == "\n" {
+        if matches!(grapheme, "\n" | "\r" | "\r\n") {
             widths.push(column);
             column = 0;
             continue;
