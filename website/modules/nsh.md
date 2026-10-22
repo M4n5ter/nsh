@@ -165,10 +165,10 @@ function Row(props: { id: string }) {
 }
 ```
 
-Keep the handler stable: the same handler and equal captured JSON retain the mounted action's local binding.
-Choose the action and its target exclusively from captured arguments. Current mutable state may be consulted
-to reject stale work, never to select another target or change those arguments. This lets an embedding host
-validate an ordinary press against the action the user saw; see [Terminal embedding](../docs/tui.md#embedding-in-a-ratatui-app).
+Choose the action and its target from captured arguments. Applications and host services may check current
+business state to reject stale work while keeping the captured target and arguments unchanged. Event handlers
+follow ordinary native input dispatch against the current UI. Argument capture does not prove which rendered
+frame the user saw or grant service authority.
 
 ## context
 

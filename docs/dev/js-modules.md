@@ -100,13 +100,10 @@ the handler's return value are ignored. Use `null` or `[]` for an action with no
 getters and Proxy traps, copies the normalized JSON and freezes every captured object and array. The native
 JSON bounds apply: 64 levels, 1,048,576 entries and 8 MiB of canonical UTF-8 JSON.
 
-When installed on a node, the same handler object and equal canonical arguments retain that binding's
-node-local binding. Keep the handler stable and read the action's target and arguments from the capture.
-Mutable ambient state may reject stale work, never choose a different action or retarget its arguments.
-The capture describes the action; it grants no service authority. Hosts validate the native presentation
-and the engine's binding before entering the handler, and revoke the presentation's remaining admitted
-inputs on the first application callback. Other input routes retain their exact-presentation path
-([terminal embedding](tui.md#public-embedding-api)).
+Choose the action and its target from captured arguments. Applications and host services may check current
+business state to reject stale work while keeping the captured target and arguments unchanged. Event handlers
+follow ordinary native input dispatch against the current UI. Argument capture does not prove which rendered
+frame the user saw or grant service authority.
 
 ## Native keymap focus
 
