@@ -144,6 +144,11 @@ default-features = false
 [dependencies.unicode-segmentation]
 version = "1.10"
 
+[dependencies.unicode-properties]
+version = "0.1"
+default-features = false
+features = ["emoji"]
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
 version = "=30.0.1"
 features = [
