@@ -7688,6 +7688,58 @@ mod components {
         // A piece added between a span and the view goes in its place.
         assert_eq!(t.text, "Tapped 1 the link, bold and more\u{fffc}");
         assert_eq!(t.links[0].props.focusable, Some(false));
+        // A real span has no native view, but its published link is a focus
+        // target. Other commands still require their own native view.
+        for command in [
+            Command::Focus,
+            Command::AccessibilityFocus,
+            Command::Blur,
+            Command::SetSelection { start: 0, end: 1 },
+        ] {
+            c.apply(Op::Command {
+                id: link.node,
+                command,
+            })
+            .unwrap();
+        }
+        let batch = c.commit().unwrap();
+        let commands: Vec<_> = batch
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MountItem::Command { id, command } => Some((*id, command.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                (link.node, Command::Focus),
+                (link.node, Command::AccessibilityFocus),
+                (link.node, Command::Blur),
+            ]
+        );
+        // Removing the listener withdraws the link from the same snapshot;
+        // a known span id must no longer receive native focus commands.
+        c.apply(Op::Listen {
+            id: link.node,
+            event: EventKind::Press,
+            enabled: false,
+        })
+        .unwrap();
+        c.apply(Op::Command {
+            id: link.node,
+            command: Command::Focus,
+        })
+        .unwrap();
+        let batch = c.commit().unwrap();
+        assert!(text(&batch).unwrap().links.is_empty());
+        assert!(
+            !batch
+                .items
+                .iter()
+                .any(|item| matches!(item, MountItem::Command { .. }))
+        );
     }
 }
 

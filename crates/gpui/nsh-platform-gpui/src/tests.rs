@@ -452,14 +452,17 @@ fn wait_for_button(view: &Entity<AppView>, cx: &mut VisualTestContext, id: &str)
         cx.run_until_parked();
         let focused = view.read_with(cx, |view, _| {
             let surface = view.surface();
-            let generic = crate::text_input::focused_view(surface);
+            let generic = crate::text_input::focused_target(surface);
             let native = crate::native::focused_component(surface).and_then(|id| surface.view(id));
             let owns = if id == "native" {
                 generic.is_none()
                     && native.is_some_and(|view| view.state().props.test_id.as_deref() == Some(id))
             } else {
                 native.is_none()
-                    && generic.is_some_and(|view| view.state().props.test_id.as_deref() == Some(id))
+                    && generic.is_some_and(|target| match target.link() {
+                        Some(link) => link.props.test_id.as_deref() == Some(id),
+                        None => target.view().state().props.test_id.as_deref() == Some(id),
+                    })
             };
             owns && crate::text_input::focused(surface).is_none()
                 && !crate::text_input::wants_text(surface)
@@ -498,7 +501,7 @@ fn focus_diagnostic(surface: &crate::surface::Surface) -> String {
             }
         });
     }
-    let generic = crate::text_input::focused_view(surface).map(|view| view.id());
+    let generic = crate::text_input::focused_target(surface).map(|target| target.id());
     let native = crate::native::focused_component(surface);
     let mut tree = Vec::new();
     nodes(&surface.root, &mut tree);
@@ -600,10 +603,10 @@ mount(() => <View>
   <Input testID="report" autoFocus readonly value={events()} style={{height: 30}} />
   <Scroll ref={(node) => reader = node} testID="reader" style={{width: 90, height: 200}} onScrollIntent={({intent}) => record(`intent:${intent}`)} onScrollDragStart={() => record("drag-start")} onScrollDragEnd={() => record("drag-end")}>
     <Text testID="sentence" selectable style={{fontSize: 20}}>
-      <If when={shown()}><Text ref={(node) => first = node} testID="first-link" accessibilityRole="link" accessibilityLabel="First document" focusable onPress={() => record("first")}>
+      <If when={shown()}><Text ref={(node) => first = node} testID="first-link" role="link" accessibilityLabel="First document" focusable onPress={() => record("first")}>
         打开<Text style={{fontWeight: "bold"}}>跨行中文</Text>文档
       </Text></If>
-      {" plain "}<Text ref={(node) => second = node} testID="second-link" accessibilityRole="link" accessibilityLabel="Second document" focusable onPress={() => record("second")}>second</Text>
+      {" plain "}<Text ref={(node) => second = node} testID="second-link" role="link" accessibilityLabel="Second document" focusable onPress={() => record("second")}>second</Text>
     </Text>
   </Scroll>
   <View testID="after" focusable onPress={() => record("after")}><Text>After links</Text></View>
@@ -612,7 +615,9 @@ mount(() => <View>
     let code = nsh_bundler::compile_module("App.tsx", links, &[]).unwrap();
     view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
     wait_for_report(&view, cx, "ready");
-    cx.simulate_keystrokes("f4 enter tab space shift-tab enter f6");
+    cx.simulate_keystrokes("f4");
+    wait_for_button(&view, cx, "first-link");
+    cx.simulate_keystrokes("enter tab space shift-tab enter f6");
     wait_for_report(&view, cx, "ready|first|second|first|true:false");
     // A real native pointer drag through the wrapped label selects text
     // without firing its application link action.
@@ -693,13 +698,17 @@ mount(() => <View>
             None
         )
     });
-    cx.simulate_keystrokes("enter f5 enter f6");
+    cx.simulate_keystrokes("enter f5");
+    wait_for_button(&view, cx, "second-link");
+    cx.simulate_keystrokes("enter f6");
     wait_for_report(
         &view,
         cx,
         "ready|first|second|first|true:false|true:false|removed|second|false:true",
     );
-    cx.simulate_keystrokes("f8 home end pageup");
+    cx.simulate_keystrokes("f8");
+    wait_for_button(&view, cx, "reader");
+    cx.simulate_keystrokes("home end pageup");
     wait_for_report(
         &view,
         cx,

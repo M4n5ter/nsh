@@ -1440,7 +1440,8 @@ impl<M: TextEngine> Core<M> {
         for (id, answer) in std::mem::take(&mut self.components.measures) {
             answer.borrow_mut().deliver(self.measure(id));
         }
-        // On laid out views; dropped for views that were never shown.
+        // On native views, or a published text link for focus commands;
+        // dropped for targets that were never shown.
         let mut kept = Vec::new();
         for (id, mut command) in std::mem::take(&mut self.commands) {
             // Answered here, with this commit's layout (null for views that
@@ -1451,7 +1452,12 @@ impl<M: TextEngine> Core<M> {
             }
             let Ok(key) = self.key(id) else { continue };
             let node = &self.nodes[key as usize];
-            if !node.created {
+            if !node.created
+                && !(matches!(
+                    command,
+                    Command::Focus | Command::Blur | Command::AccessibilityFocus
+                ) && self.mounted_link(key))
+            {
                 continue;
             }
             // A list in its parent's viewport not placed in its view yet
@@ -1570,6 +1576,29 @@ impl<M: TextEngine> Core<M> {
             self.mount.push(MountItem::Command { id, command });
         }
         self.commands.append(&mut kept);
+    }
+
+    /// A span's focus commands use its published link under a native text block.
+    fn mounted_link(&self, key: Key) -> bool {
+        let span = &self.nodes[key as usize];
+        if !span.inline || span.kind != Kind::Text {
+            return false;
+        }
+        let mut parent = span.parent;
+        while parent != NO_KEY {
+            let block = &self.nodes[parent as usize];
+            if !block.inline {
+                return block.created
+                    && block.kind == Kind::Text
+                    && block
+                        .layout
+                        .and_then(|layout| self.layout.get_node_context(layout))
+                        .is_some_and(|cx| matches!(cx, LeafContext::Text(cx)
+                            if cx.text.links.iter().any(|link| link.node == span.id && link.start < link.end)));
+            }
+            parent = block.parent;
+        }
+        false
     }
 
     #[inline]
