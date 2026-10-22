@@ -735,7 +735,6 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 
 /// The bytes of a `data:` URI (base64 or percent-encoded).
 fn data_uri(uri: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
     let rest = uri.strip_prefix("data:").ok_or("not a data URI")?;
     let (meta, data) = rest.split_once(',').ok_or("malformed data URI")?;
     // Bound encoded input as well as output, before whitespace filtering or
@@ -744,19 +743,12 @@ fn data_uri(uri: &str) -> Result<Vec<u8>, String> {
         return Err("data URI exceeds the image byte limit".into());
     }
     if meta.ends_with(";base64") {
-        // As lenient as browsers: whitespace and missing padding pass.
-        const LENIENT: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
-            &base64::alphabet::STANDARD,
-            base64::engine::GeneralPurposeConfig::new()
-                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
-        );
-        let clean: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-        if clean.len() as u64 > MAX_BYTES.div_ceil(3) * 4 {
+        let encoded = data.bytes().filter(|c| !c.is_ascii_whitespace()).count();
+        if encoded as u64 > MAX_BYTES.div_ceil(3) * 4 {
             return Err("data URI exceeds the image byte limit".into());
         }
-        return LENIENT.decode(clean).map_err(|e| format!("data URI: {e}"));
     }
-    Ok(percent_decode(data.as_bytes()))
+    nsh_core::image::decode_data_uri(uri).map(|(_, bytes)| bytes)
 }
 
 /// The HTTP agent all downloads share. It never follows redirects: each hop
@@ -1249,6 +1241,27 @@ mod tests {
         assert!(resolve("asset:/../secret", Some(&base)).is_none());
         assert!(resolve("asset:/images/logo.png", Some(&base)).is_some());
         assert_eq!(data_uri("data:image/png;base64,YQ==").unwrap(), b"a");
+    }
+
+    #[test]
+    fn raw_data_uris_use_the_shared_decoder_and_report_completed_reads() {
+        for (uri, expected) in [
+            ("data:image/png;base64,YQ==", b"a".as_slice()),
+            ("data:;base64,_-8 \n", &[0xff, 0xef]),
+            ("data:application/octet-stream,%00%2B%ff%zz", b"\0+\xff%zz"),
+        ] {
+            let mut progress = Vec::new();
+            let bytes =
+                read_bytes_with_progress(uri, None, &Access::default(), &mut |loaded, total| {
+                    progress.push((loaded, total))
+                })
+                .unwrap();
+            assert_eq!(bytes, expected);
+            assert_eq!(progress, [(expected.len() as u64, expected.len() as u64)]);
+        }
+        assert!(read_bytes("data:;base64,a*b", None, &Access::default()).is_err());
+        assert!(read_bytes("data:image/png;nsh-key=missing", None, &Access::default()).is_err());
+        assert!(read_bytes("blob:revoked", None, &Access::default()).is_err());
     }
 
     #[test]

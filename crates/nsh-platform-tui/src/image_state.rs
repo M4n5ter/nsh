@@ -490,6 +490,7 @@ mod tests {
         ImageSource {
             uri: uri.into(),
             scales: nsh_core::ImageScales::NONE,
+            data: None,
             size: None,
         }
     }

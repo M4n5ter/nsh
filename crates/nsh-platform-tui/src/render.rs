@@ -2841,6 +2841,7 @@ mod tests {
                 Some(nsh_core::ImageSource {
                     uri: Arc::from("asset:/test.png"),
                     scales: nsh_core::ImageScales::NONE,
+                    data: None,
                     size: None,
                 }),
                 ResizeMode::Stretch,
@@ -4193,6 +4194,7 @@ mod tests {
         let source = nsh_core::ImageSource {
             uri: Arc::from("asset:/photo@2x.png"),
             scales: nsh_core::ImageScales::NONE,
+            data: None,
             size: Some(Size::new(px(16.0), px(32.0))),
         };
         let frame = Bounds::new(Point::new(px(8.0), px(0.0)), Size::new(px(64.0), px(64.0)));

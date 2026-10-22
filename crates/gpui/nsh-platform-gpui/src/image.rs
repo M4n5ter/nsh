@@ -1,4 +1,5 @@
-//! Image views: loading (`asset:/`, files, HTTP, `data:`), decoding into
+//! Image views: loading (`asset:/`, files, HTTP; `data:` URIs and `blob:`
+//! URLs, whose bytes the source carries), decoding into
 //! GPUI images, drawing with the resize mode, corner radii, tint, blur,
 //! filters, opacity and placeholder.
 //!
@@ -68,8 +69,8 @@ use std::{
 
 use gpui::{Corners, RenderImage};
 use nsh_core::{
-    Color, Command, EventKind, EventPayload, ImageOptions, ImageSource, NodeId, PayloadValue,
-    ResizeMode,
+    Color, Command, EventKind, EventPayload, ImageData, ImageOptions, ImageSource, NodeId,
+    PayloadValue, ResizeMode,
     access::Access,
     geometry::{DevicePixels, Points, Size},
 };
@@ -181,8 +182,12 @@ enum Location {
     Url(String),
     /// A file on disk.
     File(PathBuf),
-    /// A `data:` URI (decoded on the worker).
+    /// A `data:` URI (decoded on the worker): `Image.getSize`'s; a view's
+    /// source arrives decoded ([`Location::Memory`]).
     Data(String),
+    /// Bytes in memory (a decoded `data:` URI, a blob), by the source's
+    /// URI.
+    Memory(String, ImageData),
 }
 
 impl Location {
@@ -192,7 +197,7 @@ impl Location {
         match self {
             Location::Url(url) => url.clone(),
             Location::File(path) => format!("file://{}", path.display()),
-            Location::Data(uri) => uri.clone(),
+            Location::Data(uri) | Location::Memory(uri, _) => uri.clone(),
         }
     }
 }
@@ -291,20 +296,7 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 
 /// The bytes of a `data:` URI (base64 or percent-encoded).
 fn data_uri(uri: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    let rest = uri.strip_prefix("data:").ok_or("not a data URI")?;
-    let (meta, data) = rest.split_once(',').ok_or("malformed data URI")?;
-    if meta.ends_with(";base64") {
-        // As lenient as browsers: whitespace and missing padding pass.
-        const LENIENT: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
-            &base64::alphabet::STANDARD,
-            base64::engine::GeneralPurposeConfig::new()
-                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
-        );
-        let clean: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-        return LENIENT.decode(clean).map_err(|e| format!("data URI: {e}"));
-    }
-    Ok(percent_decode(data.as_bytes()))
+    nsh_core::image::decode_data_uri(uri).map(|(_, bytes)| bytes)
 }
 
 /// The HTTP agent all downloads share. It never follows redirects: each hop
@@ -358,6 +350,7 @@ fn read(
     match location {
         Location::File(path) => std::fs::read(path).map_err(|e| format!("{}: {e}", path.display())),
         Location::Data(uri) => data_uri(uri),
+        Location::Memory(_, data) => Ok(data.to_vec()),
         Location::Url(url) => {
             let mut response = get(url, access)?;
             let total = response.body().content_length().unwrap_or(0);
@@ -1289,6 +1282,39 @@ fn source(surface: &Surface, uri: &str) -> Result<(String, LoadSource), String> 
 /// Loads `uri` for `surface`; `done` runs on the main thread. Returns
 /// whether it already ran (cached, or a source that cannot load).
 fn fetch(surface: &Surface, uri: &str, progress: Option<Progress>, done: Done) -> bool {
+    fetch_at(surface, source(surface, uri), progress, done)
+}
+
+/// Loads `source` for `surface` as [`fetch`] does: from its bytes, when it
+/// carries them (a `data:` URI, a blob).
+fn fetch_source(
+    surface: &Surface,
+    source: &ImageSource,
+    progress: Option<Progress>,
+    done: Done,
+) -> bool {
+    match &source.data {
+        Some(data) => {
+            let location = Location::Memory(source.uri.to_string(), data.clone());
+            fetch_at(
+                surface,
+                Ok((location.key(), LoadSource::Location(location))),
+                progress,
+                done,
+            )
+        }
+        None => fetch(surface, &source.uri, progress, done),
+    }
+}
+
+/// Loads a resolved source for `surface`, as [`fetch`] does. Every path
+/// keeps its callbacks bound to the engine load that requested it.
+fn fetch_at(
+    surface: &Surface,
+    source: Result<(String, LoadSource), String>,
+    progress: Option<Progress>,
+    done: Done,
+) -> bool {
     let surface_key = surface.key();
     let generation = surface.load_generation();
     let current = move || {
@@ -1306,7 +1332,7 @@ fn fetch(surface: &Surface, uri: &str, progress: Option<Progress>, done: Done) -
             }
         }) as Progress
     });
-    let (key, source) = match source(surface, uri) {
+    let (key, source) = match source {
         Ok(source) => source,
         Err(reason) => {
             done(Err(reason));
@@ -1674,7 +1700,7 @@ pub(crate) fn set(
                 }
             }
         };
-        let immediate = fetch(surface, &source.uri, progress, Box::new(done));
+        let immediate = fetch_source(surface, source, progress, Box::new(done));
         waited.set(true);
         if !immediate && events.contains(EventKind::LoadStart) {
             surface.event(id, EventKind::LoadStart, EventPayload::None);
@@ -1702,7 +1728,7 @@ pub(crate) fn set(
                 Err(message) => log::warn!("image placeholder failed: {message}"),
             }
         };
-        fetch(surface, &placeholder.uri, None, Box::new(done));
+        fetch_source(surface, placeholder, None, Box::new(done));
     }
 }
 
@@ -2038,6 +2064,65 @@ mod tests {
     }
 
     #[test]
+    fn reads_inline_bytes_by_digest_key() {
+        let source = ImageSource::default().with_bytes("image/svg+xml", SVG_ICON.to_vec().into());
+        let same = ImageSource::default().with_bytes("image/svg+xml", SVG_ICON.to_vec().into());
+        let location = Location::Memory(source.uri.to_string(), source.data.unwrap());
+        assert_eq!(location.key(), same.uri.as_ref());
+        assert!(location.key().starts_with("data:image/svg+xml;nsh-key="));
+        assert!(
+            data_uri(&location.key()).is_err(),
+            "the key is not a data URI payload"
+        );
+        let bytes = read(&location, &Access::default(), &mut |_, _| {}).unwrap();
+        assert_eq!(bytes, SVG_ICON);
+        assert_eq!(decode(bytes).unwrap().size, (24, 24));
+    }
+
+    #[test]
+    fn inline_bytes_bypass_asset_resolution_and_keep_load_guards() {
+        let surface = Surface::new(nsh_engine::Environment::default());
+        *surface.image_assets.borrow_mut() = AssetSource::Engine(None);
+        let source = ImageSource {
+            uri: "asset:/inline-load-guard.svg".into(),
+            data: Some(SVG_ICON.to_vec().into()),
+            ..Default::default()
+        };
+        assert!(super::source(&surface, &source.uri).is_err());
+
+        // Stand in for an existing worker so callbacks can be driven without
+        // a GPUI event loop. Attached bytes must bypass the missing reader.
+        let key = source.uri.to_string();
+        LOADER.with(|l| {
+            l.inflight.borrow_mut().insert(
+                key.clone(),
+                vec![Waiter {
+                    done: Box::new(|_| {}),
+                    progress: None,
+                }],
+            );
+        });
+        let completed = Rc::new(Cell::new(false));
+        let progressed = Rc::new(Cell::new(0));
+        let done = {
+            let completed = completed.clone();
+            Box::new(move |_| completed.set(true)) as Done
+        };
+        let progress = {
+            let progressed = progressed.clone();
+            Box::new(move |_, _| progressed.set(progressed.get() + 1)) as Progress
+        };
+        assert!(!fetch_source(&surface, &source, Some(progress), done));
+        LOADER.with(|l| l.progress(&key, 1, 2));
+        assert_eq!(progressed.get(), 1);
+        surface.stop();
+        LOADER.with(|l| l.progress(&key, 2, 2));
+        finish(key, Err("the old load finished".into()));
+        assert_eq!(progressed.get(), 1);
+        assert!(!completed.get());
+    }
+
+    #[test]
     fn bounds_huge_images() {
         assert_eq!(bounded((100, 50)), (100, 50));
         assert_eq!(bounded((16384, 4096)), (8192, 2048));
@@ -2100,6 +2185,7 @@ mod tests {
             uri: "asset:/logo@2x.png".into(),
             size: None,
             scales: Default::default(),
+            data: None,
         };
         assert_eq!(natural((200, 100), None, Some(&source)), (100.0, 50.0));
     }
@@ -2251,6 +2337,7 @@ mod tests {
             uri: "asset:/logo@2x.svg".into(),
             size: None,
             scales: nsh_core::ImageScales::NONE,
+            data: None,
         };
         let logo = decode(SVG_LOGO.to_vec()).unwrap();
         assert_eq!(natural(logo.size, logo.points, Some(&source)), (48.0, 24.0));
