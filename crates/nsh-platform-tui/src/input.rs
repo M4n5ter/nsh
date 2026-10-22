@@ -2099,12 +2099,17 @@ impl Surface {
                     return false;
                 };
                 let path = self.ancestors(target);
-                let link = path
+                // A concrete attachment handles its own presses before an
+                // enclosing paragraph's link gets a chance to handle them.
+                let (pressable, link) = path
                     .iter()
                     .copied()
-                    .find_map(|id| self.text_link_at(id, x, y));
-                let pressable =
-                    link.or_else(|| path.iter().copied().find(|id| self.pressable(*id)));
+                    .find_map(|id| {
+                        self.text_link_at(id, x, y)
+                            .map(|link| (Some(link), Some(link)))
+                            .or_else(|| self.pressable(id).then_some((Some(id), None)))
+                    })
+                    .unwrap_or((None, None));
                 let field = path.iter().copied().find(|id| {
                     self.node(*id).is_some_and(|n| {
                         n.kind == ViewKind::Input
@@ -5956,6 +5961,17 @@ mod tests {
         key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
         key(&mut surface, KeyCode::Char(' '), KeyModifiers::NONE);
         assert_eq!(presses(&surface), [10, 10, 10]);
+
+        // An interactive attachment keeps its own contact instead of
+        // activating the enclosing text span's link.
+        surface.node_mut(4).unwrap().props.pointer_events = PointerEvents::Auto;
+        surface.node_mut(4).unwrap().events = mask(&[EventKind::Press]);
+        surface.events.clear();
+        surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 2, 3));
+        assert_eq!(presses(&surface), [4]);
+        surface.node_mut(4).unwrap().props.pointer_events = PointerEvents::None;
+        surface.node_mut(4).unwrap().events = Default::default();
 
         surface.events.clear();
         surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
