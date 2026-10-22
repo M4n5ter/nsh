@@ -70,6 +70,7 @@ crate::static_reactive!(JsonValue: JsonValue);
 crate::static_reactive!(StatusBarSetting: StatusBarSetting, crate::StatusBarStyle);
 crate::static_reactive!(Placement: Placement);
 crate::static_reactive!(Align: Align);
+crate::static_reactive!(OverlayAnchor: OverlayAnchor);
 
 /// Sets `prop` among `props`, replacing one of its kind.
 pub(crate) fn set_in(props: &mut Vec<Prop>, prop: Prop) {
@@ -745,6 +746,12 @@ impl Screen {
 }
 
 impl Overlay {
+    /// Places it against a reactive anchor: a node, its content bounds, a
+    /// root-view point, or no anchor. The core follows and places it.
+    pub fn anchor_target(self, anchor: impl IntoReactive<OverlayAnchor>) -> Self {
+        self.bind_prop(anchor, |a| Prop::Overlay(OverlayProp::Anchor(a)))
+    }
+
     /// Places it against the element carrying `anchor` (rendered before
     /// it), following it as it moves: on the [`Self::placement`] side, on
     /// the other when only that one has room, kept inside the safe area.

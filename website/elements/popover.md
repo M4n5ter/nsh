@@ -84,6 +84,13 @@ const open = signal(false);
 `closeOnEscape={false}` keeps it open on Escape and back (`onCancel` still hears them, to ask first);
 `closeOnPressOutside={false}` keeps it open on presses outside.
 
+## A separate anchor
+
+A controlled popover can use `anchor={rowRef}` to follow an element rendered elsewhere, without moving that element
+into `trigger`. The ref is a `YNode` in the same root view and takes precedence over the trigger's bounds. Keep the
+anchor mounted while the popover is open; close the popup when its virtualized row retires. The anchor controls
+placement: keyboard focus returns to the actual opener, such as a list's search field.
+
 ## Phones and desktops
 
 A popover is anchored to its trigger on every device: what it shows belongs next to what opened it.
@@ -108,6 +115,7 @@ For a list of actions use a [Menu](./menu.md), which becomes a sheet on phones; 
 | `closeOnEscape` | `.close_on_escape(..)` | `boolean` | `true` | Escape and the Android back button close it. |
 | `closeOnPressOutside` | `.close_on_press_outside(..)` | `boolean` | `true` | A press outside closes it. |
 | `popupClass`, `popupStyle` | `.popup_class(..)`, `.popup_style(..)` | `string`, `StyleProp<ViewStyle>` | none | The look of the popup, the box the content is in. |
+| `anchor` | `.anchor(..)` | `YNode \| null` | none | An element rendered elsewhere to place it against, before the trigger's bounds. |
 | `trigger` | `.trigger(..)` | `JSX.Element` | none | What opens it; it is placed against it. |
 | `children` | `.child(..)` | `JSX.Element` | none | The content. |
 

@@ -1,6 +1,9 @@
 //! `Popover`: content anchored to a trigger, in an overlay.
 
-use nsh_core::ui::{Style, prelude::*};
+use nsh_core::{
+    overlay::OverlayAnchor,
+    ui::{NodeRef, Style, prelude::*},
+};
 
 use crate::popup::{OpenChangeReason, OpenState, lifecycle};
 
@@ -42,6 +45,11 @@ pub struct PopoverProps {
     /// The inline style of the popup, over its classes.
     #[prop(default)]
     pub popup_style: Prop<Style>,
+    /// An element rendered elsewhere to place the popup against. When set,
+    /// it takes precedence over the trigger's bounds. It belongs to the
+    /// same root view and stays mounted while the popup is open. This only
+    /// controls placement: focus returns to the actual opener.
+    pub anchor: Prop<Option<NodeRef>>,
     /// What opens it: pressing it toggles the popover, and the popover is
     /// placed against it.
     pub trigger: Prop<Option<Slot>>,
@@ -134,7 +142,15 @@ pub fn Popover(props: PopoverProps, cx: Scope<PopoverEvent>) -> impl IntoElement
                 }
                 let popup = overlay()
                     .focus_return(true)
-                    .anchor_content(&anchor)
+                    .anchor_target(move || {
+                        if let Some(node) = props.anchor.get() {
+                            OverlayAnchor::Node(node.0)
+                        } else {
+                            anchor
+                                .node()
+                                .map_or(OverlayAnchor::None, OverlayAnchor::Content)
+                        }
+                    })
                     .placement(props.placement)
                     .align(props.align)
                     .offset(props.offset)

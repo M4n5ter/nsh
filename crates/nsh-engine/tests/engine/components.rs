@@ -335,6 +335,73 @@ fn frame_of(batches: &[MountBatch], id: u32) -> Option<nsh_core::Bounds<nsh_core
 }
 
 #[test]
+fn a_popover_follows_an_external_node_instead_of_its_trigger() {
+    let (engine, rx) = start(
+        r#"import { mount, signal, View, Text, type YNode } from "nsh";
+import { Popover } from "nsh/base";
+
+function Screen() {
+  const anchor = signal<YNode | null>(null);
+  let next: YNode;
+  return (
+    <View>
+      <View ref={(node) => anchor.set(node)} style={{ position: "absolute", left: 40, top: 100, width: 200, height: 30 }} />
+      <View ref={(node) => { next = node; }} style={{ position: "absolute", left: 80, top: 200, width: 200, height: 30 }} />
+      <View testID="move-anchor" onPress={() => anchor.set(next)}><Text>Move</Text></View>
+      <Popover open={anchor() !== null} anchor={anchor()} placement="bottom" align="start" offset={4}
+        popupStyle={{ width: 120, height: 50 }} trigger={<Text>Separate trigger</Text>}>
+        <Text>External popup</Text>
+      </Popover>
+    </View>
+  );
+}
+mount(Screen);
+"#,
+    );
+    let batches = until(&rx, |batch| shows(batch, "External popup"));
+    let popup = batches
+        .iter()
+        .flat_map(|batch| &batch.items)
+        .find_map(|item| match item {
+            MountItem::ViewProps { id, props } if props.focus_return_parent == Some(ROOT_ID) => {
+                Some(*id)
+            }
+            _ => None,
+        })
+        .expect("the popover keeps its native focus scope");
+    let frame = frame_of(&batches, popup).expect("external popup frame");
+    assert_eq!(frame.origin, nsh_core::geometry::point(px(40.0), px(134.0)));
+    assert_eq!(frame.size, Size::new(px(120.0), px(50.0)));
+    let move_anchor = batches
+        .iter()
+        .flat_map(|batch| &batch.items)
+        .find_map(|item| match item {
+            MountItem::ViewProps { id, props }
+                if props.test_id.as_deref() == Some("move-anchor") =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        })
+        .expect("move anchor control");
+    engine
+        .control()
+        .dispatch_event(move_anchor, EventKind::Press, EventPayload::None);
+    let moved = until(&rx, |batch| {
+        batch.items.iter().any(|item| matches!(item,
+            MountItem::Frame { id, frame }
+                if *id == popup && frame.origin == nsh_core::geometry::point(px(80.0), px(234.0))
+        ))
+    });
+    assert_eq!(
+        frame_of(&moved, popup)
+            .expect("the same popup follows the next anchor")
+            .origin,
+        nsh_core::geometry::point(px(80.0), px(234.0)),
+    );
+}
+
+#[test]
 fn unhandled_back_presses_go_back_natively() {
     unhandled_back_presses_go_back_natively_on(start(BACK));
 }
