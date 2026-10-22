@@ -5874,7 +5874,7 @@ mod tests {
         text.push("!", style);
         let mut props = nsh_core::ViewProps::default();
         props.focusable = Some(true);
-        props.accessibility.role = Some(nsh_core::AccessibilityRole::Link);
+        props.accessibility.role = nsh_core::AccessibilityRole::Link;
         props.accessibility.label = Some("Photo".into());
         text.links.push(TextLink {
             start: 3,
