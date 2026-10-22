@@ -2346,6 +2346,7 @@ impl<M: TextEngine> Core<M> {
                     && scroll.horizontal != horizontal
                 {
                     scroll.horizontal = horizontal;
+                    self.reading_dirty = true;
                     flags |= dirty::SCROLL;
                     if let Some(list) = node.list.as_mut() {
                         list.set_horizontal(horizontal);
@@ -2931,6 +2932,7 @@ impl<M: TextEngine> Core<M> {
             // `scrollable` of scroll views and lists.
             Prop::Native(NativeProp::Scrollable(on)) if node.scroll.is_some() => {
                 if let Some(scroll) = node.scroll.as_mut() {
+                    self.reading_dirty |= scroll.behavior.enabled != on;
                     scroll.behavior.enabled = on;
                     flags |= dirty::SCROLL_BEHAVIOR;
                 }
@@ -5399,9 +5401,7 @@ impl<M: TextEngine> Core<M> {
         // Inverted lists keep their distance from the end instead;
         // `maintainVisibleContentPosition` follows the end near it.
         anchor += list.anchor_end();
-        let rebuild_sources = self.reading_dirty
-            || list.source_dirty
-            || (relayout && !list.source_geometry.is_empty());
+        let rebuild_sources = self.reading_dirty || list.source_dirty || relayout;
         if rebuild_sources {
             let geometry = self.list_source_geometry(key);
             let list = self.nodes[key as usize].list.as_mut().expect("list");

@@ -1735,6 +1735,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
                 id: 10,
                 tag: Tag::Text,
             },
+            style_op(10, &[("display", StyleValue::Str("none"))]),
             Op::SetProp {
                 id: 10,
                 prop: source(2560),
@@ -1764,6 +1765,10 @@ fn source_reading_survives_prepend_and_rich_replacement() {
         ],
     );
     c.commit();
+    // Visibility alone makes unchanged source text eligible for anchoring.
+    c.apply(style_op(10, &[("display", StyleValue::Str("flex"))]))
+        .unwrap();
+    assert_eq!(shift(c.commit()), 0.0);
     c.set_scroll_offset(2, point(px(0.0), px(320.0)), 0);
     assert_eq!(shift(c.commit()), 0.0);
 
@@ -1925,6 +1930,28 @@ fn source_reading_survives_prepend_and_rich_replacement() {
     );
     assert_eq!(shift(c.commit()), 0.0);
 
+    // Re-enabling outer ownership alone also rebuilds an empty index.
+    c.apply(Op::SetProp {
+        id: 16,
+        prop: Prop::Native(NativeProp::Scrollable(false)),
+    })
+    .unwrap();
+    assert_eq!(shift(c.commit()), 0.0);
+    apply(
+        &mut c,
+        vec![
+            Op::SetProp {
+                id: 20,
+                prop: source(1920),
+            },
+            Op::SetText {
+                id: 21,
+                text: format!("{}{}", "*".repeat(640), "R".repeat(3280)).into(),
+            },
+        ],
+    );
+    assert_eq!(shift(c.commit()), 512.0);
+
     // Explicit End and near-bottom append following retain priority over
     // source anchoring. The native end receipt completes the original To.
     apply(
@@ -1945,12 +1972,12 @@ fn source_reading_survives_prepend_and_rich_replacement() {
         ],
     );
     let batch = c.commit().unwrap();
-    assert_eq!(scrolled(&batch, 704.0), 2256.0);
-    c.set_scroll_offset(2, point(px(0.0), px(2256.0)), u32::MAX);
+    assert_eq!(scrolled(&batch, 1216.0), 2768.0);
+    c.set_scroll_offset(2, point(px(0.0), px(2768.0)), u32::MAX);
     c.commit();
     c.apply(Op::SetText {
         id: 21,
-        text: "R".repeat(3320).into(),
+        text: format!("{}{}", "*".repeat(640), "R".repeat(3320)).into(),
     })
     .unwrap();
     assert_eq!(shift(c.commit()), 32.0);
