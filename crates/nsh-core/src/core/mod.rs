@@ -4628,6 +4628,11 @@ impl<M: TextEngine> Core<M> {
                 .style(layout)
                 .is_ok_and(|s| s.display == taffy::Display::None);
         if hidden {
+            // Cells keep independent layout caches. Re-emit their descendants
+            // when shown again, even if their measured size has not changed.
+            if self.nodes[key as usize].kind == Kind::Cell {
+                self.nodes[key as usize].relaid = true;
+            }
             self.set_frame(key, Bounds::default());
             if self.nodes[key as usize].kind.is_container() {
                 let children = std::mem::take(&mut self.nodes[key as usize].children);
@@ -4883,6 +4888,7 @@ impl<M: TextEngine> Core<M> {
             if !(relayout || list.dirty || self.commands.iter().any(|c| c.0 == node.id)) {
                 continue;
             }
+            let list_hidden = self.displays_none(key);
             let (id, events) = (node.id, node.events);
             let horizontal = list.horizontal;
             let scroll = node.scroll.as_ref().expect("list scroll");
@@ -5095,6 +5101,10 @@ impl<M: TextEngine> Core<M> {
                 .collect();
             self.mount_list_cells(key, cells);
             for cell in hidden {
+                if list_hidden {
+                    self.emit_frames(cell);
+                    continue;
+                }
                 let frame = self.nodes[cell as usize].frame;
                 if frame.size.width.0.is_nan() {
                     // Never placed: nothing to see yet.
@@ -5127,6 +5137,12 @@ impl<M: TextEngine> Core<M> {
             let place = |this: &mut Self, cell: Key, at: f32, row: f32, (x, width): (f32, f32)| {
                 let cell_layout = this.nodes.get(cell as usize).and_then(|c| c.layout)?;
                 let size = this.layout.layout(cell_layout).expect("taffy layout").size;
+                // Keep bindings and scroll requests alive while hidden, without
+                // overwriting empty frames or consuming pending descendants.
+                if list_hidden {
+                    this.emit_frames(cell);
+                    return Some(main_of(size));
+                }
                 let list = this.nodes[key as usize].list.as_ref().expect("list");
                 let main_at = list.to_content(at, row.max(main_of(size)));
                 let frame = if horizontal {

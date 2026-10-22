@@ -14204,3 +14204,106 @@ fn views_moved_into_a_hidden_subtree_lose_their_frames() {
         );
     }
 }
+
+/// Hiding a list must not discard the frames of its clean cached cells
+/// when it returns to the same width, including across repeated moves.
+#[test]
+fn list_cell_descendants_restore_after_hidden_reparent() {
+    for (tag, position) in [
+        (Tag::View, "relative"),
+        (Tag::Text, "relative"),
+        (Tag::View, "absolute"),
+        (Tag::Text, "absolute"),
+    ] {
+        let mut c = core();
+        add(
+            &mut c,
+            2,
+            Tag::View,
+            ROOT_ID,
+            &[("display", StyleValue::Str("none"))],
+        );
+        add(
+            &mut c,
+            4,
+            Tag::View,
+            2,
+            &[("position", StyleValue::Str(position))],
+        );
+        add(
+            &mut c,
+            6,
+            Tag::List,
+            ROOT_ID,
+            &[("height", StyleValue::Number(100.0))],
+        );
+        apply(
+            &mut c,
+            vec![
+                Op::SetProp {
+                    id: 6,
+                    prop: Prop::EstimatedItemSize(px(20.0)),
+                },
+                Op::SetProp {
+                    id: 6,
+                    prop: Prop::Count(1),
+                },
+            ],
+        );
+        c.commit();
+        let (mut next_id, mut cells) = (100, Vec::new());
+        render_binds(&mut c, &mut next_id, &mut cells, 20.0);
+        add(
+            &mut c,
+            200,
+            tag,
+            cells[0],
+            &[("height", StyleValue::Number(20.0))],
+        );
+        if tag == Tag::Text {
+            apply(
+                &mut c,
+                vec![
+                    Op::CreateText {
+                        id: 202,
+                        text: "hello".into(),
+                    },
+                    Op::Insert {
+                        parent: 200,
+                        child: 202,
+                        before: None,
+                    },
+                ],
+            );
+        }
+        c.commit();
+        let child = c.key(200).unwrap();
+        let cell = c.key(cells[0]).unwrap();
+        let shown = c.nodes[child as usize].frame;
+        let shown_cell = c.nodes[cell as usize].frame;
+        assert_eq!(shown.size, size_pt(320.0, 20.0));
+        for _ in 0..2 {
+            c.apply(Op::Insert {
+                parent: 4,
+                child: 6,
+                before: None,
+            })
+            .unwrap();
+            c.commit();
+            assert_eq!(c.nodes[child as usize].frame, Bounds::default());
+            assert_eq!(c.nodes[cell as usize].frame, Bounds::default());
+            c.apply(Op::Insert {
+                parent: ROOT_ID,
+                child: 6,
+                before: None,
+            })
+            .unwrap();
+            c.commit();
+            assert_eq!(
+                c.nodes[child as usize].frame, shown,
+                "{tag:?} in {position}"
+            );
+            assert_eq!(c.nodes[cell as usize].frame, shown_cell);
+        }
+    }
+}
