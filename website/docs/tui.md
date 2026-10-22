@@ -207,22 +207,18 @@ Forward keyboard and paste events with `view.handle_event(event)`. Translate mou
 relative to the view's region before forwarding them; route events only to the surface that should receive them.
 Dropping the view or calling `stop()` ends its engine.
 
-Hosts driving `Surface` and `LocalEngine` directly can preserve ordinary left presses with
-[`inputAction`](../modules/nsh.md#inputaction). Take `Surface::input_snapshot()` with the rendered frame and
-publish its `InputSnapshot` only after the corresponding terminal bytes have flushed successfully. At mouse
-Down, resolve `snapshot.press_at(column, row)` and keep that same `PressLease` for Down, Drag and Up through
-`Surface::handle_presented_mouse`. Before entering its callback, validate the lease's `binding()` with
-`LocalEngine::dispatch_bound_event_now`; `target()` identifies its native activation owner. Revoke the remaining
-admitted input from that presentation as soon as the first application callback enters. A stale lease rejects
-the press. Presses without a lease, keyboard, selection, gesture input and opaque callbacks keep the host's
-exact-presentation input path.
+Hosts driving `Surface` and `LocalEngine` directly deliver events to `Surface::handle_event` against the current
+mounted scene. The surface owns native pointer capture, selection, focus and gestures. Forward its ordered
+`SurfaceEvent`s through the engine's `EngineControl`, using `dispatch_event` for application callbacks, then
+call `LocalEngine::pump()` and apply every resulting mount batch before the next physical event. Publish
+`Surface::focus_path()` through `EngineControl::set_focus_path` before enqueueing events or environment updates.
+Engine work and native input continue while terminal output completes.
 
-Ordinary wheel input can use `snapshot.wheel_at(column, row)` and pass its `WheelLease` to
-`Surface::handle_presented_wheel(mouse, steps, &lease)`. This retains the original native scroll owner while its
-content or offset changes; a changed owner, ancestry, viewport, modal scope, geometry or scroll policy rejects
-it rather than retargeting the input. `Some(n)` reports consumed detents; `None` rejects the route. Scroll events
-report the owner's current offset. Ctrl+wheel zoom, immediate application callbacks and events without a wheel
-lease keep the exact-presentation path.
+`Surface::handle_wheel(mouse, steps)` groups consecutive detents with identical coordinates, direction and
+modifiers against one live hit-tested owner and returns the number consumed. Host components receive at most
+one detent per call so their events can be dispatched before more input arrives. When the host's input region
+changes, `Surface::cancel_pointer()` cancels native capture while retaining keyboard focus; forward its
+resulting events through the same engine control.
 
 `AppOptions::asset_base` resolves `asset:/` URIs from an asset directory or HTTP base.
 `AppOptions::limits` configures the VM limits; embedding defaults to `Limits::default()`, while the standalone
