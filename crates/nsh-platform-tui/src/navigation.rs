@@ -970,21 +970,22 @@ impl Surface {
         }
     }
 
-    /// Real removal revokes the held route without restoring its departing
-    /// screen. The Remove keeps ownership of the exit animation.
+    /// Removal revokes a held route. Keep an actual exit; restore a screen
+    /// which survives, including one reinserted in this batch.
     pub(crate) fn retire_navigation_pointer(&mut self, root: NodeId) -> bool {
         let within = |id| self.ancestors(id).contains(&root);
-        if self
-            .navigation
-            .gesture
-            .as_ref()
-            .is_some_and(|gesture| within(gesture.id) || gesture.below.is_some_and(within))
-        {
-            self.navigation.gesture = None;
-            true
-        } else {
-            false
+        let Some(gesture) = self.navigation.gesture.as_ref() else {
+            return false;
+        };
+        if !within(gesture.id) && !gesture.below.is_some_and(within) {
+            return false;
         }
+        if self.navigation_retains(gesture.id) {
+            self.navigation.gesture = None;
+        } else {
+            self.navigation_pointer_cancel();
+        }
+        true
     }
 
     /// Losing pointer capture restores an interactive route without dismissing.
@@ -1569,26 +1570,44 @@ mod tests {
         surface.tick(1.8);
         assert_eq!(events(&mut surface, EventKind::Dismiss), vec![6]);
 
-        for removed in [false, true] {
+        for change in ["move", "below", "owner", "reinsert", "both"] {
             let mut surface = stack();
             push(&mut surface, ScreenAnimation::Default);
             surface.tick(0.31);
             assert!(surface.navigation_pointer_down(0.0, 80.0));
-            surface.apply(MountBatch {
-                items: vec![if removed {
-                    MountItem::Remove { id: 6 }
-                } else {
+            assert!(surface.navigation_pointer_drag(80.0, 80.0));
+            let items = match change {
+                "move" => vec![MountItem::Insert {
+                    parent: 2,
+                    child: 6,
+                    before: None,
+                }],
+                "below" => vec![MountItem::Remove { id: 4 }],
+                "owner" => vec![MountItem::Remove { id: 6 }],
+                "reinsert" => vec![
+                    MountItem::Remove { id: 6 },
                     MountItem::Insert {
                         parent: 2,
                         child: 6,
                         before: None,
-                    }
-                }],
-            });
-            assert_eq!(surface.navigation_pointer_drag(400.0, 80.0), !removed);
-            if removed {
+                    },
+                ],
+                "both" => vec![MountItem::Remove { id: 4 }, MountItem::Remove { id: 6 }],
+                _ => unreachable!(),
+            };
+            surface.apply(MountBatch { items });
+            assert_eq!(
+                surface.navigation_pointer_drag(400.0, 80.0),
+                change == "move"
+            );
+            if change != "move" {
                 surface.tick(1.0);
-                assert_eq!(surface.node(6).unwrap().parent, None);
+                if matches!(change, "owner" | "both") {
+                    assert_eq!(surface.node(6).unwrap().parent, None);
+                } else {
+                    assert_eq!(surface.navigation_values(6), (0.0, 0.0, 1.0));
+                }
+                assert!(!surface.navigation_animating());
             } else {
                 assert!(surface.navigation_pointer_up(400.0, 80.0));
                 assert!(surface.node(6).unwrap().popped);
