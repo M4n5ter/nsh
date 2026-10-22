@@ -970,6 +970,23 @@ impl Surface {
         }
     }
 
+    /// Real removal revokes the held route without restoring its departing
+    /// screen. The Remove keeps ownership of the exit animation.
+    pub(crate) fn retire_navigation_pointer(&mut self, root: NodeId) -> bool {
+        let within = |id| self.ancestors(id).contains(&root);
+        if self
+            .navigation
+            .gesture
+            .as_ref()
+            .is_some_and(|gesture| within(gesture.id) || gesture.below.is_some_and(within))
+        {
+            self.navigation.gesture = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Losing pointer capture restores an interactive route without dismissing.
     pub(crate) fn navigation_pointer_cancel(&mut self) {
         if let Some(gesture) = self.navigation.gesture.take()
@@ -1551,6 +1568,32 @@ mod tests {
         assert!(surface.node(6).unwrap().popped);
         surface.tick(1.8);
         assert_eq!(events(&mut surface, EventKind::Dismiss), vec![6]);
+
+        for removed in [false, true] {
+            let mut surface = stack();
+            push(&mut surface, ScreenAnimation::Default);
+            surface.tick(0.31);
+            assert!(surface.navigation_pointer_down(0.0, 80.0));
+            surface.apply(MountBatch {
+                items: vec![if removed {
+                    MountItem::Remove { id: 6 }
+                } else {
+                    MountItem::Insert {
+                        parent: 2,
+                        child: 6,
+                        before: None,
+                    }
+                }],
+            });
+            assert_eq!(surface.navigation_pointer_drag(400.0, 80.0), !removed);
+            if removed {
+                surface.tick(1.0);
+                assert_eq!(surface.node(6).unwrap().parent, None);
+            } else {
+                assert!(surface.navigation_pointer_up(400.0, 80.0));
+                assert!(surface.node(6).unwrap().popped);
+            }
+        }
     }
 
     #[test]

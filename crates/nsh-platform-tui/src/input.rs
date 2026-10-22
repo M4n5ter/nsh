@@ -673,22 +673,25 @@ impl Surface {
         {
             before.focus = None;
         }
-        if self.pointer.as_ref().is_some_and(|pointer| {
-            [
-                Some(pointer.target),
-                pointer.pressable,
-                pointer.pan_candidate,
-                pointer.pan,
-                pointer.native,
-                pointer.link,
-                pointer.scroll,
-            ]
-            .into_iter()
-            .flatten()
-            .any(|id| self.within_popup(id, root))
-        }) || self
-            .drag_input
-            .is_some_and(|id| self.within_popup(id, root))
+        let navigation = self.retire_navigation_pointer(root);
+        if navigation
+            || self.pointer.as_ref().is_some_and(|pointer| {
+                [
+                    Some(pointer.target),
+                    pointer.pressable,
+                    pointer.pan_candidate,
+                    pointer.pan,
+                    pointer.native,
+                    pointer.link,
+                    pointer.scroll,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|id| self.within_popup(id, root))
+            })
+            || self
+                .drag_input
+                .is_some_and(|id| self.within_popup(id, root))
         {
             self.cancel_pointer();
         }
