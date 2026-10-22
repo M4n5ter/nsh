@@ -409,11 +409,16 @@ pub struct TouchEvent {
     pub activated: Option<NodeId>,
 }
 
+// Every kind has a bit of [`EventMask`].
+const _: () = assert!(EventKind::ALL.len() <= 128, "EventMask has 128 bits");
+
 /// Events a view reports, retaining which subscriptions can call a listener.
+/// Each subscription set has room for 128 kinds, stored as two words rather
+/// than a `u128`: Objective-C ivars take no 16-byte alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EventMask {
-    listeners: u64,
-    observations: u64,
+    listeners: [u64; 2],
+    observations: [u64; 2],
     hint_watch: Option<HintWatchToken>,
 }
 
@@ -422,11 +427,17 @@ impl std::ops::BitOr for EventMask {
 
     #[inline]
     fn bitor(self, other: EventMask) -> EventMask {
-        let conflicted = (self.observations != 0 && self.hint_watch.is_none())
-            || (other.observations != 0 && other.hint_watch.is_none());
+        let conflicted = (self.observations != [0; 2] && self.hint_watch.is_none())
+            || (other.observations != [0; 2] && other.hint_watch.is_none());
         EventMask {
-            listeners: self.listeners | other.listeners,
-            observations: self.observations | other.observations,
+            listeners: [
+                self.listeners[0] | other.listeners[0],
+                self.listeners[1] | other.listeners[1],
+            ],
+            observations: [
+                self.observations[0] | other.observations[0],
+                self.observations[1] | other.observations[1],
+            ],
             hint_watch: match (self.hint_watch, other.hint_watch) {
                 _ if conflicted => None,
                 (Some(left), Some(right)) if left != right => None,
@@ -440,14 +451,16 @@ impl EventMask {
     /// Returns true if `event` is in the set.
     #[inline]
     pub const fn contains(self, event: EventKind) -> bool {
-        self.bits() & (1 << event as u8) != 0
+        let k = event as usize;
+        (self.listeners[k / 64] | self.observations[k / 64]) & (1 << (k % 64)) != 0
     }
 
     /// Whether reporting `event` can invoke a listener, rather than only
     /// update native presentation such as a callback-free tooltip.
     #[inline]
     pub const fn contains_listener(self, event: EventKind) -> bool {
-        self.listeners & (1 << event as u8) != 0
+        let k = event as usize;
+        self.listeners[k / 64] & (1 << (k % 64)) != 0
     }
 
     /// The native hint watch paired with these observations, if any.
@@ -458,19 +471,21 @@ impl EventMask {
 
     /// The raw bit set, indexed by `EventKind as u8`.
     #[inline]
-    pub const fn bits(self) -> u64 {
-        self.listeners | self.observations
+    pub const fn bits(self) -> u128 {
+        (self.listeners[0] | self.observations[0]) as u128
+            | ((self.listeners[1] | self.observations[1]) as u128) << 64
     }
 
     /// Adds or removes `event`.
     #[inline]
     pub fn set(&mut self, event: EventKind, enabled: bool) {
+        let k = event as usize;
         if enabled {
-            self.listeners |= 1 << event as u8;
+            self.listeners[k / 64] |= 1 << (k % 64);
         } else {
-            self.listeners &= !(1 << event as u8);
-            self.observations &= !(1 << event as u8);
-            if self.observations == 0 {
+            self.listeners[k / 64] &= !(1 << (k % 64));
+            self.observations[k / 64] &= !(1 << (k % 64));
+            if self.observations == [0; 2] {
                 self.hint_watch = None;
             }
         }
@@ -480,12 +495,13 @@ impl EventMask {
     /// An existing listener of the same event retains its authority.
     #[inline]
     pub(crate) fn observe(&mut self, event: EventKind, watch: HintWatchToken) {
-        if self.observations == 0 {
+        if self.observations == [0; 2] {
             self.hint_watch = Some(watch);
         } else if self.hint_watch != Some(watch) {
             self.hint_watch = None;
         }
-        self.observations |= 1 << event as u8;
+        let k = event as usize;
+        self.observations[k / 64] |= 1 << (k % 64);
     }
 
     /// Returns true if no event is set.
@@ -668,8 +684,11 @@ pub struct ImageSource {
 impl ImageSource {
     /// This source with its bytes in hand when its URI holds them: a
     /// `data:` URI decoded (once, when the source is set) and named by a
-    /// short key. Other sources, and `data:` URIs that do not decode, stay
-    /// as they are (the platforms then report the error).
+    /// short key. Other sources stay as they are. A `data:` URI that does
+    /// not decode becomes an empty one (the platforms then report the
+    /// error): left as it is, an app could write another image's key
+    /// (`data:<type>;nsh-key=<digest>`, which has no comma) and ask the
+    /// process-wide caches whether some surface shows those bytes.
     #[must_use]
     pub fn inline(self) -> ImageSource {
         if self.data.is_some() || !self.uri.starts_with("data:") {
@@ -680,7 +699,10 @@ impl ImageSource {
                 let mime = mime.to_owned();
                 self.with_bytes(&mime, bytes.into())
             }
-            Err(_) => self,
+            Err(_) => ImageSource {
+                uri: "data:,".into(),
+                ..self
+            },
         }
     }
 
@@ -2119,4 +2141,122 @@ pub enum Op {
     /// posted during a synchronous call ([`crate::ui::RustCall`]). Never
     /// reaches a platform.
     Rust(crate::ui::RustOp),
+}
+
+#[cfg(test)]
+mod event_mask_tests {
+    use super::*;
+
+    #[test]
+    fn every_event_keeps_listeners_separate_from_observations() {
+        let watch = HintWatchToken::new(1, 1);
+        for &event in EventKind::ALL {
+            let mut mask = EventMask::default();
+            mask.observe(event, watch);
+            assert!(mask.contains(event));
+            assert!(!mask.contains_listener(event));
+            assert!(!mask.is_empty());
+            assert_eq!(mask.bits(), 1u128 << event as u8);
+            assert_eq!(mask.hint_watch(), Some(watch));
+            mask.set(event, true);
+            assert!(mask.contains_listener(event));
+            assert_eq!(mask.hint_watch(), Some(watch));
+            mask.set(event, false);
+            assert!(!mask.contains(event));
+            assert!(!mask.contains_listener(event));
+            assert!(mask.is_empty());
+            assert_eq!(mask.hint_watch(), None);
+        }
+    }
+
+    #[test]
+    fn union_preserves_both_words_without_granting_listener_authority() {
+        let watch = HintWatchToken::new(1, 1);
+        // Exercise bits beyond the currently declared kinds without making
+        // invalid EventKind values. Future kinds also run through the test above.
+        let listeners = EventMask {
+            listeners: [1, 1],
+            ..Default::default()
+        };
+        let observations = EventMask {
+            observations: [2, 1 << 63],
+            hint_watch: Some(watch),
+            ..Default::default()
+        };
+        let mask = listeners | observations;
+        assert_eq!(mask.listeners, [1, 1]);
+        assert_eq!(mask.observations, [2, 1 << 63]);
+        assert_eq!(mask.bits(), 3 | (1u128 << 64) | (1u128 << 127));
+        assert_eq!(mask.hint_watch(), Some(watch));
+        assert_eq!(mask, observations | listeners);
+        assert!(mask.contains_listener(EventKind::Press));
+        assert!(mask.contains(EventKind::LongPress));
+        assert!(!mask.contains_listener(EventKind::LongPress));
+        assert_eq!(
+            std::mem::align_of::<EventMask>(),
+            std::mem::align_of::<u64>()
+        );
+    }
+
+    #[test]
+    fn upper_word_observations_keep_their_watch_when_a_lower_event_is_removed() {
+        let watch = HintWatchToken::new(1, 1);
+        let mut mask = EventMask {
+            observations: [0, 1],
+            hint_watch: Some(watch),
+            ..Default::default()
+        };
+        mask.observe(EventKind::HoverIn, watch);
+        mask.set(EventKind::HoverIn, true);
+        mask.set(EventKind::HoverIn, false);
+        assert!(!mask.is_empty());
+        assert_eq!(mask.bits(), 1u128 << 64);
+        assert_eq!(mask.listeners, [0; 2]);
+        assert_eq!(mask.hint_watch(), Some(watch));
+    }
+
+    #[test]
+    fn upper_word_watch_conflicts_cannot_be_reauthorized_by_a_union_or_observation() {
+        let first = HintWatchToken::new(1, 1);
+        let second = HintWatchToken::new(1, 2);
+        let upper = EventMask {
+            observations: [0, 1 << 63],
+            hint_watch: Some(first),
+            ..Default::default()
+        };
+        let mut lower = EventMask::default();
+        lower.observe(EventKind::HoverIn, second);
+        let mut conflicted = upper | lower;
+        assert_eq!(conflicted.hint_watch(), None);
+        assert_eq!((conflicted | upper).hint_watch(), None);
+        assert_eq!((upper | conflicted).hint_watch(), None);
+        conflicted.set(EventKind::HoverIn, false);
+        assert_eq!(conflicted.bits(), 1u128 << 127);
+        assert_eq!(conflicted.hint_watch(), None);
+        assert_eq!((conflicted | upper).hint_watch(), None);
+        assert_eq!((upper | conflicted).hint_watch(), None);
+        conflicted.observe(EventKind::HoverOut, first);
+        assert_eq!(conflicted.hint_watch(), None);
+        assert_eq!(conflicted.listeners, [0; 2]);
+        let mut observed = upper;
+        observed.observe(EventKind::HoverIn, second);
+        assert_eq!(observed.hint_watch(), None);
+        assert_eq!(observed, upper | lower);
+    }
+
+    #[test]
+    fn same_watch_unites_observations_across_both_words() {
+        let watch = HintWatchToken::new(1, 1);
+        let upper = EventMask {
+            observations: [0, 1],
+            hint_watch: Some(watch),
+            ..Default::default()
+        };
+        let mut lower = EventMask::default();
+        lower.observe(EventKind::HoverIn, watch);
+        assert_eq!((upper | lower).hint_watch(), Some(watch));
+        assert_eq!((lower | upper).hint_watch(), Some(watch));
+        assert_eq!((upper | EventMask::default()).hint_watch(), Some(watch));
+        assert_eq!((EventMask::default() | upper).hint_watch(), Some(watch));
+    }
 }
