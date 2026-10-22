@@ -794,7 +794,6 @@ mod tests {
             crate::text_input::focused_view(&surface),
             Some(inner.clone())
         );
-        let source = crate::InputSource::new(&surface);
         let settle = || {
             // Settle the real native animation with one virtual frame, without
             // waiting on a display or a wall-clock sleep.
@@ -802,30 +801,15 @@ mod tests {
             shared::frame(&Host::new(&surface, &inner), now);
             shared::frame(&Host::new(&surface, &outer), now);
         };
-        let press = |name: &str| {
-            let snapshot = source.sample().unwrap();
-            let keystroke = gpui::Keystroke {
-                key: name.into(),
-                key_char: None,
-                modifiers: gpui::Modifiers::default(),
-            };
-            assert_eq!(
-                source.dispatch(
-                    &snapshot,
-                    &gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    })
-                ),
-                crate::InputDisposition::Handled,
-            );
-            assert_eq!(
-                source.dispatch(
-                    &snapshot,
-                    &gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
-                ),
-                crate::InputDisposition::Handled,
+        let press = |vk| {
+            let event = key(vk, Modifiers::default());
+            assert!(crate::input::key(&surface, event));
+            crate::input::key(
+                &surface,
+                KeyEvent {
+                    down: false,
+                    ..event
+                },
             );
             settle();
         };
@@ -852,7 +836,7 @@ mod tests {
                 scroll.x = Points(if horizontal { start } else { 0.0 });
                 scroll.y = Points(if horizontal { 0.0 } else { start });
             }
-            press(name);
+            press(if name == "home" { VK_HOME } else { VK_END });
             assert_eq!(
                 {
                     let state = inner.state();
@@ -892,9 +876,9 @@ mod tests {
         settle();
         let outer_offset = outer.state().scroll.as_ref().unwrap().y;
         let inner_offset = inner.state().scroll.as_ref().unwrap().y;
-        press("home");
+        press(VK_HOME);
         crate::text_input::char_input(&surface, "L");
-        press("end");
+        press(VK_END);
         crate::text_input::char_input(&surface, "R");
         assert_eq!(
             crate::text_input::accessible_value(&editor).unwrap().text,

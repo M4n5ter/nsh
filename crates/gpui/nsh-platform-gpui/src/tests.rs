@@ -145,7 +145,7 @@ function App() {
 mount(App);
 "#;
 
-const PRESENTED_KEYBOARD: &str = r#"
+const NATIVE_KEYBOARD: &str = r#"
 import { effect, Input, mount, signal, Text, View } from "nsh";
 import { keymap } from "nsh/keymap";
 
@@ -366,7 +366,7 @@ fn windows(cx: &mut TestAppContext) {
     compositions_are_reported_and_hold_values_until_they_end(cx);
     configured_assets_stay_with_their_original_load(cx);
     buttons_keep_native_focus_and_live_key_scopes(cx);
-    presented_keys_keep_their_native_owner_across_redraws(cx);
+    native_keys_keep_their_owner_across_redraws(cx);
 }
 
 fn find_test_view(view: &crate::view::NshView, id: &str) -> Option<crate::view::NshView> {
@@ -535,10 +535,8 @@ fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
     view.update(cx, |view, _| view.stop());
 }
 
-fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext) {
-    use crate::InputDisposition::{ExactFallback, Handled, Rejected};
-
-    let code = nsh_bundler::compile_module("App.tsx", PRESENTED_KEYBOARD, &[]).unwrap();
+fn native_keys_keep_their_owner_across_redraws(cx: &mut TestAppContext) {
+    let code = nsh_bundler::compile_module("App.tsx", NATIVE_KEYBOARD, &[]).unwrap();
     let (view, cx) =
         cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
     view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
@@ -549,7 +547,6 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
     });
     wait_for_report(&view, cx, "0|0|editor:0||0|0|0|");
 
-    let source = view.read_with(cx, |view, _| view.input_source());
     let key = |name: &str, down: bool| {
         let keystroke = gpui::Keystroke::parse(name).unwrap();
         if down {
@@ -562,76 +559,57 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
             gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
         }
     };
-    let original = source.sample().unwrap();
+    let dispatch = |cx: &mut VisualTestContext, event| {
+        cx.update(|window, cx| window.dispatch_event(event, cx));
+    };
+    let press = |cx: &mut VisualTestContext, name| {
+        dispatch(cx, key(name, true));
+        dispatch(cx, key(name, false));
+    };
     ime(&view, cx, |surface| {
-        assert!(source.editor_matches(&original));
-        // This is the native editor path used by AppView's InputHandler. The
-        // following Return must submit its current text through the same lease.
         crate::text_input::ime::replace_text_in_range(surface, None, "a");
-        assert_eq!(source.dispatch(&original, &key("enter", true)), Handled);
-        source.dispatch(&original, &key("enter", false));
     });
+    press(cx, "enter");
     wait_for_report(&view, cx, "0|0|editor:0|0:a|0|0|0|");
 
-    cx.simulate_keystrokes("f7");
+    press(cx, "f7");
     wait_for_report(&view, cx, "0|1|editor:0|0:a|0|0|0|");
-    assert!(source.editor_matches(&original));
-    assert_eq!(source.dispatch(&original, &key("escape", true)), Handled);
-    source.dispatch(&original, &key("escape", false));
+    press(cx, "escape");
     wait_for_report(&view, cx, "0|1|editor:0|0:a|1|0|0|");
-    assert_eq!(source.dispatch(&original, &key("tab", true)), Handled);
+    press(cx, "tab");
     wait_for_report(&view, cx, "0|1|next|0:a|1|0|0|");
-    source.dispatch(&source.sample().unwrap(), &key("tab", false));
 
-    // A shortcut may transfer focus before its release arrives. The original
-    // release still has to end its held-key state, so the next press can fire.
-    let before_move = source.sample().unwrap();
-    assert_eq!(source.dispatch(&before_move, &key("f9", true)), Handled);
+    // A shortcut may transfer focus before its release arrives. The release
+    // still has to end its held-key state, so the next press can fire.
+    dispatch(cx, key("f9", true));
     wait_for_report(&view, cx, "0|1|editor:0|0:a|1|1|0|");
-    source.dispatch(&before_move, &key("f9", false));
-    let after_move = source.sample().unwrap();
+    dispatch(cx, key("f9", false));
     // An explicit repeat remains held even after a discrete stroke's release.
     let mut repeat = key("f9", true);
     let gpui::PlatformInput::KeyDown(event) = &mut repeat else {
         unreachable!();
     };
     event.is_held = true;
-    assert_eq!(source.dispatch(&after_move, &repeat), Handled);
-    source.dispatch(&after_move, &key("f9", false));
-    cx.simulate_keystrokes("f7");
+    dispatch(cx, repeat);
+    dispatch(cx, key("f9", false));
+    press(cx, "f7");
     wait_for_report(&view, cx, "0|2|editor:0|0:a|1|1|0|");
-    assert_eq!(source.dispatch(&after_move, &key("f9", true)), Handled);
+    press(cx, "f9");
     wait_for_report(&view, cx, "0|2|next|0:a|1|2|0|");
-    source.dispatch(&source.sample().unwrap(), &key("f9", false));
 
-    cx.simulate_keystrokes("shift-tab");
+    press(cx, "shift-tab");
     wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|0|");
-    let before_rebind = source.sample().unwrap();
-    cx.simulate_keystrokes("f10");
+    press(cx, "f10");
     wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|1|");
-    assert!(source.editor_matches(&before_rebind));
-    assert_eq!(source.dispatch(&before_rebind, &key("f6", true)), Rejected);
-    cx.simulate_keystrokes("f7");
-    wait_for_report(&view, cx, "0|3|editor:0|0:a|1|2|1|");
-    let rebound = source.sample().unwrap();
-    assert_eq!(source.dispatch(&rebound, &key("f6", true)), Handled);
-    source.dispatch(&rebound, &key("f6", false));
-    wait_for_report(&view, cx, "0|3|editor:0|0:a|1|2|1|0:1");
+    press(cx, "f6");
+    wait_for_report(&view, cx, "0|2|editor:0|0:a|1|2|1|0:1");
 
-    let before_scope = source.sample().unwrap();
-    cx.simulate_keystrokes("f8");
-    wait_for_report(&view, cx, "1|3|editor:1|0:a|1|2|1|0:1");
-    assert!(!source.editor_matches(&before_scope));
-    assert_eq!(source.dispatch(&before_scope, &key("f6", true)), Rejected);
-    // A later engine callback makes a rejected callback's absence observable.
-    cx.simulate_keystrokes("f7");
-    wait_for_report(&view, cx, "1|4|editor:1|0:a|1|2|1|0:1");
-    let current = source.sample().unwrap();
-    assert_eq!(source.dispatch(&current, &key("f6", true)), Handled);
-    source.dispatch(&current, &key("f6", false));
-    wait_for_report(&view, cx, "1|4|editor:1|0:a|1|2|1|1:1");
+    press(cx, "f8");
+    wait_for_report(&view, cx, "1|2|editor:1|0:a|1|2|1|0:1");
+    press(cx, "f6");
+    wait_for_report(&view, cx, "1|2|editor:1|0:a|1|2|1|1:1");
 
-    // A plain Input can acquire native focus from its presented geometry even
+    // A plain Input can acquire native focus from its current geometry even
     // when an unrelated thinking update has already redrawn the surface.
     let (plain, start, outside) = view.read_with(cx, |view, _| {
         let surface = view.surface();
@@ -662,11 +640,9 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
         click_count: 1,
         ..Default::default()
     });
-    let before_click = source.sample().unwrap();
-    cx.simulate_keystrokes("f7");
-    source.dispatch(&before_click, &key("f7", false));
-    wait_for_report(&view, cx, "1|5|editor:1|0:a|1|2|1|1:1");
-    assert_eq!(source.dispatch(&before_click, &down), Handled);
+    press(cx, "f7");
+    wait_for_report(&view, cx, "1|3|editor:1|0:a|1|2|1|1:1");
+    dispatch(cx, down.clone());
     ime(&view, cx, |surface| {
         assert_eq!(crate::text_input::focused(surface), Some(plain.clone()));
         assert_eq!(
@@ -674,17 +650,13 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
             Some(0..0)
         );
     });
-    let focused = source.sample().unwrap();
-    cx.simulate_keystrokes("f7");
-    source.dispatch(&focused, &key("f7", false));
-    wait_for_report(&view, cx, "1|6|editor:1|0:a|1|2|1|1:1");
-    assert_eq!(source.dispatch(&before_click, &drag), Handled);
-    cx.simulate_keystrokes("f7");
-    source.dispatch(&focused, &key("f7", false));
-    wait_for_report(&view, cx, "1|7|editor:1|0:a|1|2|1|1:1");
-    assert_eq!(source.dispatch(&before_click, &up), Handled);
+    press(cx, "f7");
+    wait_for_report(&view, cx, "1|4|editor:1|0:a|1|2|1|1:1");
+    dispatch(cx, drag.clone());
+    press(cx, "f7");
+    wait_for_report(&view, cx, "1|5|editor:1|0:a|1|2|1|1:1");
+    dispatch(cx, up);
     ime(&view, cx, |surface| {
-        assert!(source.editor_matches(&focused));
         assert_eq!(crate::text_input::focused(surface), Some(plain.clone()));
         assert_eq!(
             crate::text_input::ime::selected_text_range(surface).map(|selection| selection.range),
@@ -695,10 +667,9 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
     });
     assert_eq!(field_text(&view, cx).as_deref(), Some("你好"));
 
-    let before_cancel = source.sample().unwrap();
-    assert_eq!(source.dispatch(&before_cancel, &down), Handled);
-    source.cancel_pointer();
-    assert_eq!(source.dispatch(&before_cancel, &drag), ExactFallback);
+    dispatch(cx, down.clone());
+    view.update(cx, |view, _| view.cancel_pointer());
+    dispatch(cx, drag);
     ime(&view, cx, |surface| {
         // A later move reaching the editor must not revive the cancelled drag.
         assert!(!crate::text_input::pointer(
@@ -719,6 +690,47 @@ fn presented_keys_keep_their_native_owner_across_redraws(cx: &mut TestAppContext
         crate::text_input::ime::replace_text_in_range(surface, None, "世界");
     });
     assert_eq!(field_text(&view, cx).as_deref(), Some("世界你好"));
+
+    ime(&view, cx, crate::text_input::blur_all);
+    cx.update(|window, cx| {
+        use gpui::InputHandler;
+
+        // Paint once with body focus, then exercise this adapter's live focus
+        // without drawing or dispatching keys (GPUI draws before key events).
+        // Platform registration of the adapter is tested by the terminal host.
+        window.draw(cx).clear(cx);
+        let bounds = gpui::Bounds::new(gpui::Point::default(), window.viewport_size());
+        let mut handler = gpui::ElementInputHandler::new(bounds, view.clone());
+        assert!(!handler.accepts_text_input(window, cx));
+        handler.replace_text_in_range(None, "ignored", window, cx);
+        handler.paste(
+            gpui::ClipboardItem::new_string("ignored".into()),
+            window,
+            cx,
+        );
+        assert_eq!(
+            crate::text_input::accessible_value(&plain).unwrap().text,
+            "世界你好"
+        );
+
+        window.dispatch_event(down, cx);
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position: start,
+                click_count: 1,
+                ..Default::default()
+            }),
+            cx,
+        );
+        assert!(handler.accepts_text_input(window, cx));
+        handler.replace_text_in_range(None, "再", window, cx);
+        handler.paste(gpui::ClipboardItem::new_string("见".into()), window, cx);
+        assert_eq!(
+            crate::text_input::accessible_value(&plain).unwrap().text,
+            "再见世界你好"
+        );
+    });
     view.update(cx, |view, _| view.stop());
 }
 
