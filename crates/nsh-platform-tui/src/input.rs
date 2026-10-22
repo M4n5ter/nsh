@@ -2606,8 +2606,20 @@ mod tests {
         let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
         let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
         items.extend(create(4, ViewKind::View, 2, 0.0));
+        items.extend(create(6, ViewKind::Input, ROOT_ID, 48.0));
         surface.apply(MountBatch { items });
-        surface.set_hover(Some(4));
+        // Keep keyboard focus outside the rail: an enabled scroll is the
+        // first native focus stop and would otherwise report FOCUS_WITHIN.
+        surface.set_focus(Some(6));
+        assert_eq!(surface.focus, Some(6));
+        assert_eq!(surface.hit_test(4.0, 8.0), Some(4));
+        surface.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(surface.hovered, Some(4));
         surface.events.clear();
         surface.apply(MountBatch {
             items: vec![MountItem::TrackStates {
@@ -2618,7 +2630,13 @@ mod tests {
         assert!(surface.events.iter().any(|event| matches!(event,
             SurfaceEvent::States(2, value) if *value == state::HOVERED)));
         surface.events.clear();
-        surface.set_hover(None);
+        surface.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 30,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(surface.focus, Some(6));
         assert!(
             surface
                 .events
