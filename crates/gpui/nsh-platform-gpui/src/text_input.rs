@@ -1624,7 +1624,11 @@ fn menu_items(input: &InputState, has_text: bool) -> Vec<crate::chrome::LocalIte
                     vk,
                     down: true,
                     repeat: false,
-                    modifiers: if cmd { command() } else { Modifiers::default() },
+                    modifiers: if cmd {
+                        command(s.environment.get().uses_apple_keys())
+                    } else {
+                        Modifiers::default()
+                    },
                 };
                 key(s, &event);
             }),
@@ -1649,8 +1653,8 @@ fn menu_items(input: &InputState, has_text: bool) -> Vec<crate::chrome::LocalIte
 }
 
 /// The modifiers of the platform's command key alone.
-fn command() -> Modifiers {
-    if cfg!(target_os = "macos") {
+fn command(apple: bool) -> Modifiers {
+    if apple {
         Modifiers {
             meta: true,
             ..Default::default()
@@ -1665,9 +1669,9 @@ fn command() -> Modifiers {
 
 /// The platform's command key (Ctrl; Command on macOS) is held, with no
 /// Alt.
-fn is_command(m: Modifiers) -> bool {
+fn is_command(m: Modifiers, apple: bool) -> bool {
     !m.alt
-        && if cfg!(target_os = "macos") {
+        && if apple {
             m.meta && !m.ctrl
         } else {
             m.ctrl && !m.meta
@@ -1676,12 +1680,8 @@ fn is_command(m: Modifiers) -> bool {
 
 /// How far the arrows and deletions with `m` go: a word with Ctrl (Option
 /// on macOS).
-fn unit_of(m: Modifiers) -> Unit {
-    let word = if cfg!(target_os = "macos") {
-        m.alt
-    } else {
-        m.ctrl
-    };
+fn unit_of(m: Modifiers, apple: bool) -> Unit {
+    let word = if apple { m.alt } else { m.ctrl };
     if word { Unit::Word } else { Unit::Char }
 }
 
@@ -1701,8 +1701,8 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         let c = input.config.borrow();
         (c.editable, c.secure, c.multiline)
     };
-    let mac = cfg!(target_os = "macos");
-    let unit = unit_of(m);
+    let mac = surface.environment.get().uses_apple_keys();
+    let unit = unit_of(m, mac);
     let vk = event.vk;
     // Movements: the caret goes, the text stays.
     let moved = |f: &dyn Fn(&mut Model)| {
@@ -1797,7 +1797,7 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
             }
             false
         }
-        _ if is_command(m) => match vk {
+        _ if is_command(m, mac) => match vk {
             0x41 => moved(&|model| model.select_all()),
             0x43 => {
                 copy(&input, secure);
@@ -2081,11 +2081,12 @@ mod tests {
 
     #[test]
     fn command_keys() {
-        let cmd = command();
-        assert!(is_command(cmd));
-        assert!(!is_command(Modifiers { alt: true, ..cmd }));
-        assert!(!is_command(Modifiers::default()));
-        assert_eq!(unit_of(Modifiers::default()), Unit::Char);
+        let apple = cfg!(target_os = "macos");
+        let cmd = command(apple);
+        assert!(is_command(cmd, apple));
+        assert!(!is_command(Modifiers { alt: true, ..cmd }, apple));
+        assert!(!is_command(Modifiers::default(), apple));
+        assert_eq!(unit_of(Modifiers::default(), apple), Unit::Char);
     }
 
     /// A stopped surface's focus is dropped, and carets of surfaces that

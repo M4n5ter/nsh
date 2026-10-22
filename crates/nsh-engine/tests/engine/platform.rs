@@ -227,3 +227,39 @@ fn platform_props_and_select_follow_the_os() {
     // A desktop browser behaves as a desktop.
     frame(Os::Web, Idiom::Desktop, "web true d -", &["desktop", "web"]);
 }
+
+#[test]
+fn graphical_terminal_keyboard_keeps_identity_and_uses_control_shortcuts() {
+    let app = r#"import { mount, Text } from "nsh";
+import { platform } from "nsh/device";
+import { keymap } from "nsh/keymap";
+keymap.bind("mod+k", () => {});
+mount(() => <Text>{`${platform.os} ${platform.renderer} ${platform.isTerminal} ${keymap.label("mod+k")}`}</Text>);
+"#;
+    for (terminal_keyboard, shortcut, label) in [(false, "cmd+k", "⌘K"), (true, "ctrl+k", "Ctrl+K")]
+    {
+        let batch = first_batch(
+            Environment {
+                os: Os::MacOs,
+                renderer: Renderer::Native,
+                terminal_keyboard,
+                ..Environment::default()
+            },
+            app,
+        );
+        let keymap = batch
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Keymap(keymap) => Some(keymap),
+                _ => None,
+            })
+            .expect("mounted keymap");
+        let key = nsh_core::keymap::Keystroke::parse_with(shortcut, false).unwrap();
+        assert!(keymap.find(key, false, false).consumed());
+        assert_eq!(
+            frame_parts(batch).0,
+            [format!("macos native false {label}")]
+        );
+    }
+}

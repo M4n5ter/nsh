@@ -130,6 +130,25 @@ impl CosmicTextSystem {
 
     pub fn new(system_font_fallback: &str) -> Self {
         let font_system = FontSystem::new();
+        // A headless host may run without the preferred desktop family.
+        // Resolve its default against the fonts actually loaded on this machine.
+        let database = font_system.db();
+        let default_face = database
+            .query(&cosmic_text::fontdb::Query {
+                families: &[Family::Name(system_font_fallback), Family::SansSerif],
+                ..Default::default()
+            })
+            .and_then(|id| database.face(id))
+            .or_else(|| {
+                database.faces().find(|face| {
+                    !face.monospaced && !check_is_known_emoji_font(&face.post_script_name)
+                })
+            })
+            .or_else(|| database.faces().next());
+        let system_font_fallback = default_face
+            .and_then(|face| face.families.first())
+            .map(|(family, _)| family.clone())
+            .unwrap_or_else(|| system_font_fallback.to_owned());
 
         Self(RwLock::new(CosmicTextSystemState {
             font_system,
@@ -139,7 +158,7 @@ impl CosmicTextSystem {
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             font_ids_by_family_cache: HashMap::default(),
-            system_font_fallback: system_font_fallback.to_string(),
+            system_font_fallback,
             missing_glyph_sink: None,
         }))
     }
@@ -1200,8 +1219,10 @@ fn face_info_into_properties(
 }
 
 fn check_is_known_emoji_font(postscript_name: &str) -> bool {
-    // TODO: Include other common emoji fonts
-    postscript_name == "NotoColorEmoji"
+    matches!(
+        postscript_name,
+        "NotoColorEmoji" | "AppleColorEmoji" | "SegoeUIEmoji"
+    )
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@
 //! This crate creates no terminal reader or writer and no application runtime.
 //! Embed the existing `nsh_platform_gpui::AppView` using the host's EngineConfig.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos", windows))]
 
 mod dispatcher;
 pub mod inline;

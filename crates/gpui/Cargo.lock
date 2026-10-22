@@ -5279,6 +5279,7 @@ dependencies = [
  "image",
  "log",
  "raw-window-handle",
+ "windows 0.62.2",
 ]
 
 [[package]]
