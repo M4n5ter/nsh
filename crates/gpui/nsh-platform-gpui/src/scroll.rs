@@ -295,33 +295,6 @@ pub(crate) fn grabs_thumb(view: &NshView, x: f32, y: f32) -> bool {
         .is_some_and(|s| s.grabs_thumb(state.frame.size, point(Points(x), Points(y))))
 }
 
-/// An immutable scroll state and viewport for the shared thumb hit test.
-#[derive(Clone)]
-pub(crate) struct ThumbHit {
-    scroll: ScrollState,
-    size: Size<Points>,
-}
-
-impl ThumbHit {
-    pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
-        self.scroll
-            .grabs_thumb(self.size, point(Points(x), Points(y)))
-    }
-}
-
-pub(crate) fn thumb_hit(view: &NshView) -> Option<ThumbHit> {
-    let state = view.state();
-    let scroll = state.scroll.as_ref()?;
-    if !scroll.indicator || !scroll.behavior.enabled {
-        return None;
-    }
-    scroll.thumb(state.frame.size)?;
-    Some(ThumbHit {
-        scroll: scroll.clone(),
-        size: state.frame.size,
-    })
-}
-
 /// The mouse moved over `view`: its indicator brightens, then fades back
 /// to its resting opacity once the mouse rests.
 pub(crate) fn hovered(surface: &Rc<Surface>, view: &NshView) {
