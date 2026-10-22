@@ -3886,10 +3886,35 @@ mod tests {
     fn assert_nested_wheel_axes(presented: bool) {
         use nsh_core::{MountBatch, MountItem};
 
-        for (width, kind, expected_x, expected_y) in [
-            (160.0, MouseEventKind::ScrollDown, 0.0, 48.0),
-            (1000.0, MouseEventKind::ScrollDown, 0.0, 48.0),
-            (1000.0, MouseEventKind::ScrollRight, 24.0, 0.0),
+        for (width, kind, modifiers, expected_x, expected_y) in [
+            (
+                160.0,
+                MouseEventKind::ScrollDown,
+                KeyModifiers::NONE,
+                0.0,
+                48.0,
+            ),
+            (
+                1000.0,
+                MouseEventKind::ScrollDown,
+                KeyModifiers::NONE,
+                0.0,
+                48.0,
+            ),
+            (
+                1000.0,
+                MouseEventKind::ScrollRight,
+                KeyModifiers::NONE,
+                24.0,
+                0.0,
+            ),
+            (
+                1000.0,
+                MouseEventKind::ScrollDown,
+                KeyModifiers::SHIFT,
+                24.0,
+                0.0,
+            ),
         ] {
             let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
             let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
@@ -3918,7 +3943,7 @@ mod tests {
                 kind,
                 column: 2,
                 row: 0,
-                modifiers: KeyModifiers::NONE,
+                modifiers,
             };
             if presented {
                 let lease = surface.input_snapshot().wheel_at(mouse).unwrap();
