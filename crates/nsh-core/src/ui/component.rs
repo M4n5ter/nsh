@@ -1343,11 +1343,20 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
             with.push_str(" & ");
             module_object(&mut with, m);
         }
-        let _ = write!(
-            out,
-            "export declare const {}: ({generic}(props: {}Props{generic}) => JSX.Element){with};\n\n",
-            spec.export, spec.export,
-        );
+        if spec.items().is_some() {
+            // Arrays also have at(): infer rows from one data shape at a time.
+            let _ = write!(
+                out,
+                "export declare const {0}: {{\n  <T>(props: Omit<{0}Props<T>, \"each\"> & {{ each: readonly T[] }}): JSX.Element;\n  <T>(props: Omit<{0}Props<T>, \"each\"> & {{ each: ReadonlyListSource<T> }}): JSX.Element;\n  <T>(props: {0}Props<T>): JSX.Element;\n}}{with};\n\n",
+                spec.export,
+            );
+        } else {
+            let _ = write!(
+                out,
+                "export declare const {0}: ((props: {0}Props) => JSX.Element){with};\n\n",
+                spec.export,
+            );
+        }
     }
     for m in &modules {
         if specs.iter().any(|s| s.export == m.name)

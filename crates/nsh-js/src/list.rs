@@ -1260,7 +1260,12 @@ pub(crate) const EXPORTS: &[crate::modules::Item] = &[(
          Positions, columns, sticky headers and viewability are computed natively.\n\n\
          Rows are recycled: keep per-item state in your data (keyed by id), not in\n\
          signals created inside the row.",
-        &["<T>(props: ListProps<T>): YNode"],
+        // Arrays also have at(): infer their elements before indexed sources.
+        &[
+            "<T>(props: Omit<ListProps<T>, \"each\"> & { each: readonly T[] }): YNode",
+            "<T>(props: Omit<ListProps<T>, \"each\"> & { each: ReadonlyListSource<T> }): YNode",
+            "<T>(props: ListProps<T>): YNode",
+        ],
     ),
 )];
 

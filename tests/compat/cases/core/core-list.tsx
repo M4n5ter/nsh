@@ -4,11 +4,48 @@
 // changes, the padding of its content (`contentStyle`,
 // `contentClass`), and what an empty list shows; `Scroll`'s view around its
 // content (`contentStyle`, `contentClass`). Its script checks each.
-import { Scroll, Text, View, signal } from "nsh";
+import { List as NativeList, Scroll, Text, View, signal, type ListItemsProps, type ListProps } from "nsh";
 import { List, type ReadonlyListSource } from "nsh/list";
 
 function plumSource(name: string): ReadonlyListSource<string> {
   return { length: 1, at: () => name };
+}
+
+// Checked by `nsh check`: definite elements stay definite for both public
+// entry points; a native class can provide its rows without becoming an array.
+function listInferenceContract<T>(props: ListProps<T>, items: ListItemsProps<T>) {
+  const rows: readonly { name: string }[] = [{ name: "Apple" }];
+  List({ each: rows, children: (row) => {
+    const item: { name: string } = row();
+    // @ts-expect-error the inferred name is a string
+    const wrong: number = row().name;
+    return <Text>{item.name}{wrong}</Text>;
+  } });
+  NativeList({ each: [{ name: "Apple" }], children: (row) => {
+    const item: { name: string } = row();
+    // @ts-expect-error a definite row is not undefined
+    const wrong: undefined = row();
+    return <Text>{item.name}{wrong}</Text>;
+  } });
+  class Source {
+    readonly length = 1;
+    at(_index: number) { return { name: "Plum" }; }
+  }
+  NativeList({ each: new Source(), children: (row) => {
+    const item: { name: string } = row();
+    // @ts-expect-error the inferred source row is not a string
+    const wrong: string = row();
+    return <Text>{item.name}{wrong}</Text>;
+  } });
+  NativeList({ each: plumSource("Plum"), children: (row) => {
+    const item: string = row();
+    // @ts-expect-error the indexed source returns strings
+    const wrong: number = row();
+    return <Text>{item}{wrong}</Text>;
+  } });
+  NativeList(props);
+  NativeList(items);
+  return <NativeList {...props} />;
 }
 
 function App() {
