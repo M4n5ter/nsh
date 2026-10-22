@@ -1385,3 +1385,149 @@ fn presented_editor_contacts_reject_replaced_content_owners_and_new_blockers() {
         );
     }
 }
+
+fn selectable_items(id: NodeId, value: &str) -> Vec<MountItem> {
+    use std::sync::Arc;
+
+    use nsh_core::{AttributedText, ResolvedTextStyle, TextEngine};
+
+    let bounds = frame(8.0, 16.0, 160.0, 32.0);
+    let mut text = AttributedText {
+        selectable: Some(true),
+        ..Default::default()
+    };
+    text.push(value, ResolvedTextStyle::default());
+    let engine = crate::TerminalTextEngine::default();
+    let layout = engine.layout(&engine.prepare(&text), bounds.size);
+    let mut items = mount(id, ViewKind::Text, bounds);
+    items.push(MountItem::Text {
+        id,
+        text: Arc::new(text),
+        layout,
+        content: frame(0.0, 0.0, 160.0, 32.0),
+    });
+    items
+}
+
+#[test]
+fn a_presented_label_retains_native_focus_unicode_selection_and_copy() {
+    let mut surface = editor_surface();
+    surface.apply(MountBatch {
+        items: selectable_items(20, "A中文😀 tail"),
+    });
+    let lease = surface
+        .input_snapshot()
+        .press_at(1, 1)
+        .expect("selectable label");
+    assert_eq!(lease.binding(), None);
+    surface.apply(MountBatch {
+        items: vec![MountItem::Frame {
+            id: 10,
+            frame: frame(160.0, 96.0, 160.0, 32.0),
+        }],
+    });
+    assert_eq!(
+        surface.handle_presented_mouse(down(1, 1), &lease),
+        Some(true)
+    );
+    assert_eq!(surface.focused(), Some(20));
+    assert_eq!(
+        surface
+            .handle_presented_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 7, 1), &lease,),
+        Some(true)
+    );
+    assert_eq!(surface.handle_presented_mouse(up(7, 1), &lease), Some(true));
+    surface.drain_events().for_each(drop);
+    surface.handle_event(Event::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    let copied: Vec<_> = surface
+        .drain_events()
+        .filter_map(|event| match event {
+            SurfaceEvent::Service(crate::ServiceRequest::ClipboardWrite(text)) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied, ["中文😀"]);
+}
+
+#[test]
+fn presented_label_contacts_reject_changed_text_layout_owner_and_callbacks() {
+    for change in ["content", "layout", "owner", "cover", "focus"] {
+        let mut surface = editor_surface();
+        surface.apply(MountBatch {
+            items: selectable_items(20, "A中文😀 tail"),
+        });
+        let lease = surface
+            .input_snapshot()
+            .press_at(1, 1)
+            .expect("selectable label");
+        let items = match change {
+            "content" | "layout" => selectable_items(
+                20,
+                if change == "content" {
+                    "Replaced source"
+                } else {
+                    "A中文😀 tail"
+                },
+            )
+            .into_iter()
+            .filter(|item| matches!(item, MountItem::Text { .. }))
+            .collect(),
+            "owner" => {
+                let mut items = vec![MountItem::Delete { id: 20 }];
+                items.extend(selectable_items(20, "A中文😀 tail"));
+                items
+            }
+            "cover" => {
+                let mut items = mount(21, ViewKind::View, frame(8.0, 16.0, 160.0, 32.0));
+                items.push(events(21, &[EventKind::Press]));
+                items.push(action(21, 302));
+                items
+            }
+            "focus" => vec![events(20, &[EventKind::Focus])],
+            _ => unreachable!(),
+        };
+        surface.apply(MountBatch { items });
+        surface.drain_events().for_each(drop);
+        let previous = surface.focused();
+        assert_eq!(
+            surface.handle_presented_mouse(down(1, 1), &lease),
+            None,
+            "{change}"
+        );
+        assert_eq!(surface.focused(), previous, "{change}");
+        assert!(
+            surface
+                .drain_events()
+                .all(|event| !matches!(event, SurfaceEvent::Event(..))),
+            "{change}"
+        );
+    }
+}
+
+#[test]
+fn a_presented_plain_scroll_contact_owns_subsequent_keyboard_scroll() {
+    let mut surface = scroll_surface();
+    let mut items = mount(10, ViewKind::Input, frame(200.0, 16.0, 80.0, 32.0));
+    items.push(MountItem::Command {
+        id: 10,
+        command: Command::Focus,
+    });
+    surface.apply(MountBatch { items });
+    assert_eq!(surface.focused(), Some(10));
+    let lease = surface
+        .input_snapshot()
+        .press_at(2, 2)
+        .expect("plain scroll content");
+    assert_eq!(lease.binding(), None);
+    assert_eq!(
+        surface.handle_presented_mouse(down(2, 2), &lease),
+        Some(true)
+    );
+    assert_eq!(surface.handle_presented_mouse(up(2, 2), &lease), Some(true));
+    assert_eq!(surface.focused(), Some(2));
+    surface.handle_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+    assert_eq!(surface.node(2).unwrap().scroll.y, px(16.0));
+}
