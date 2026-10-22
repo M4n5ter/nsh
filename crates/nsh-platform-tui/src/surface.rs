@@ -23,8 +23,9 @@ use crate::{
     metrics::CellMetrics,
 };
 
-// A mount batch can position a virtual cell after its focus command.
-// Only the implicit reveal waits for that final geometry.
+// A mount batch can attach and position a virtual cell after its focus
+// command. Preserve that request through the final tree; only its original
+// native generation may issue the implicit reveal.
 struct FocusReveal {
     target: (NodeId, u64),
     overridden: Vec<(NodeId, u64)>,
@@ -641,6 +642,7 @@ impl Surface {
                     }
                 }
                 MountItem::Remove { id } => {
+                    self.retire_recycled_focus(id);
                     self.retire_input_within(id, focus_return.as_mut());
                     if self.navigation_removing(id) {
                         continue;
@@ -667,6 +669,7 @@ impl Surface {
                     }
                 }
                 MountItem::Delete { id } => {
+                    self.retire_input_within(id, focus_return.as_mut());
                     if self.navigation_removing(id) {
                         if let Some(node) = self.node_mut(id) {
                             node.delete_pending = true;
@@ -928,10 +931,9 @@ impl Surface {
                     self.component_size(id);
                 }
                 MountItem::Command { id, command } => {
-                    let focus_command = matches!(
-                        command,
-                        Command::Focus | Command::AccessibilityFocus | Command::Blur
-                    );
+                    let requested_focus =
+                        matches!(command, Command::Focus | Command::AccessibilityFocus);
+                    let focus_command = requested_focus || matches!(command, Command::Blur);
                     let explicit_scroll = match &command {
                         Command::ScrollTo { x, y, .. } => x.0.is_finite() && y.0.is_finite(),
                         Command::ScrollToEnd { .. } => true,
@@ -940,13 +942,25 @@ impl Surface {
                     };
                     let old_focus = self.focus;
                     self.command(id, command);
-                    if self.focus != old_focus {
-                        focus_reveal = self.focus.filter(|_| focus_command).and_then(|id| {
-                            self.node(id).map(|node| FocusReveal {
-                                target: (id, node.generation),
-                                overridden: Vec::new(),
-                            })
-                        });
+                    if focus_command {
+                        if !requested_focus {
+                            focus_reveal = None;
+                        } else if self.focus != old_focus || self.focus.is_none() {
+                            let target = self.node(id).map(|node| (id, node.generation));
+                            if focus_reveal.as_ref().map(|reveal| reveal.target) != target {
+                                focus_reveal = target.map(|target| FocusReveal {
+                                    target,
+                                    overridden: Vec::new(),
+                                });
+                            }
+                        } else if focus_reveal
+                            .as_ref()
+                            .is_some_and(|reveal| reveal.target.0 != id)
+                        {
+                            focus_reveal = None;
+                        }
+                    } else if self.focus != old_focus {
+                        focus_reveal = None;
                     } else if explicit_scroll
                         && let Some(reveal) = &mut focus_reveal
                         && let Some(node) = self.node(id)
@@ -968,6 +982,12 @@ impl Surface {
             self.clamp_scroll(id);
         }
         self.navigation_reconcile();
+        if let Some(reveal) = &focus_reveal
+            && self.visible_ids().contains(&reveal.target.0)
+            && self.focusable(reveal.target.0)
+        {
+            self.set_focus_from(Some(reveal.target.0), crate::input::FocusSource::Mount);
+        }
         let opened_popups = self.reconcile_focus_return(focus_return);
         self.reconcile_focus();
         self.focus_opened_popups(&opened_popups);

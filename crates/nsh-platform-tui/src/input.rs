@@ -703,10 +703,34 @@ impl Surface {
         let mut history = std::mem::take(&mut self.focus_history);
         history.retain(|id| !self.ancestors(*id).contains(&root));
         self.focus_history = history;
-        if self
-            .focus
-            .is_some_and(|id| self.ancestors(id).contains(&root))
-        {
+    }
+
+    /// Remove can rebind the same native slot to another logical row. Retire
+    /// its focus now; Delete's logical node focus is reconciled after the batch.
+    pub(crate) fn retire_recycled_focus(&mut self, root: NodeId) {
+        let previous = self.focus.or_else(|| self.focus_history.last().copied());
+        if !previous.is_some_and(|id| self.within_popup(id, root)) {
+            return;
+        }
+        // A real popup/modal owns its return chain, including a deliberately
+        // retired opener. Ordinary displaced controls use existing history.
+        if self.current_popup_owner().is_none() {
+            let visible = self.visible_ids();
+            let eligible = |id: &NodeId| {
+                visible.contains(id) && !self.within_popup(*id, root) && self.focusable(*id)
+            };
+            if let Some(fallback) = self
+                .focus_history
+                .iter()
+                .rev()
+                .copied()
+                .find(eligible)
+                .or_else(|| visible.iter().copied().find(eligible))
+            {
+                self.remember_focus(fallback);
+            }
+        }
+        if self.focus.is_some() {
             self.set_focus(None);
         }
     }
@@ -5429,7 +5453,12 @@ mod tests {
         );
         assert!(surface.events.iter().any(|event| matches!(event,SurfaceEvent::Event(ROOT_ID,EventKind::Touch,EventPayload::Touch(touch)) if touch.phase == TouchPhase::Move && touch.activated == Some(4))));
 
-        for remove_owner in [false, true] {
+        for retirement in [
+            None,
+            Some(MountItem::Remove { id: 4 }),
+            Some(MountItem::Delete { id: 4 }),
+        ] {
+            let remove_owner = retirement.is_some();
             let mut surface = form();
             let mut items = create(6, ViewKind::View, 4, 0.0);
             items.extend(create(8, ViewKind::View, ROOT_ID, 96.0));
@@ -5440,8 +5469,8 @@ mod tests {
                 child: 6,
                 before: None,
             }];
-            if remove_owner {
-                items.push(MountItem::Remove { id: 4 });
+            if let Some(item) = retirement {
+                items.push(item);
             }
             surface.apply(MountBatch { items });
             assert_eq!(surface.node(6).unwrap().parent, Some(8));
