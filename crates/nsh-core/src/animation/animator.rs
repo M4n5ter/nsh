@@ -6,7 +6,7 @@
 
 use rustc_hash::FxHashMap;
 
-use super::{AnimationOp, AnimationProp, AnimationValue, Finished, GestureBinding, Graph, NodeId};
+use super::{AnimationProp, AnimationValue, Finished, Graph, NodeId};
 use crate::{
     Color, GestureValues, MAX_TRANSFORMS, MountItem,
     geometry::{Point, Points},
@@ -110,17 +110,6 @@ impl Animator {
     /// True while a driver of the graph runs.
     pub fn animating(&self) -> bool {
         self.graph.is_animating()
-    }
-
-    /// The current gesture descriptors and live value births of a view.
-    pub fn gesture_binding(&self, id: u32) -> Option<GestureBinding> {
-        self.graph.gesture_binding(self.gestures.get(&id)?.values)
-    }
-
-    /// Whether an operation can change the values of a sampled gesture.
-    /// Call before applying it to retire that capture's original baseline.
-    pub fn affects_gesture(&self, op: &AnimationOp, binding: &GestureBinding) -> bool {
-        self.graph.affects_gesture(op, binding)
     }
 
     /// A scroll view moved to `offset`: feeds its scroll value. False if no

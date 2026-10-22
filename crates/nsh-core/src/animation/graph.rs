@@ -1,4 +1,4 @@
-use std::{cell::Cell, sync::Arc};
+use std::cell::Cell;
 
 use super::{
     driver::{Running, ease},
@@ -7,30 +7,9 @@ use super::{
         Output,
     },
 };
-use crate::GestureValues;
 
 /// Animations of composite steps get ids from here up (JS's are small).
 const LEAF_IDS: AnimationId = 0x8000_0000;
-
-/// The birth of one live settable value, retained across numeric updates.
-#[derive(Debug, Clone)]
-pub struct ValueIdentity(Arc<()>);
-
-impl PartialEq for ValueIdentity {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for ValueIdentity {}
-
-/// A gesture's descriptors and the births of every value they currently drive.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GestureBinding {
-    /// The value nodes driven by the gesture.
-    pub values: GestureValues,
-    identities: [Option<ValueIdentity>; 4],
-}
 
 /// The evaluated value of a node.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,7 +56,6 @@ impl Finished {
 #[derive(Debug)]
 enum Node {
     Value {
-        identity: ValueIdentity,
         value: f32,
         /// Added when evaluated (`setOffset`).
         offset: f32,
@@ -403,7 +381,6 @@ impl Graph {
             AnimationOp::CreateValue { node, value } => self.insert(
                 node,
                 Node::Value {
-                    identity: ValueIdentity(Arc::new(())),
                     value,
                     offset: 0.0,
                     velocity: 0.0,
@@ -645,60 +622,6 @@ impl Graph {
         match self.nodes.get(node as usize)? {
             Some(Node::Value { value, .. }) => Some(*value),
             _ => None,
-        }
-    }
-
-    /// Samples a nonempty gesture only while every referenced node is a live
-    /// settable value. Numeric updates preserve this binding; replacing or
-    /// releasing a value invalidates it.
-    pub fn gesture_binding(&self, values: GestureValues) -> Option<GestureBinding> {
-        if values.is_empty() {
-            return None;
-        }
-        let mut identities = [None, None, None, None];
-        for (identity, node) in
-            identities
-                .iter_mut()
-                .zip([values.pan_x, values.pan_y, values.pinch, values.rotation])
-        {
-            if let Some(node) = node {
-                *identity = match self.nodes.get(node as usize)? {
-                    Some(Node::Value { identity, .. }) => Some(identity.clone()),
-                    _ => return None,
-                };
-            }
-        }
-        Some(GestureBinding { values, identities })
-    }
-
-    /// Whether applying `op` can change a gesture's values or their births.
-    /// Call before applying the operation, while composite baselines still
-    /// describe the values a reset will restore.
-    pub fn affects_gesture(&self, op: &AnimationOp, binding: &GestureBinding) -> bool {
-        let contains = |node| {
-            [
-                binding.values.pan_x,
-                binding.values.pan_y,
-                binding.values.pinch,
-                binding.values.rotation,
-            ]
-            .contains(&Some(node))
-        };
-        if let Some(node) = op.affected_value() {
-            return contains(node);
-        }
-        match op {
-            AnimationOp::StartComposite { spec, .. } => {
-                let mut nodes = Vec::new();
-                spec.nodes(&mut nodes);
-                nodes.into_iter().any(contains)
-            }
-            AnimationOp::ResetComposite { key } => self
-                .baselines
-                .iter()
-                .find(|(candidate, _)| candidate == key)
-                .is_some_and(|(_, values)| values.iter().any(|(node, _)| contains(*node))),
-            _ => false,
         }
     }
 
@@ -1156,107 +1079,10 @@ mod tests {
     }
 
     #[test]
-    fn gesture_bindings_follow_value_births_instead_of_numeric_updates() {
-        let mut g = Graph::default();
-        let mut f = Vec::new();
-        values(&mut g, &mut f, &[1, 2, 3, 4]);
-        let descriptors = GestureValues {
-            pan_x: Some(1),
-            pan_y: Some(2),
-            pinch: Some(3),
-            rotation: Some(4),
-        };
-        let original = g.gesture_binding(descriptors).unwrap();
-        assert_eq!(original.values, descriptors);
-        for op in [
-            AnimationOp::Set {
-                node: 1,
-                value: 5.0,
-            },
-            AnimationOp::SetOffset {
-                node: 1,
-                offset: 2.0,
-            },
-            AnimationOp::ExtractOffset { node: 1 },
-            AnimationOp::Adjust {
-                node: 1,
-                factor: 2.0,
-                offset: 1.0,
-            },
-            AnimationOp::FlattenOffset { node: 1 },
-        ] {
-            g.apply(op, &mut f);
-            assert_eq!(g.gesture_binding(descriptors), Some(original.clone()));
-        }
-        assert_eq!((g.value(1), g.eval(1).number()), (Some(8.0), 8.0));
-        g.apply(
-            AnimationOp::Start {
-                node: 1,
-                animation: 7,
-                driver: timing(12.0, 100.0),
-            },
-            &mut f,
-        );
-        g.tick(0.0, &mut f);
-        g.tick(0.05, &mut f);
-        assert_eq!(g.value(1), Some(10.0));
-        assert_eq!(g.gesture_binding(descriptors), Some(original.clone()));
-        g.tick(0.1, &mut f);
-        assert_eq!(g.value(1), Some(12.0));
-        assert_eq!(g.gesture_binding(descriptors), Some(original.clone()));
-
-        assert!(g.gesture_binding(GestureValues::default()).is_none());
-        assert!(
-            g.gesture_binding(GestureValues {
-                rotation: Some(99),
-                ..descriptors
-            })
-            .is_none()
-        );
-        g.apply(AnimationOp::Release { node: 1 }, &mut f);
-        assert_eq!(g.value(1), None);
-        assert!(g.gesture_binding(descriptors).is_none());
-        g.apply(
-            AnimationOp::CreateValue {
-                node: 1,
-                value: 12.0,
-            },
-            &mut f,
-        );
-        let recreated = g.gesture_binding(descriptors).unwrap();
-        assert_ne!(recreated, original);
-        g.apply(
-            AnimationOp::CreateValue {
-                node: 1,
-                value: 12.0,
-            },
-            &mut f,
-        );
-        assert_ne!(g.gesture_binding(descriptors), Some(recreated));
-        g.apply(
-            AnimationOp::CreateMath {
-                node: 1,
-                op: MathOp::Add,
-                a: Operand::Node(2),
-                b: Operand::Const(1.0),
-            },
-            &mut f,
-        );
-        assert_eq!(g.eval(1).number(), 1.0);
-        assert!(g.gesture_binding(descriptors).is_none());
-    }
-
-    #[test]
-    fn affine_updates_use_the_live_base_and_composite_capture_invalidation_is_local() {
+    fn affine_updates_use_the_live_base_and_composite_resets_restore_it() {
         let mut g = Graph::default();
         let mut f = Vec::new();
         values(&mut g, &mut f, &[1, 2]);
-        let binding = g
-            .gesture_binding(GestureValues {
-                pan_x: Some(1),
-                ..Default::default()
-            })
-            .unwrap();
         g.set(1, 10.0, &mut f);
         g.apply(
             AnimationOp::Start {
@@ -1274,7 +1100,6 @@ mod tests {
             factor: 2.0,
             offset: 1.0,
         };
-        assert!(g.affects_gesture(&adjust, &binding));
         g.apply(adjust, &mut f);
         assert_eq!(g.value(1), Some(41.0));
         assert_eq!(f, vec![Finished::new(7, false)]);
@@ -1304,9 +1129,8 @@ mod tests {
             &mut f,
         );
         assert_eq!((g.value(1), g.eval(1).number()), (Some(41.0), 44.0));
-        assert_eq!(g.gesture_binding(binding.values), Some(binding.clone()));
 
-        for (node, key, related) in [(1, 11, true), (2, 12, false)] {
+        for (node, key) in [(1, 11), (2, 12)] {
             let start = AnimationOp::StartComposite {
                 animation: key,
                 key,
@@ -1315,28 +1139,8 @@ mod tests {
                     driver: timing(100.0, 100.0),
                 },
             };
-            assert_eq!(g.affects_gesture(&start, &binding), related);
             g.apply(start, &mut f);
-            assert_eq!(
-                g.affects_gesture(&AnimationOp::ResetComposite { key }, &binding),
-                related
-            );
         }
-        assert!(!g.affects_gesture(
-            &AnimationOp::Set {
-                node: 2,
-                value: 1.0
-            },
-            &binding
-        ));
-        assert!(!g.affects_gesture(
-            &AnimationOp::Read {
-                node: 1,
-                request: 8
-            },
-            &binding
-        ));
-        assert!(!g.affects_gesture(&AnimationOp::StopAnimation { animation: 11 }, &binding));
         g.set(1, 99.0, &mut f);
         g.apply(AnimationOp::ResetComposite { key: 11 }, &mut f);
         assert_eq!(g.value(1), Some(41.0));

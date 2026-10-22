@@ -338,29 +338,6 @@ pub enum AnimationOp {
     },
 }
 
-impl AnimationOp {
-    /// The single node this operation writes, replaces or releases. Composite
-    /// controls can affect several nodes and return `None`, as do reads.
-    pub fn affected_value(&self) -> Option<NodeId> {
-        match self {
-            Self::CreateValue { node, .. }
-            | Self::CreateInterpolate { node, .. }
-            | Self::CreateDiffClamp { node, .. }
-            | Self::CreateMath { node, .. }
-            | Self::SetOutput { node, .. }
-            | Self::Set { node, .. }
-            | Self::Adjust { node, .. }
-            | Self::Start { node, .. }
-            | Self::Stop { node }
-            | Self::Release { node }
-            | Self::SetOffset { node, .. }
-            | Self::FlattenOffset { node }
-            | Self::ExtractOffset { node } => Some(*node),
-            _ => None,
-        }
-    }
-}
-
 /// A composite animation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Composite {
