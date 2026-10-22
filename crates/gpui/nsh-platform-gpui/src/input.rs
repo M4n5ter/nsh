@@ -2916,6 +2916,91 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_held_press_owner_cancels_after_its_hit_child_moves() {
+        use nsh_core::{MountItem, ViewKind};
+
+        for remove_owner in [false, true] {
+            let surface = Surface::new(nsh_engine::Environment::default());
+            surface.root.state_mut().frame = rect(0.0, 0.0, 400.0, 400.0);
+            for (id, parent, frame) in [
+                (2, ROOT_ID, rect(0.0, 0.0, 100.0, 100.0)),
+                (6, ROOT_ID, rect(200.0, 0.0, 100.0, 100.0)),
+                (4, 2, rect(0.0, 0.0, 50.0, 50.0)),
+            ] {
+                for item in [
+                    MountItem::Create {
+                        id,
+                        kind: ViewKind::View,
+                    },
+                    MountItem::Frame { id, frame },
+                    MountItem::Insert {
+                        parent,
+                        child: id,
+                        before: None,
+                    },
+                ] {
+                    surface.mounter.borrow_mut().apply(&surface, &item);
+                }
+            }
+            let owner = surface.view(2).unwrap();
+            owner.state_mut().events.set(EventKind::Press, true);
+            track_states(&surface, &owner, PRESSED);
+            let mouse = |kind| {
+                pointer(
+                    &surface,
+                    PointerEvent {
+                        kind,
+                        x: 20.0,
+                        y: 20.0,
+                        button: 0,
+                        pointer: 1,
+                        touch: false,
+                        pen: false,
+                        time: surface.clock(),
+                        modifiers: Modifiers::default(),
+                        clicks: 1,
+                    },
+                )
+            };
+            mouse(PointerKind::Down);
+            assert_eq!(owner.state().states & PRESSED, PRESSED);
+            surface.mounter.borrow_mut().apply(
+                &surface,
+                &MountItem::Insert {
+                    parent: 6,
+                    child: 4,
+                    before: None,
+                },
+            );
+            // The hit child moved away, but the original press is still held
+            // by A. Removing A must revoke it before Up can fire press_out.
+            assert_eq!(surface.input.pointers.borrow().len(), 1);
+            if remove_owner {
+                surface
+                    .mounter
+                    .borrow_mut()
+                    .apply(&surface, &MountItem::Remove { id: 2 });
+                assert!(surface.input.pointers.borrow().is_empty());
+                assert_eq!(owner.state().states & PRESSED, 0);
+            } else {
+                surface.mounter.borrow_mut().apply(
+                    &surface,
+                    &MountItem::Insert {
+                        parent: ROOT_ID,
+                        child: 2,
+                        before: Some(6),
+                    },
+                );
+                assert_eq!(surface.input.pointers.borrow().len(), 1);
+                assert_eq!(owner.state().states & PRESSED, PRESSED);
+            }
+            mouse(PointerKind::Up);
+            assert!(surface.input.pointers.borrow().is_empty());
+            assert_eq!(owner.state().states & PRESSED, 0);
+        }
+    }
+
+    #[test]
     fn pointer_events() {
         let root = root();
         let a = view(&root, 2, ViewKind::View, rect(0.0, 0.0, 100.0, 100.0));

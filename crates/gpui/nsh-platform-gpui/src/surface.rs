@@ -1303,7 +1303,7 @@ mod tests {
 
     #[test]
     fn a_modal_inherits_a_removed_popup_owner_without_overriding_new_focus() {
-        for delete_opener in [false, true] {
+        for recreate_opener in [None, Some(false), Some(true)] {
             let surface = focus_return_form();
             let mut items = focus_return_popup(10, ROOT_ID);
             items.extend(focus_return_input(12, 10, false));
@@ -1315,16 +1315,36 @@ mod tests {
             // Retire the covered popup in a later batch, while its modal
             // still owns focus. Reusing the old opener id is a new view.
             let mut items = vec![MountItem::Delete { id: 12 }, MountItem::Delete { id: 10 }];
-            if delete_opener {
-                items.push(MountItem::Delete { id: 2 });
-                items.extend(focus_return_input(2, ROOT_ID, false));
+            if let Some(recreate) = recreate_opener {
+                if recreate {
+                    items.push(MountItem::Delete { id: 2 });
+                    items.extend(focus_return_input(2, ROOT_ID, false));
+                } else {
+                    items.push(MountItem::Remove { id: 2 });
+                    items.push(MountItem::Insert {
+                        parent: ROOT_ID,
+                        child: 2,
+                        before: None,
+                    });
+                }
+            } else {
+                // Insert-only movement preserves the original return target.
+                items.push(MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                });
             }
             surface.apply(&MountBatch { items });
             assert_eq!(focused_id(&surface), Some(32));
             assert!(crate::navigation::go_back(&surface));
             assert_eq!(
                 focused_id(&surface),
-                if delete_opener { None } else { Some(2) }
+                if recreate_opener.is_some() {
+                    None
+                } else {
+                    Some(2)
+                }
             );
         }
 
@@ -1382,6 +1402,17 @@ mod tests {
         let mut items = focus_return_popup(10, ROOT_ID);
         items.extend(focus_return_input(12, 10, true));
         surface.apply(&MountBatch { items });
+        assert_eq!(focused_id(&surface), Some(12));
+        surface.apply(&MountBatch {
+            items: vec![
+                MountItem::Remove { id: 10 },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 10,
+                    before: None,
+                },
+            ],
+        });
         assert_eq!(focused_id(&surface), Some(12));
         surface.apply(&MountBatch {
             items: vec![MountItem::Remove { id: 10 }],
@@ -1579,32 +1610,94 @@ mod tests {
 
     #[test]
     fn replacing_a_popup_and_reusing_an_opener_id_do_not_restore_stale_views() {
-        let surface = focus_return_form();
-        let mut items = focus_return_popup(10, ROOT_ID);
-        items.extend(focus_return_input(12, 10, false));
-        surface.apply(&MountBatch { items });
-        let mut items = vec![MountItem::Delete { id: 12 }, MountItem::Delete { id: 10 }];
-        items.extend(focus_return_popup(20, ROOT_ID));
-        items.extend(focus_return_input(22, 20, false));
-        surface.apply(&MountBatch { items });
-        assert_eq!(focused_id(&surface), Some(22));
-        surface.apply(&MountBatch {
-            items: vec![MountItem::Delete { id: 20 }],
-        });
-        assert_eq!(focused_id(&surface), Some(2));
+        for recreate in [false, true] {
+            let surface = focus_return_form();
+            let mut items = focus_return_popup(10, ROOT_ID);
+            items.extend(focus_return_input(12, 10, false));
+            surface.apply(&MountBatch { items });
+            let mut items = vec![MountItem::Delete { id: 12 }, MountItem::Delete { id: 10 }];
+            items.extend(focus_return_popup(20, ROOT_ID));
+            items.extend(focus_return_input(22, 20, false));
+            surface.apply(&MountBatch { items });
+            assert_eq!(focused_id(&surface), Some(22));
+            surface.apply(&MountBatch {
+                items: vec![MountItem::Delete { id: 20 }],
+            });
+            assert_eq!(focused_id(&surface), Some(2));
 
-        let mut items = focus_return_popup(30, ROOT_ID);
-        items.extend(focus_return_input(32, 30, false));
-        surface.apply(&MountBatch { items });
-        let original = surface.view(2).unwrap();
-        let mut items = vec![MountItem::Delete { id: 2 }];
-        items.extend(focus_return_input(2, ROOT_ID, false));
-        surface.apply(&MountBatch { items });
-        assert_ne!(surface.view(2), Some(original));
-        surface.apply(&MountBatch {
-            items: vec![MountItem::Delete { id: 30 }],
-        });
-        assert_eq!(focused_id(&surface), None);
+            // A list cell can retire while its retained input survives.
+            // Moving the input into that cell does not itself retire focus.
+            surface.apply(&MountBatch {
+                items: vec![
+                    MountItem::Create {
+                        id: 4,
+                        kind: nsh_core::ViewKind::View,
+                    },
+                    MountItem::Insert {
+                        parent: ROOT_ID,
+                        child: 4,
+                        before: None,
+                    },
+                    MountItem::Insert {
+                        parent: 4,
+                        child: 2,
+                        before: None,
+                    },
+                ],
+            });
+            assert_eq!(focused_id(&surface), Some(2));
+            assert_eq!(
+                crate::text_input::ime::selected_text_range(&surface)
+                    .unwrap()
+                    .range,
+                2..2
+            );
+            let mut items = focus_return_popup(30, ROOT_ID);
+            items.extend(focus_return_input(32, 30, false));
+            surface.apply(&MountBatch { items });
+            let original = surface.view(2).unwrap();
+            let items = if recreate {
+                let mut items = vec![MountItem::Delete { id: 2 }];
+                items.extend(focus_return_input(2, ROOT_ID, false));
+                items
+            } else {
+                vec![
+                    MountItem::Remove { id: 4 },
+                    MountItem::Insert {
+                        parent: ROOT_ID,
+                        child: 4,
+                        before: None,
+                    },
+                ]
+            };
+            surface.apply(&MountBatch { items });
+            assert_eq!(surface.view(2).as_ref() == Some(&original), !recreate);
+            surface.apply(&MountBatch {
+                items: vec![MountItem::Delete { id: 30 }],
+            });
+            assert_eq!(focused_id(&surface), None);
+
+            // Capture before this batch sees the old opener. Removing and
+            // reinserting it before opening another popup cannot refresh that
+            // saved target into authority over the replacement row.
+            crate::input::focus_view(&surface, &surface.view(2).unwrap());
+            let mut items = vec![
+                MountItem::Remove { id: 2 },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ];
+            items.extend(focus_return_popup(40, ROOT_ID));
+            items.extend(focus_return_input(42, 40, false));
+            surface.apply(&MountBatch { items });
+            assert_eq!(focused_id(&surface), Some(42));
+            surface.apply(&MountBatch {
+                items: vec![MountItem::Delete { id: 40 }],
+            });
+            assert_eq!(focused_id(&surface), None);
+        }
     }
 
     #[test]
