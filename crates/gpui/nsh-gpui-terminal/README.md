@@ -30,8 +30,7 @@ commits a propagated printable character. A bracketed paste is one text commit.
 
 Each successful GPU submission produces a `SubmittedFrame` containing an
 issuer-bound `FrameToken`, viewport generation and its owned readback ticket.
-In the same synchronous draw sink, pair that token with the existing AppView's
-immutable native input snapshot. Complete the ticket on a background executor
+Complete the ticket on a background executor
 to obtain a `CandidateFrame` with the same token and tightly packed RGBA8 pixels;
 completion never samples application state again.
 Retain one output transaction in flight and one replaceable pending candidate.
@@ -54,16 +53,16 @@ owned slot, including a late error. The independent capability query still
 requires a positive reply, and its nonce must differ from both image slots.
 Restoration deletes only those owned slots.
 
-Resize immediately revokes the old viewport's input geometry. Discard its
+Resize immediately revokes the old viewport's output receipt. Discard its
 pending candidate, finish any already-started output indivisibly, and recreate
 the next frame at the new dimensions. A GPU completion is a candidate, not a
 terminal publication. The writer's completed flush receipt is the only caller
 of `mark_presented`; that receipt does not prove display vsync.
 
-For incoming ordinary presses and scrolling, the host first dispatches against
-that token's original NSH input snapshot and native owner lease. A rejected
-lease cannot fall through to a new hit target. `dispatch_input_exact` is only
-the conservative path for opaque input; it is not the ordinary wheel model.
+Incoming events stay in physical order and use `dispatch_input` through GPUI's
+ordinary native handlers. Output receipts, pending draws and frame tokens do
+not authorize or delay input. `AppView::cancel_pointer` clears the current
+native mouse contact when the terminal loses it, without changing field focus.
 Native window handles, webview portals and OS path pickers are unsupported.
 Clipboard writes are returned to the host for its unique output owner.
 

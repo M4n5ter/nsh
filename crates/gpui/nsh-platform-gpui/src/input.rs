@@ -65,13 +65,13 @@ use std::{
 };
 
 use nsh_core::{
-    Command, EventKind, EventPayload, GestureValues, NodeId, PayloadValue, PointerEvents, ROOT_ID,
-    TouchEvent, TouchPhase, TouchPoint, ViewKind,
+    Bounds, Command, EdgeInsets, EventKind, EventPayload, GestureValues, NodeId, PayloadValue,
+    PointerEvents, ROOT_ID, TouchEvent, TouchPhase, TouchPoint, ViewKind,
     geometry::Points,
     input::{
         self, Candidate, Gate, Grab, GrabOptions, Link, PAN_SLOP, PRESS_SLOP, Pinch,
         SCROLL_PRESS_DELAY, TOUCHPAD_IDLE, VelocityTracker, ZOOM_IDLE, ZOOM_NOTCH, has_press,
-        latch_holds, touchpad_wait, transforms,
+        laid_out, latch_holds, touchpad_wait, transforms,
     },
     tailwind::state::{HOVERED, PRESSED},
 };
@@ -83,39 +83,7 @@ use crate::{
     view::{ItemPointer, Native, NshView, ViewState},
 };
 
-/// Shared press decisions plus the sealed binding of the presented frame.
-struct Press {
-    state: input::Press<NshView>,
-    binding: Option<u64>,
-}
-
-impl Press {
-    fn new(
-        view: NshView,
-        node: NodeId,
-        events: nsh_core::EventMask,
-        delay: Option<f32>,
-        generation: u64,
-    ) -> Self {
-        Self {
-            state: input::Press::new(view, node, events, delay, generation),
-            binding: None,
-        }
-    }
-}
-
-impl std::ops::Deref for Press {
-    type Target = input::Press<NshView>;
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
-}
-
-impl std::ops::DerefMut for Press {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
-    }
-}
+type Press = input::Press<NshView>;
 
 /// A pinch / rotation in progress.
 #[derive(Clone)]
@@ -125,9 +93,6 @@ struct Transform {
     rotation: bool,
     scale: f32,
     degrees: f32,
-    /// Native-only input from an externally presented frame keeps its
-    /// original route and binding in the existing zoom owner.
-    presented: Option<presented::PressLease>,
 }
 
 /// Two touchscreen fingers transforming a view.
@@ -138,8 +103,6 @@ struct TwoFinger {
 }
 
 use crate::keys::{VK_MENU, VK_TAB};
-
-pub(crate) mod presented;
 
 /// What a pointer did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,7 +234,6 @@ enum Key {
 /// The pointer input state of a surface.
 #[derive(Default)]
 pub(crate) struct Input {
-    presented_press: RefCell<Option<presented::PressLease>>,
     /// The pointers that are down.
     pointers: RefCell<Vec<Pointer>>,
     /// Two fingers pinching / rotating on the touchscreen.
@@ -487,7 +449,6 @@ fn after_ms(ms: u64, f: impl FnOnce() + 'static) {
 pub(crate) fn reset(surface: &Surface) {
     let input = &surface.input;
     input.pointers.borrow_mut().clear();
-    input.presented_press.borrow_mut().take();
     input.two.borrow_mut().take();
     input.zoom.borrow_mut().take();
     input.pinch.borrow_mut().take();
@@ -500,6 +461,24 @@ pub(crate) fn reset(surface: &Surface) {
     input.hover_item.borrow_mut().take();
     input.gestures.borrow_mut().clear();
     input.js_block.set(false);
+}
+
+/// Cancels the current native mouse contact and hover, keeping field focus.
+pub(crate) fn cancel_pointer(surface: &Rc<Surface>) {
+    if let Some(pointer) = take(surface, Key::Mouse) {
+        cancel_contact(surface, pointer);
+    }
+    surface.input_pressed.set(0);
+    let at = surface.input.last.take();
+    for view in surface.input.hovered.take() {
+        set_state(surface, &view, HOVERED, false);
+    }
+    let hover_item = surface.input.hover_item.borrow_mut().take();
+    if let Some(item) = hover_item
+        && let Some(at) = at
+    {
+        item.send(surface, PointerKind::Leave, at, 0, Modifiers::default());
+    }
 }
 
 /// `TrackStates`.
@@ -625,33 +604,6 @@ pub(crate) fn gestures(surface: &Rc<Surface>, view: &NshView, values: GestureVal
         // Entries of views that were removed would keep them alive.
         gestures.retain(|_, (v, _)| v.attached());
         gestures.insert(id, (view.clone(), values));
-    }
-}
-
-/// An engine mutation of a gesture's values retires its old native
-/// baseline before the mutation is applied. Unrelated animations keep
-/// their ordinary lifetime.
-pub(crate) fn animation_changed(surface: &Rc<Surface>, op: &nsh_core::animation::AnimationOp) {
-    let cancel_pan = surface
-        .input
-        .presented_press
-        .borrow()
-        .as_ref()
-        .and_then(|lease| lease.gesture_binding())
-        .is_some_and(|binding| surface.anim.borrow().affects_gesture(op, binding));
-    if cancel_pan {
-        presented::cancel(surface);
-    }
-    let cancel_zoom = surface
-        .input
-        .zoom
-        .borrow()
-        .as_ref()
-        .and_then(|(transform, _)| transform.presented.as_ref())
-        .and_then(|lease| lease.gesture_binding())
-        .is_some_and(|binding| surface.anim.borrow().affects_gesture(op, binding));
-    if cancel_zoom {
-        surface.input.zoom.borrow_mut().take();
     }
 }
 
@@ -1203,20 +1155,17 @@ fn activate_focused(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     let Some(view) = crate::text_input::focused_view(surface) else {
         return false;
     };
-    let (id, events, binding) = {
+    let (id, events) = {
         let s = view.state();
         if s.kind == ViewKind::Input || !has_press(s.events) || !focusable(surface, &view) {
             return false;
         }
-        (s.id, s.events, s.props.input_action)
+        (s.id, s.events)
     };
     if !event.repeat {
         for kind in [EventKind::PressDown, EventKind::PressUp, EventKind::Press] {
             if events.contains(kind) {
-                match binding {
-                    Some(binding) => surface.event_bound(id, kind, EventPayload::None, binding),
-                    None => surface.event(id, kind, EventPayload::None),
-                }
+                surface.event(id, kind, EventPayload::None);
             }
         }
     }
@@ -1265,9 +1214,65 @@ fn pick(root: &NshView, x: f32, y: f32, items: bool) -> Option<Hit> {
     pick_in(root, x, y, items)
 }
 
+/// Current native hit geometry, including clipping and pointer policy.
+struct PickGeometry {
+    pointer_events: PointerEvents,
+    clips: bool,
+    size: (f32, f32),
+    slop: EdgeInsets,
+    overflow: Option<Bounds<Points>>,
+    laid_out: bool,
+}
+
+impl PickGeometry {
+    fn sample(state: &ViewState) -> Option<Self> {
+        if state.style.hidden
+            || state.concealed
+            || state.props.pointer_events == PointerEvents::None
+            || state.live.as_ref().is_some_and(|live| live.dying())
+        {
+            return None;
+        }
+        Some(Self {
+            pointer_events: state.props.pointer_events,
+            clips: state.clips(),
+            size: (state.frame.size.width.0, state.frame.size.height.0),
+            slop: state.props.hit_slop,
+            overflow: state.overflow,
+            laid_out: laid_out(state.kind, state.id),
+        })
+    }
+
+    fn inside(&self, x: f32, y: f32) -> bool {
+        x >= 0.0 && y >= 0.0 && x < self.size.0 && y < self.size.1
+    }
+
+    fn owns(&self, x: f32, y: f32) -> bool {
+        x >= -self.slop.left.0
+            && y >= -self.slop.top.0
+            && x < self.size.0 + self.slop.right.0
+            && y < self.size.1 + self.slop.bottom.0
+    }
+
+    fn children(&self, x: f32, y: f32) -> bool {
+        if self.clips {
+            self.inside(x, y)
+        } else {
+            !self.laid_out
+                || self.owns(x, y)
+                || self.overflow.is_some_and(|rect| {
+                    x >= rect.origin.x.0
+                        && y >= rect.origin.y.0
+                        && x < rect.origin.x.0 + rect.size.width.0
+                        && y < rect.origin.y.0 + rect.size.height.0
+                })
+        }
+    }
+}
+
 fn pick_in(view: &NshView, x: f32, y: f32, items: bool) -> Option<Hit> {
     let s = view.state();
-    let shape = presented::PickGeometry::sample(&s)?;
+    let shape = PickGeometry::sample(&s)?;
     let pe = shape.pointer_events;
     let clip = shape.clips;
     let inside = shape.inside(x, y);
@@ -1591,7 +1596,7 @@ fn down(
                 let Some(press) = &mut p.press else { return };
                 press_in(surface, press);
                 press.long = true;
-                press_event(surface, press.node, EventKind::LongPress, press.binding);
+                press_event(surface, press.node, EventKind::LongPress);
             });
         }
     }
@@ -1788,13 +1793,6 @@ fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Op
                 surface.view(*id).is_some_and(|view| {
                     let events = view.state().events;
                     events.contains_listener(EventKind::Touch)
-                        && !(p.key == Key::Mouse
-                            && surface
-                                .input
-                                .presented_press
-                                .borrow()
-                                .as_ref()
-                                .is_some_and(|lease| lease.observes_inside(events)))
                 })
             })
         });
@@ -1913,27 +1911,20 @@ fn find_press(
     views.iter().find_map(|v| {
         let s = v.state();
         (has_press(s.events) && !s.props.accessibility.state.disabled).then(|| {
-            let mut press = Press::new(
+            Press::new(
                 v.clone(),
                 s.id,
                 s.events,
                 s.props.long_press_delay,
                 generation,
-            );
-            press.binding = surface
-                .input
-                .presented_press
-                .borrow()
-                .as_ref()
-                .and_then(|lease| lease.binding_for(v));
-            press
+            )
         })
     })
 }
 
 fn press_in(surface: &Rc<Surface>, press: &mut Press) {
     if let Some(kind) = press.press_in() {
-        press_event(surface, press.node, kind, press.binding);
+        press_event(surface, press.node, kind);
     }
 }
 
@@ -1941,16 +1932,13 @@ fn press_in(surface: &Rc<Surface>, press: &mut Press) {
 /// and it was no long press.
 fn press_out(surface: &Rc<Surface>, press: &mut Press, fire: bool) {
     for kind in press.press_out(fire) {
-        press_event(surface, press.node, kind, press.binding);
+        press_event(surface, press.node, kind);
     }
 }
 
-fn press_event(surface: &Surface, node: NodeId, kind: EventKind, binding: Option<u64>) {
+fn press_event(surface: &Surface, node: NodeId, kind: EventKind) {
     log::debug!(target: "nsh::input", "{} on {node}", kind.prop_name());
-    match binding {
-        Some(binding) => surface.event_bound(node, kind, EventPayload::None, binding),
-        None => surface.event(node, kind, EventPayload::None),
-    }
+    surface.event(node, kind, EventPayload::None);
 }
 
 fn cancel_press(surface: &Rc<Surface>, p: &mut Pointer) {
@@ -2041,7 +2029,6 @@ fn transform_view(surface: &Surface, view: &NshView) -> Transform {
         rotation,
         scale: 1.0,
         degrees: 0.0,
-        presented: None,
     }
 }
 
@@ -2084,11 +2071,6 @@ fn transform_move(surface: &Rc<Surface>, t: &Transform) {
 }
 
 fn transform_end(surface: &Surface, t: &Transform) {
-    // A native-only gesture never acquires callbacks installed after its
-    // presentation, including an idle wheel-pinch end.
-    if t.presented.is_some() {
-        return;
-    }
     let (id, events) = {
         let s = t.view.state();
         (s.id, s.events)
@@ -2184,11 +2166,7 @@ fn end_two_finger(surface: &Rc<Surface>) {
 /// Returns whether a view took it.
 fn wheel_zoom(surface: &Rc<Surface>, x: f32, y: f32, dy: f32) -> bool {
     let input = &surface.input;
-    let current = input.zoom.borrow_mut().take().filter(|(t, _)| {
-        t.presented
-            .as_ref()
-            .is_none_or(|lease| lease.native_matches(surface))
-    });
+    let current = input.zoom.borrow_mut().take();
     let t = match current {
         Some((t, _)) => t,
         None => {

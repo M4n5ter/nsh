@@ -80,6 +80,5 @@ pub use crate::app::set_root;
 pub use crate::{
     app::{AppOptions, AppSource, AppView, open_app_window, run_app, set_ui_sets},
     image::AssetBase,
-    input::presented::{InputDisposition, InputSnapshot, InputSource},
     native::{ComponentContext, ComponentFactory, Components, NativeComponent},
 };

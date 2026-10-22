@@ -122,9 +122,9 @@ pub(crate) fn install(
     if crate::text_input::window_focus(surface, has_focus) {
         window.refresh();
     }
-    if crate::text_input::wants_text(surface)
-        && let Some(view) = view.upgrade()
-    {
+    // The focused native field may change during an input burst before another
+    // paint. The handler resolves that current field and accepts text dynamically.
+    if let Some(view) = view.upgrade() {
         window.handle_input(focus, gpui::ElementInputHandler::new(bounds, view), cx);
     }
 

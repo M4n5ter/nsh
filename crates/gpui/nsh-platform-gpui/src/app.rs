@@ -228,10 +228,10 @@ pub struct AppView {
 }
 
 impl AppView {
-    /// Samples and routes native input for an externally presented GPUI frame.
-    /// The returned main-thread handle does not keep this app alive.
-    pub fn input_source(&self) -> crate::InputSource {
-        crate::InputSource::new(&self.surface)
+    /// Cancels the current native mouse contact and hover without changing focus.
+    /// Embedders call this when their terminal loses the physical pointer.
+    pub fn cancel_pointer(&self) {
+        crate::input::cancel_pointer(&self.surface);
     }
 
     /// A view with no app yet (in `cx.new(|cx| AppView::new(...))`).
@@ -583,10 +583,13 @@ impl Focusable for AppView {
     }
 }
 
-/// The window's input handler while a field of the surface has the focus
-/// (registered by the surface's element): text and input methods go to
-/// that field ([`crate::text_input::ime`]).
+/// The surface's window input handler resolves the current native field for
+/// every text operation, including focus changes between paints.
 impl gpui::EntityInputHandler for AppView {
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        crate::text_input::wants_text(&self.surface)
+    }
+
     fn text_for_range(
         &mut self,
         range: std::ops::Range<usize>,

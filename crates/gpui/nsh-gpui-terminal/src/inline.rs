@@ -11,7 +11,7 @@
 //! that alternate screen; never apply this full-viewport contract to the user's
 //! main screen. Neither protocol supplies a per-image success acknowledgement.
 //! The sole output owner's complete write and flush receipt is the available
-//! publication fact; encoding completion does not admit input or prove scanout.
+//! publication fact; it does not authorize input or prove scanout.
 
 use std::io::Write;
 

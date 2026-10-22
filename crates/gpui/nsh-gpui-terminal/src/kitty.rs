@@ -2,7 +2,7 @@
 //!
 //! Write and flush [`KittyFrame::wire`] indivisibly: the complete back-image
 //! upload requests errors only (`q=1`) and precedes retirement of the old image.
-//! That flush receipt may publish the associated native input snapshot; success
+//! That flush receipt records the completed output transaction; success
 //! replies do not gate publication or prove monitor presentation or refresh rate.
 //! The embedding host's sole reader must end the graphics session on any
 //! negative reply for either owned image slot, including a late error.
@@ -109,7 +109,7 @@ impl KittyFrame {
     ///
     /// Kitty stacks equal-z images by id, so a smaller back id may still be
     /// behind the old image until retirement. Only a successful flush of all
-    /// these bytes permits publication of this frame's native input snapshot.
+    /// these bytes records completion of this frame's output transaction.
     pub fn wire(&self) -> &[u8] {
         &self.wire
     }

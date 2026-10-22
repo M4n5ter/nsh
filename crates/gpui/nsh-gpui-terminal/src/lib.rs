@@ -4,7 +4,7 @@
 //! Drawing produces a [`SubmittedFrame`] whose owned readback completes away
 //! from the native input thread. Only the sole output owner's receipt
 //! may call [`TerminalPlatform::mark_presented`]. GPU completion is not terminal
-//! presentation, and input still needs the NSH surface's original owner lease.
+//! presentation. Input follows GPUI's ordinary native route independently.
 //!
 //! This crate creates no terminal reader or writer and no application runtime.
 //! Embed the existing `nsh_platform_gpui::AppView` using the host's EngineConfig.
@@ -73,9 +73,8 @@ impl Hash for FrameToken {
 
 /// An authentic GPU submission whose readback belongs to the receiving host.
 ///
-/// Bind the token to its native input snapshot synchronously in the draw sink,
-/// then move this ticket to a background executor. Completion never resamples
-/// application state and does not publish an input snapshot.
+/// Move this ticket to a background executor. Completion retains the draw's
+/// identity and pixels without sampling application state or authorizing input.
 #[non_exhaustive]
 pub struct SubmittedFrame {
     pub(crate) token: FrameToken,
@@ -123,7 +122,7 @@ pub struct CandidateFrame {
 }
 
 impl CandidateFrame {
-    /// The identity to pair with this draw's native NSH input snapshot.
+    /// The original draw's identity for its output transaction and diagnostics.
     pub fn token(&self) -> FrameToken {
         self.token.clone()
     }

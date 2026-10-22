@@ -445,21 +445,6 @@ impl Surface {
         });
     }
 
-    /// Sends a sealed event through the original binding after publishing
-    /// the same native focus fact as ordinary events.
-    pub(crate) fn event_bound(
-        &self,
-        id: NodeId,
-        kind: EventKind,
-        payload: EventPayload,
-        binding: u64,
-    ) {
-        self.control(|c| {
-            c.set_focus_path(self.focus_path());
-            c.dispatch_bound_event(id, kind, payload, binding);
-        });
-    }
-
     /// The view of node `id`.
     pub(crate) fn view(&self, id: NodeId) -> Option<NshView> {
         self.views.get(id)
@@ -636,9 +621,6 @@ impl Surface {
                 // requests, including inputs configured before insertion.
                 self.pending_auto_focus.borrow_mut().take();
             }
-            if let MountItem::Animation(op) = item {
-                crate::input::animation_changed(self, op);
-            }
             self.anim.borrow_mut().apply(item);
             if !matches!(
                 item,
@@ -790,32 +772,35 @@ mod tests {
 
     #[cfg(feature = "js")]
     #[gpui::test]
-    fn real_popover_inside_action_keeps_its_native_route_after_hover(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn real_popover_inside_and_outside_bursts_follow_native_input(cx: &mut gpui::TestAppContext) {
         use std::time::{Duration, Instant};
 
-        use crate::{
-            InputDisposition, InputSource,
-            input::{PointerEvent, PointerKind},
-        };
+        use crate::input::{PointerEvent, PointerKind};
 
         const APP: &str = r#"
             import { mount, signal, inputAction, View, Text } from 'nsh';
             import { Popover, Button } from 'nsh/base';
             const inside = signal(0);
             const outside = signal(0);
+            const outsideAction = signal(0);
+            const open = signal(true);
             const increment = () => inside.set(inside() + 1);
+            const incrementOutside = () => outsideAction.set(outsideAction() + 1);
             mount(() => View({style: {flex: 1}, children: [
-                Popover({open: true, popupStyle: {width: 240},
-                    onOpenChange: next => { if (!next) outside.set(outside() + 1); },
+                Popover({get open() { return open(); }, popupStyle: {width: 240},
+                    onOpenChange: next => { open.set(next); if (!next) outside.set(outside() + 1); },
                     trigger: Button({accessibilityLabel: 'Open popup',
                         style: {width: 160, height: 40}, children: Text({children: 'Open popup'})}),
                     children: Button({accessibilityLabel: 'Inside action', tooltip: 'Inside hint',
                         onPress: inputAction(increment, null), style: {width: 200, height: 48},
                         hoverStyle: {backgroundColor: '#334455'}, children: Text({children: 'Inside action'})})}),
                 Text({get accessibilityLabel() { return `Inside count ${inside()}`; }, children: () => `Inside count ${inside()}`}),
-                Text({get accessibilityLabel() { return `Outside count ${outside()}`; }, children: () => `Outside count ${outside()}`})
+                Text({get accessibilityLabel() { return `Outside count ${outside()}`; }, children: () => `Outside count ${outside()}`}),
+                Text({get accessibilityLabel() { return `Popup open ${open()}`; }, children: () => `Popup open ${open()}`}),
+                Text({get accessibilityLabel() { return `Outside action count ${outsideAction()}`; }, children: () => `Outside action count ${outsideAction()}`}),
+                Button({accessibilityLabel: 'Outside action', onPress: inputAction(incrementOutside, null),
+                    style: {position: 'absolute', left: 400, top: 250, width: 180, height: 48},
+                    children: Text({children: 'Outside action'})})
             ]}));
         "#;
         fn target(view: &NshView, label: &str) -> Option<NshView> {
@@ -873,8 +858,6 @@ mod tests {
             .unwrap()
             .map(size.width.0 / 2.0, size.height.0 / 2.0)
             .unwrap();
-        let source = InputSource::new(&surface);
-        let snapshot = source.sample().unwrap();
         crate::input::pointer(
             &surface,
             PointerEvent {
@@ -890,45 +873,45 @@ mod tests {
                 clicks: 1,
             },
         );
-        // This is one physical burst: no pump or new snapshot between the
-        // hover and the two events belonging to the original visible button.
-        let position = gpui::point(gpui::px(x), gpui::px(y));
-        assert_eq!(
-            source.dispatch(
-                &snapshot,
-                &gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                    position,
-                    button: gpui::MouseButton::Left,
-                    click_count: 1,
-                    ..Default::default()
-                })
-            ),
-            InputDisposition::Handled
-        );
-        assert_eq!(
-            source.dispatch(
-                &snapshot,
-                &gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                    position,
-                    button: gpui::MouseButton::Left,
-                    click_count: 1,
-                    ..Default::default()
-                })
-            ),
-            InputDisposition::Handled
-        );
-        wait(&surface, || {
-            target(&surface.root, "Inside count 1").is_some()
-        });
-        assert!(target(&surface.root, "Outside count 0").is_some());
-        // Ordinary exact input outside the popup retains the original callback.
+        // The complete physical burst reaches the ordinary native handlers
+        // without another draw or engine pump between hover, Down and Up.
         for kind in [PointerKind::Down, PointerKind::Up] {
             crate::input::pointer(
                 &surface,
                 PointerEvent {
                     kind,
-                    x: 600.0,
-                    y: 300.0,
+                    x,
+                    y,
+                    button: 0,
+                    pointer: 1,
+                    touch: false,
+                    pen: false,
+                    time: surface.clock(),
+                    modifiers: Default::default(),
+                    clicks: 1,
+                },
+            );
+        }
+        wait(&surface, || {
+            target(&surface.root, "Inside count 1").is_some()
+        });
+        assert!(target(&surface.root, "Outside count 0").is_some());
+        let outside = target(&surface.root, "Outside action").unwrap();
+        let size = outside.state().frame.size;
+        let (outside_x, outside_y) = outside
+            .to_root()
+            .unwrap()
+            .map(size.width.0 / 2.0, size.height.0 / 2.0)
+            .unwrap();
+        // Closing the popup must not consume the legitimate outside button's
+        // action. This second burst also has no intervening pump or draw.
+        for kind in [PointerKind::Move, PointerKind::Down, PointerKind::Up] {
+            crate::input::pointer(
+                &surface,
+                PointerEvent {
+                    kind,
+                    x: outside_x,
+                    y: outside_y,
                     button: 0,
                     pointer: 1,
                     touch: false,
@@ -941,6 +924,8 @@ mod tests {
         }
         wait(&surface, || {
             target(&surface.root, "Outside count 1").is_some()
+                && target(&surface.root, "Outside action count 1").is_some()
+                && target(&surface.root, "Popup open false").is_some()
         });
         assert!(target(&surface.root, "Inside count 1").is_some());
         surface.stop();

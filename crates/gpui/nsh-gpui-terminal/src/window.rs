@@ -181,12 +181,6 @@ impl WindowState {
         self.published.clone()
     }
 
-    pub(crate) fn has_exact_presentation(&self, token: &FrameToken) -> bool {
-        self.published.as_ref() == Some(token)
-            && token.sequence == self.sequence
-            && token.viewport_generation == self.viewport_generation
-    }
-
     pub(crate) fn mark_presented(&mut self, token: FrameToken) -> Result<()> {
         ensure!(
             token
@@ -249,8 +243,7 @@ impl WindowState {
         }
     }
 
-    /// Transport only. The host must admit this input against its completed
-    /// presentation before calling; a GPUI callback does not grant that authority.
+    /// Routes physical input through the current native GPUI callback.
     pub(crate) fn dispatch_input(
         state: &Rc<RefCell<Self>>,
         input: PlatformInput,
@@ -325,7 +318,9 @@ impl WindowState {
         }
         let handler = state.borrow_mut().input_handler.take();
         if let Some(mut handler) = handler {
-            handler.replace_text_in_range(None, text);
+            if handler.query_accepts_focused_text_input() {
+                handler.replace_text_in_range(None, text);
+            }
             state.borrow_mut().input_handler.get_or_insert(handler);
         }
     }

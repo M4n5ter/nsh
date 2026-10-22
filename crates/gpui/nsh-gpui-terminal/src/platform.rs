@@ -200,8 +200,8 @@ impl TerminalPlatform {
         Ok(())
     }
 
-    /// Delivers already-admitted native input through GPUI's actual callback.
-    /// The external host must establish its original-owner authority first.
+    /// Delivers input in physical order through GPUI's ordinary native callback.
+    /// Drawing and terminal output receipts do not gate this input path.
     pub fn dispatch_input(&self, input: PlatformInput) -> Result<DispatchEventResult> {
         let window = self.window()?;
         if matches!(input, PlatformInput::MouseMove(_)) {
@@ -210,27 +210,14 @@ impl TerminalPlatform {
         Ok(WindowState::dispatch_input(&window, input))
     }
 
-    /// Exact-presentation transport for opaque input only. Ordinary press and
-    /// wheel routes must use the native admission peer rather than this check.
-    pub fn dispatch_input_exact(&self, token: FrameToken, input: PlatformInput) -> bool {
-        let Ok(window) = self.window() else {
-            return false;
-        };
-        if !window.borrow().has_exact_presentation(&token) {
-            return false;
-        }
-        self.dispatch_input(input).is_ok()
-    }
-
-    /// Commits one already-admitted bracketed paste through the current GPUI
-    /// input handler. The host verifies the original editor before calling.
+    /// Commits bracketed paste through the current GPUI input handler.
     pub fn paste(&self, text: &str) -> Result<()> {
         WindowState::paste(&self.window()?, text);
         Ok(())
     }
 
     /// Records a receipt from the host's trusted sole writer. This confirms
-    /// transport completion, not the authority of an event listener.
+    /// transport completion for output diagnostics, without authorizing input.
     pub fn mark_presented(&self, token: FrameToken) -> Result<()> {
         self.window()?.borrow_mut().mark_presented(token)
     }
@@ -563,7 +550,6 @@ mod tests {
             click_count: 1,
             ..Default::default()
         });
-        assert!(!platform.dispatch_input_exact(original.clone(), press.clone()));
         assert!(platform.pump_with_draw(false));
         assert_eq!(foreground.get(), 7);
         application.update(|cx| {
@@ -585,6 +571,9 @@ mod tests {
         assert_eq!(wakes.load(Ordering::SeqCst), 0);
         assert_eq!(frames.borrow().len(), 0);
         assert!(platform.has_pending());
+        platform.dispatch_input(press.clone())?;
+        assert_eq!(presses.get(), 1);
+        assert_eq!(frames.borrow().len(), 0);
 
         assert!(platform.pump());
         let current = {
@@ -598,13 +587,11 @@ mod tests {
             );
             frame.token()
         };
-        assert!(!platform.dispatch_input_exact(FrameToken::default(), press.clone()));
-        assert!(!platform.dispatch_input_exact(original, press.clone()));
-        assert!(!platform.dispatch_input_exact(current.clone(), press.clone()));
-        assert_eq!(presses.get(), 0);
+        platform.dispatch_input(press.clone())?;
+        assert_eq!(presses.get(), 2);
         platform.mark_presented(current.clone())?;
-        assert!(platform.dispatch_input_exact(current, press));
-        assert_eq!(presses.get(), 1);
+        platform.dispatch_input(press)?;
+        assert_eq!(presses.get(), 3);
         assert_eq!(platform.take_error(), None);
         drop(application);
         platform.shutdown();

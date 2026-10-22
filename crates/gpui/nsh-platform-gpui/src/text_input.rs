@@ -756,8 +756,7 @@ pub(crate) fn surface_stopped(key: u64) {
     blink::update();
 }
 
-/// True while the surface's focused field takes text: the surface
-/// registers the window's input handler then.
+/// True while the surface's current focused field accepts text input.
 pub(crate) fn wants_text(surface: &Surface) -> bool {
     focused(surface)
         .and_then(|v| input_of(&v))
