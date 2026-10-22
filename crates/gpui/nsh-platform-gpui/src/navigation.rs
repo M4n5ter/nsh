@@ -1028,10 +1028,8 @@ impl Nav {
     /// first when it listens (it sends `Command::Back` when no listener
     /// takes it), else the innermost stack pops. Whether something took it.
     fn go_back(&mut self, surface: &Rc<Surface>) -> bool {
-        self.go_back_to(
-            surface,
-            surface.root.state().events.contains(EventKind::BackPress),
-        )
+        let back_press = surface.root.state().events.contains(EventKind::BackPress);
+        self.go_back_to(surface, back_press)
     }
 
     /// Goes back to what [`Nav::back_target`] names.
