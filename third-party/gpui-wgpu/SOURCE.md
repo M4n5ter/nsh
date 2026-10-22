@@ -29,18 +29,29 @@ scene, adapter-information and sprite-atlas methods. The original test/bench
 `PlatformHeadlessRenderer` bridge delegates its existing three methods to the
 same implementation. No GPUI core feature or trait is extended.
 
-The renderer reuses its GPU target and same-size readback allocation, strips
-GPU row padding into caller-owned top-down RGBA8 storage and handles BGRA
-formats. All mapping failures and timeouts unmap and discard the staging
-buffer. Synchronous readback uses the original bounded GPU wait; success does
-not establish terminal publication or a frame-rate guarantee. Adapter policy
-is unchanged, and diagnostics distinguish a software-emulated device.
+`submit_scene` records drawing and its readback copy in one GPU submission and
+returns an owned `SubmittedReadback` without waiting or allocating RGBA image
+storage. The ticket holds its device, staging allocation, dimensions, mapping
+result and device-error observer independently of the renderer. Its mapping
+callback only sends the result; `complete` or `complete_into` performs the
+existing bounded GPU wait, strips row padding and converts BGRA on the calling
+background owner. The blocking image and pixel methods delegate to this same
+submission/completion path; invalid destinations are rejected before submission.
+
+The renderer reuses its GPU target and a single cached, unmapped same-size
+staging allocation. Cache exchange never holds its lock through GPU work or
+pixel copying. Dropped tickets, mapping failures and timeouts cancel mapping
+and discard their allocation; only successful completion returns an unmapped
+buffer to the cache. Success does not establish terminal publication or a
+frame-rate guarantee. Adapter policy is unchanged, and diagnostics distinguish
+a software-emulated device.
 
 The archive omitted upstream's WGSL-validation test dev dependency; the local
 manifest restores Naga at the backend's exact 30.0.1 version with `wgsl-in`.
 Production uses `offscreen` without `test-support`; unit tests use
-`offscreen,test-support`. Five real headless GPU regressions check color, odd-stride, RGBA/BGRA,
-invalid-destination recovery, target reuse and resize assertions.
+`offscreen,test-support`. Five real headless GPU regressions check background completion, color,
+odd-stride, RGBA/BGRA, invalid-destination recovery, dropped-ticket recovery,
+unmapped allocation reuse, target reuse and overlapping resize submissions.
 
 ## Standalone verification
 

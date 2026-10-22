@@ -9,6 +9,7 @@ pub use cosmic_text_system::*;
 pub use wgpu;
 pub use wgpu_atlas::*;
 pub use wgpu_context::*;
+pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(all(
     not(target_family = "wasm"),
     any(
@@ -18,5 +19,4 @@ pub use wgpu_context::*;
         feature = "offscreen"
     )
 ))]
-pub use wgpu_renderer::WgpuHeadlessRenderer;
-pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+pub use wgpu_renderer::{SubmittedReadback, WgpuHeadlessRenderer};
