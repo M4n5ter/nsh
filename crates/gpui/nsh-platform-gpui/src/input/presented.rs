@@ -846,6 +846,12 @@ impl InputSource {
             || surface.input.wheel.borrow().is_some()
             || surface.input.pinching()
             || surface.input.zoom.borrow().is_some()
+            || surface
+                .input
+                .hovered
+                .borrow()
+                .iter()
+                .any(|view| view.state().events.contains_listener(EventKind::HoverOut))
         {
             return InputDisposition::ExactFallback;
         }
@@ -915,6 +921,7 @@ impl InputSource {
             return InputDisposition::Rejected;
         }
         surface.input.last.set(Some((x, y)));
+        rehover(surface);
         crate::scroll::wheel(surface, view, dx, dy);
         InputDisposition::Handled
     }

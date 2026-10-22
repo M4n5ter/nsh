@@ -422,6 +422,13 @@ pub(crate) fn overlay_anchor<I: HostInput>(input: &I, _: &mut HostCx) -> Option<
     Some(OverlayProp::Anchor(anchor))
 }
 
+/// `hintDelay`: milliseconds before a native hint is shown.
+pub(crate) fn hint_delay<I: HostInput>(input: &I, _: &mut HostCx) -> Option<OverlayProp> {
+    let millis = input.as_number().filter(|n| n.is_finite())?;
+    let delay = std::time::Duration::try_from_secs_f64(millis.max(0.0) / 1000.0).ok()?;
+    Some(OverlayProp::Hint(Some(delay)))
+}
+
 /// `tooltip`: a string, an element (a node JS made), or nothing.
 pub(crate) fn tooltip<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     let content = match (input.node(), input.as_string()) {

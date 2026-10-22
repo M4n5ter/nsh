@@ -3743,6 +3743,7 @@ impl<M: TextEngine> Core<M> {
                 command: Command::ScrollToIndex {
                     index,
                     animated: false,
+                    automatic: false,
                     view_position: crate::geometry::Percentage(0.0),
                     view_offset: Points::ZERO,
                 },

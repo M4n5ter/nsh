@@ -189,6 +189,9 @@ pub(crate) fn decode_command<'js>(
                 animated: o
                     .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
                     .unwrap_or(true),
+                automatic: o
+                    .and_then(|o| o.get::<_, Option<bool>>("automatic").ok().flatten())
+                    .unwrap_or(false),
                 view_position: Percentage(f("viewPosition")?.unwrap_or(0.0)),
                 view_offset: Points(f("viewOffset")?.unwrap_or(0.0)),
             }

@@ -2637,6 +2637,7 @@ impl<M: TextEngine> Core<M> {
                     OverlayProp::Margin(v) => c.margin = v,
                     OverlayProp::FocusReturn(v) => c.focus_return = v,
                     OverlayProp::Hint(v) => c.hint = v,
+                    OverlayProp::HintOnFocus(v) => c.hint_on_focus = v,
                     OverlayProp::Open(v) => c.open = v,
                 });
                 return Ok(());
@@ -4749,6 +4750,39 @@ impl<M: TextEngine> Core<M> {
     fn update_lists(&mut self, relayout: bool) {
         for i in 0..self.lists.len() {
             let key = self.lists[i];
+            let id = self.nodes[key as usize].id;
+            let automatic = self.commands.iter().any(|(target, command)| {
+                *target == id
+                    && matches!(
+                        command,
+                        Command::ScrollToIndex {
+                            automatic: true,
+                            ..
+                        }
+                    )
+            });
+            if automatic
+                && !self.nodes[key as usize]
+                    .list
+                    .as_ref()
+                    .expect("list")
+                    .automatic
+            {
+                self.nodes[key as usize]
+                    .list
+                    .as_mut()
+                    .expect("list")
+                    .automatic = true;
+                // Request an initial snapshot even when styles already track these bits.
+                let tracked = self.nodes[key as usize].tracked;
+                self.update_tracking(key);
+                if self.nodes[key as usize].created && self.nodes[key as usize].tracked == tracked {
+                    self.mount.push(MountItem::TrackStates {
+                        id,
+                        states: self.nodes[key as usize].tracked,
+                    });
+                }
+            }
             let node = &self.nodes[key as usize];
             if !node.created {
                 continue;
@@ -4826,7 +4860,7 @@ impl<M: TextEngine> Core<M> {
             match list.follow_pin(anchor) {
                 Follow::Stay => {}
                 Follow::By(delta) => anchor += delta,
-                Follow::To(offset) => retarget = Some(offset),
+                Follow::To { offset, animated } => retarget = Some((offset, animated)),
             }
 
             // Scroll commands for the list, now that sizes are known: the
@@ -4836,10 +4870,11 @@ impl<M: TextEngine> Core<M> {
                     continue;
                 }
                 let list = self.nodes[key as usize].list.as_mut().expect("list");
-                let (pin, animated) = match *command {
+                let (pin, animated, automatic) = match *command {
                     Command::ScrollToIndex {
                         index,
                         animated,
+                        automatic,
                         view_position,
                         view_offset,
                     } => (
@@ -4849,9 +4884,10 @@ impl<M: TextEngine> Core<M> {
                             view_offset: view_offset.0,
                         }),
                         animated,
+                        automatic,
                     ),
-                    Command::ScrollToEnd { animated } => (Some(PinTarget::End), animated),
-                    Command::ScrollTo { animated, .. } => (None, animated),
+                    Command::ScrollToEnd { animated } => (Some(PinTarget::End), animated, false),
+                    Command::ScrollTo { animated, .. } => (None, animated, false),
                     _ => continue,
                 };
                 let offset = match (pin, &*command) {
@@ -4865,8 +4901,13 @@ impl<M: TextEngine> Core<M> {
                     }
                     _ => continue,
                 };
+                if automatic && !list.idle() {
+                    list.wait_for_idle(pin.expect("automatic index target"), animated);
+                    retarget = None;
+                    continue;
+                }
                 // An offset of the app's own ends the pin.
-                list.pin(pin, offset, animated);
+                list.pin(pin, offset, animated, automatic);
                 // A new command replaces the pin's retargeting.
                 retarget = None;
                 if !animated {
@@ -4880,7 +4921,7 @@ impl<M: TextEngine> Core<M> {
                 };
                 *command = Command::ScrollTo { x, y, animated };
             }
-            if let Some(offset) = retarget {
+            if let Some((offset, animated)) = retarget {
                 self.nodes[key as usize]
                     .list
                     .as_mut()
@@ -4891,11 +4932,7 @@ impl<M: TextEngine> Core<M> {
                 } else {
                     (Points::ZERO, Points(offset))
                 };
-                let command = Command::ScrollTo {
-                    x,
-                    y,
-                    animated: true,
-                };
+                let command = Command::ScrollTo { x, y, animated };
                 self.commands.push((id, command));
             }
 

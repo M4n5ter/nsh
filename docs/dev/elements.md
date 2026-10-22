@@ -243,6 +243,12 @@ Text, styles, scrolling and lists, animation, canvases and images have their own
 
 ## Overlays
 
+A callback-free tooltip with custom placement and native keyboard focus can use the existing overlay directly:
+`tooltip={<Overlay hintDelay={0} hintOnFocus placement="left" pointerEvents="none">…</Overlay>}`.
+`hintDelay` is milliseconds; `hintOnFocus` also presents it while the anchor owns native keyboard focus. The same
+hint owns pointer and focus presentation, without app hover/focus listeners or controlled tooltip state.
+
+
 `<Overlay>` (`nsh`; Rust `overlay()`) shows its children on top of the root view it is in: the surface, or the
 dialog around it (`Modal`). It is the one mechanism popups are built on (`nsh/base`'s `Popover`, `Menu`,
 `ContextMenu`, `Tooltip`, `Sheet`: `components.md`); it draws nothing and closes nothing itself.

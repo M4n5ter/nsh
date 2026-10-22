@@ -836,6 +836,13 @@ impl Overlay {
         self.bind_prop(delay, |d| Prop::Overlay(OverlayProp::Hint(Some(d))))
     }
 
+    /// Also show a hint while its anchor has native keyboard focus.
+    pub fn hint_on_focus(self, enabled: impl IntoReactive<bool>) -> Self {
+        self.bind_prop(enabled, |enabled| {
+            Prop::Overlay(OverlayProp::HintOnFocus(enabled))
+        })
+    }
+
     /// A hint shown (`Some(true)`) or hidden (`Some(false)`) whatever the
     /// pointer does: its owner follows [`Self::on_hint_show`] /
     /// [`Self::on_hint_hide`] (a `Tooltip` controlled by the app). `None`:

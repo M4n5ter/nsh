@@ -779,6 +779,7 @@ fn presented_wheels_keep_the_original_scroll_across_growth_and_a_new_nested_owne
             events,
         },
     );
+    track_states(&surface, &outer, HOVERED);
     let source = InputSource::new(&surface);
     let snapshot = source.sample().unwrap();
     assert_eq!(
@@ -786,6 +787,7 @@ fn presented_wheels_keep_the_original_scroll_across_growth_and_a_new_nested_owne
         InputDisposition::Handled
     );
     assert_eq!(outer.state().scroll.as_ref().unwrap().y, Points(STEP));
+    assert_eq!(outer.state().states & HOVERED, HOVERED);
     assert_eq!(
         source.dispatch(&snapshot, &wheel(3.0)),
         InputDisposition::Handled
@@ -955,6 +957,21 @@ fn presented_wheels_reject_recycled_geometry_scope_and_opaque_routes() {
         .state_mut()
         .events
         .set(EventKind::MomentumEnd, false);
+
+    // Rehovering for a successful wheel must not grant an old hover
+    // callback permission to run through the sealed native path.
+    let sibling = view(&surface, 8, ROOT_ID, ViewKind::View);
+    sibling.state_mut().frame = crate::geom::rect(320.0, 0.0, 60.0, 300.0);
+    sibling.state_mut().events.set(EventKind::HoverOut, true);
+    events_changed(&surface, &sibling);
+    set_hovered(&surface, vec![sibling.clone()]);
+    assert_eq!(
+        source.dispatch(&source.sample().unwrap(), &wheel(-3.0)),
+        InputDisposition::ExactFallback
+    );
+    assert_eq!(replacement.state().scroll.as_ref().unwrap().y, Points(STEP));
+    sibling.state_mut().events.set(EventKind::HoverOut, false);
+    events_changed(&surface, &sibling);
 
     surface.resized(500.0, 400.0, 1.0);
     assert_eq!(

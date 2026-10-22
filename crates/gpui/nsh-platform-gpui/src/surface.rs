@@ -621,6 +621,7 @@ impl Surface {
     }
 
     fn apply(self: &Rc<Self>, batch: &MountBatch) {
+        let focused = crate::input::focus_chain(self);
         let focus_return = crate::focus_return::before_batch(self, batch);
         crate::access::prepare(batch);
         for item in &batch.items {
@@ -654,6 +655,16 @@ impl Surface {
             crate::text_input::blur_view(self, &view);
         }
         crate::focus_return::after_batch(self, batch, focus_return);
+        crate::input::focus_within_changed(self, &focused);
+        let tracked: Vec<_> = batch
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MountItem::TrackStates { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        crate::input::refresh_tracked_states(self, &tracked);
         // Removed owners are cleared quietly by focused_view; publish that
         // fact even when there is no remaining node to receive Blur.
         self.sync_focus();
@@ -790,6 +801,89 @@ mod tests {
                 before: None,
             },
         ]
+    }
+
+    #[test]
+    fn new_tracking_reports_existing_native_focus_and_hover_then_tracks_departure() {
+        use nsh_core::{ViewKind, geometry::rect, tailwind::state};
+        let surface = Surface::new(nsh_engine::Environment::default());
+        surface.root.state_mut().frame =
+            rect(Points(0.0), Points(0.0), Points(400.0), Points(400.0));
+        let mut items = vec![
+            MountItem::Create {
+                id: 2,
+                kind: ViewKind::Scroll,
+            },
+            MountItem::Frame {
+                id: 2,
+                frame: rect(Points(0.0), Points(0.0), Points(200.0), Points(200.0)),
+            },
+            MountItem::Insert {
+                parent: nsh_core::ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ];
+        items.extend(focus_return_input(4, 2, false));
+        items.extend(focus_return_input(6, 2, false));
+        items.extend(focus_return_input(8, nsh_core::ROOT_ID, false));
+        for (id, x, y) in [(4, 0.0, 0.0), (6, 0.0, 40.0), (8, 240.0, 0.0)] {
+            items.push(MountItem::Frame {
+                id,
+                frame: rect(Points(x), Points(y), Points(100.0), Points(32.0)),
+            });
+        }
+        surface.apply(&MountBatch { items });
+        let mark = surface.view(4).unwrap();
+        crate::text_input::focus_view(&surface, &mark);
+        let move_to = |x| {
+            crate::input::pointer(
+                &surface,
+                crate::input::PointerEvent {
+                    kind: crate::input::PointerKind::Move,
+                    x,
+                    y: 20.0,
+                    button: 0,
+                    pointer: 1,
+                    touch: false,
+                    pen: false,
+                    time: 1.0,
+                    modifiers: Default::default(),
+                    clicks: 0,
+                },
+            )
+        };
+        move_to(20.0);
+        surface.apply(&MountBatch {
+            items: vec![
+                MountItem::TrackStates {
+                    id: 2,
+                    states: state::HOVERED | state::FOCUS_WITHIN,
+                },
+                MountItem::TrackStates {
+                    id: 4,
+                    states: state::FOCUSED,
+                },
+            ],
+        });
+        // Real Surface::drain re-picks hover after the completed batch.
+        crate::input::rehover(&surface);
+        let rail = surface.view(2).unwrap();
+        assert_eq!(rail.state().states, state::HOVERED | state::FOCUS_WITHIN);
+        assert_eq!(mark.state().states, state::FOCUSED);
+        crate::text_input::focus_view(&surface, &surface.view(6).unwrap());
+        assert_eq!(rail.state().states, state::HOVERED | state::FOCUS_WITHIN);
+        crate::text_input::focus_view(&surface, &surface.view(8).unwrap());
+        assert_eq!(rail.state().states, state::HOVERED);
+        move_to(300.0);
+        assert_eq!(rail.state().states, 0);
+        // Virtualization can recycle a focused row without a focus command.
+        crate::text_input::focus_view(&surface, &surface.view(6).unwrap());
+        assert_eq!(rail.state().states, state::FOCUS_WITHIN);
+        surface.apply(&MountBatch {
+            items: vec![MountItem::Remove { id: 6 }, MountItem::Delete { id: 6 }],
+        });
+        assert_eq!(rail.state().states, 0);
     }
 
     fn focus_return_popup(id: NodeId, parent: NodeId) -> Vec<MountItem> {

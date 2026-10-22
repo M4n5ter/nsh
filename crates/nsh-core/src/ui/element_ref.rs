@@ -172,6 +172,7 @@ impl ElementRef {
         self.send(Command::ScrollToIndex {
             index,
             animated,
+            automatic: false,
             view_position,
             view_offset,
         });

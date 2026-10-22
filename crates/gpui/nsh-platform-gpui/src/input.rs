@@ -516,6 +516,66 @@ pub(crate) fn track_states(surface: &Rc<Surface>, view: &NshView, states: u8) {
     update_hover_tracking(surface, view);
 }
 
+/// Initializes newly requested state masks using the completed native tree.
+pub(crate) fn refresh_tracked_states(surface: &Surface, ids: &[NodeId]) {
+    let focused = crate::text_input::focused_view(surface);
+    let focused_chain = focused.as_ref().map(chain).unwrap_or_default();
+    let hovered_chain = surface
+        .input
+        .last
+        .get()
+        .and_then(|(x, y)| pick(&surface.root, x, y, true))
+        .map(|hit| chain(&hit.view))
+        .unwrap_or_default();
+    for id in ids {
+        let Some(view) = surface.view(*id) else {
+            continue;
+        };
+        let states = {
+            let mut state = view.state_mut();
+            let mut states = state.states & nsh_core::tailwind::state::PRESSED;
+            if focused.as_ref() == Some(&view) {
+                states |= nsh_core::tailwind::state::FOCUSED;
+            }
+            if focused_chain.contains(&view) {
+                states |= nsh_core::tailwind::state::FOCUS_WITHIN;
+            }
+            if hovered_chain.contains(&view) {
+                states |= HOVERED;
+            }
+            state.states = states & state.tracked;
+            state.states
+        };
+        surface.control(|control| control.set_states(*id, states));
+    }
+}
+
+/// The existing native focus owner's ancestors, sampled before a transition.
+pub(crate) fn focus_chain(surface: &Surface) -> Vec<NshView> {
+    crate::text_input::focused_view(surface)
+        .as_ref()
+        .map(chain)
+        .unwrap_or_default()
+}
+
+/// Publishes focus-within after a focus change or completed mount batch. A
+/// removed owner may have already been forgotten by focused_view, so retain
+/// its old ancestors only for the duration of this native transition.
+pub(crate) fn focus_within_changed(surface: &Surface, previous: &[NshView]) {
+    let current = focus_chain(surface);
+    for view in previous.iter().chain(current.iter()) {
+        if surface.view(view.id()).as_ref() != Some(view) {
+            continue;
+        }
+        set_state(
+            surface,
+            view,
+            nsh_core::tailwind::state::FOCUS_WITHIN,
+            current.contains(view),
+        );
+    }
+}
+
 /// Whether hovering `view` matters: for its `hover:` styles (the
 /// `HOVERED` state) or its `onHoverIn` / `onHoverOut` / `onHoverMove`.
 fn hoverable(view: &NshView) -> bool {
@@ -944,6 +1004,7 @@ pub(crate) fn pointer(surface: &Rc<Surface>, event: PointerEvent) {
 pub(crate) fn wheel(surface: &Rc<Surface>, event: WheelEvent) {
     let (x, y) = (event.x, event.y);
     surface.input.last.set(Some((x, y)));
+    rehover(surface);
     let (mut dx, mut dy) = (event.dx, event.dy);
     // Mice have no pinch: Ctrl + wheel pinches, as it zooms on desktops
     // (precision touchpads pinch this way too).
@@ -2498,6 +2559,8 @@ pub(crate) fn touchpad(surface: &Rc<Surface>, event: WheelEvent, phase: GestureP
     let input = &surface.input;
     let time = event.time * 1000.0;
     let (x, y) = (event.x, event.y);
+    input.last.set(Some((x, y)));
+    rehover(surface);
     match phase {
         GesturePhase::Began => {
             input.momentum.set(None);
@@ -2976,6 +3039,37 @@ mod tests {
 
     fn offset(view: &NshView) -> f32 {
         view.state().scroll.as_ref().unwrap().y.0
+    }
+
+    #[test]
+    fn wheel_positions_update_native_hover_without_prior_mouse_motion() {
+        let (surface, scroll) = scrolling_surface();
+        track_states(&surface, &scroll, HOVERED);
+        let event = WheelEvent {
+            x: 100.0,
+            y: 100.0,
+            dx: 0.0,
+            dy: 48.0,
+            precise: false,
+            modifiers: Modifiers::default(),
+            time: 1.0,
+        };
+        wheel(&surface, event);
+        assert_eq!(scroll.state().states & HOVERED, HOVERED);
+        assert_eq!(hovered_ids(&surface), vec![2]);
+        wheel(
+            &surface,
+            WheelEvent {
+                x: 350.0,
+                time: 2.0,
+                ..event
+            },
+        );
+        assert_eq!(scroll.state().states & HOVERED, 0);
+        // A touchpad can be the first event in the same way.
+        touchpad(&surface, event, GesturePhase::Began);
+        assert_eq!(scroll.state().states & HOVERED, HOVERED);
+        assert_eq!(hovered_ids(&surface), vec![2]);
     }
 
     #[test]

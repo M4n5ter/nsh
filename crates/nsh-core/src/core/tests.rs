@@ -1611,6 +1611,72 @@ fn scrolled(batch: &MountBatch, start: f32) -> f32 {
 }
 
 #[test]
+fn automatic_list_targets_wait_for_native_idle_and_resume_only_the_latest() {
+    use crate::tailwind::state::{FOCUS_WITHIN, FOCUSED, HOVERED};
+    let mut c = core();
+    estimated_list(&mut c);
+    // Real focus owners in this list: class-derived focus-within is not
+    // the list's direct native interaction snapshot.
+    add(&mut c, 4, Tag::View, 2, &[]);
+    add(&mut c, 6, Tag::View, 2, &[]);
+    c.commit();
+    let request = |c: &mut Core<FakeEngine>, index, automatic| {
+        c.apply(Op::Command {
+            id: 2,
+            command: Command::ScrollToIndex {
+                index,
+                animated: false,
+                automatic,
+                view_position: crate::geometry::Percentage(0.5),
+                view_offset: px(0.0),
+            },
+        })
+        .unwrap();
+        c.commit().map_or(0.0, |batch| scrolled(&batch, 0.0))
+    };
+    // The first request must wait for the native snapshot, including a
+    // pointer which was already here before tracking was enabled.
+    assert_eq!(request(&mut c, 20, true), 0.0);
+    c.set_states(2, HOVERED);
+    assert_eq!(c.commit().map_or(0.0, |b| scrolled(&b, 0.0)), 0.0);
+    assert_eq!(request(&mut c, 40, true), 0.0);
+    assert_eq!(request(&mut c, 60, true), 0.0);
+    // A source splice invalidates the previous index pin. The caller can
+    // refresh the same active index instead of needing an index change.
+    c.apply(Op::SetProp {
+        id: 2,
+        prop: Prop::Splice(90, 1, 1),
+    })
+    .unwrap();
+    c.commit();
+    assert_eq!(request(&mut c, 60, true), 0.0);
+    c.set_states(2, 0);
+    assert_eq!(scrolled(&c.commit().unwrap(), 0.0), 2825.0);
+    // After automatic following completed, user scrolling still preserves
+    // that latest intent. Leaving resumes without another active request.
+    c.set_states(2, HOVERED);
+    c.commit();
+    c.set_scroll_offset(2, point(px(0.0), px(1000.0)), u32::MAX);
+    assert_eq!(c.commit().map_or(1000.0, |b| scrolled(&b, 1000.0)), 1000.0);
+    c.set_states(2, 0);
+    assert_eq!(scrolled(&c.commit().unwrap(), 1000.0), 2825.0);
+    // Focus transfer between rows does not pass through native List idle,
+    // even if a commit observes the intermediate child Blur.
+    c.set_states(2, FOCUS_WITHIN);
+    c.set_states(4, FOCUSED);
+    assert_eq!(request(&mut c, 30, true), 0.0);
+    c.set_states(4, 0);
+    assert_eq!(c.commit().map_or(0.0, |b| scrolled(&b, 0.0)), 0.0);
+    c.set_states(6, FOCUSED);
+    assert_eq!(c.commit().map_or(0.0, |b| scrolled(&b, 0.0)), 0.0);
+    c.set_states(2, 0);
+    assert_eq!(scrolled(&c.commit().unwrap(), 0.0), 1325.0);
+    // Explicit navigation retains its ordinary immediate semantics.
+    c.set_states(2, HOVERED | FOCUS_WITHIN);
+    assert_eq!(request(&mut c, 10, false), 325.0);
+}
+
+#[test]
 fn scroll_commands_follow_their_target_as_rows_are_measured() {
     let mut c = core();
     estimated_list(&mut c);
@@ -1647,6 +1713,7 @@ fn scroll_commands_follow_their_target_as_rows_are_measured() {
         command: Command::ScrollToIndex {
             index: 50,
             animated: false,
+            automatic: false,
             view_position: crate::geometry::Percentage(0.5),
             view_offset: px(0.0),
         },
@@ -13397,6 +13464,89 @@ fn a_tooltip_element_that_is_a_hint_overlay_is_the_tooltip_itself() {
     c.commit();
     assert_eq!(c.nodes[c.key(4).unwrap() as usize].parent, NO_KEY);
     assert_ne!(c.overlay_state.tooltips[&2].overlay, 4);
+}
+
+#[test]
+fn native_focus_hints_keep_passive_input_routes_and_the_original_overlay() {
+    use crate::{OverlayProp, PointerEvents, tailwind::state::FOCUSED};
+    let mut c = core();
+    c.set_environment(crate::ui::Environment {
+        os: crate::platform::Os::Linux,
+        idiom: crate::platform::Idiom::Desktop,
+        ..Default::default()
+    });
+    add(
+        &mut c,
+        2,
+        Tag::View,
+        ROOT_ID,
+        &[("height", StyleValue::Number(40.0))],
+    );
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 4,
+                tag: Tag::Overlay,
+            },
+            overlay_prop(4, OverlayProp::Hint(Some(std::time::Duration::ZERO))),
+            overlay_prop(4, OverlayProp::HintOnFocus(true)),
+            overlay_prop(4, OverlayProp::Placement(crate::overlay::Placement::Left)),
+            Op::SetProp {
+                id: 4,
+                prop: Prop::PointerEvents(PointerEvents::None),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Tooltip(crate::overlay::TooltipContent::Node(4)),
+            },
+        ],
+    );
+    add(
+        &mut c,
+        6,
+        Tag::View,
+        4,
+        &[
+            ("width", StyleValue::Number(80.0)),
+            ("height", StyleValue::Number(20.0)),
+        ],
+    );
+    let mounted = c.commit().unwrap();
+    assert_eq!(c.overlay_state.tooltips[&2].overlay, 4);
+    let events = mounted
+        .items
+        .iter()
+        .find_map(|item| match item {
+            MountItem::Events { id: 2, events } => Some(*events),
+            _ => None,
+        })
+        .unwrap();
+    assert!(events.hint_watch().is_some());
+    for kind in [
+        EventKind::Touch,
+        EventKind::HoverIn,
+        EventKind::HoverOut,
+        EventKind::Focus,
+    ] {
+        assert!(!events.contains_listener(kind));
+    }
+    let hint = c.key(4).unwrap();
+    assert_eq!(c.overlay(hint).unwrap().host, None);
+    c.set_states(2, FOCUSED);
+    let focused = c.commit().unwrap();
+    assert!(inserts(&focused).contains(&(ROOT_ID, 4, None)));
+    assert_eq!(c.overlay(hint).unwrap().host, Some(ROOT_ID));
+    c.set_states(2, 0);
+    let blurred = c.commit().unwrap();
+    assert!(
+        blurred
+            .items
+            .iter()
+            .any(|item| matches!(item, MountItem::Remove { id: 4 }))
+    );
+    assert_eq!(c.overlay(hint).unwrap().host, None);
+    assert_eq!(c.overlay_state.tooltips[&2].overlay, 4);
 }
 
 /// An image node `id` showing `source` (and `placeholder`), in the root.

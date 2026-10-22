@@ -49,7 +49,11 @@
   knows, which are estimates for rows never rendered; the target stays pinned (`ListState::follow_pin`), and as the rows
   around it are measured the list follows it (a `ScrollBy`, or a retargeted `ScrollTo` while an animated scroll is in
   flight) until the rows in the viewport are all measured, the user scrolls away or the items change. Platforms only
-  apply what they get.
+  apply what they get. `scrollToIndex({ automatic: true })` on GPUI and terminal backends waits for the list's
+  native hover/focus-within snapshot, retains only the latest target while the list is being operated, and resumes
+  without another app request when interaction ends. It uses the same target pin, not the issued-scroll ACK ledger.
+  Other native backends do not yet report the direct focus-within snapshot this opt-in behavior requires. Ordinary
+  explicit commands are unchanged. For immediate automatic recentering use `animated: false`.
 - **List internals** (the window, binding cells, recycling): `crates/nsh-core/src/core/list.rs`.
 - **Indexed data**: TSX `each` also accepts `ReadonlyListSource<T>`, a readonly snapshot with `length` and `at(index)`.
   Only bound and viewable items are read. Replacing a snapshot's identity replaces the full range without reading its

@@ -396,10 +396,10 @@ pub(crate) const NODE_METHODS: &[(&str, c_int, &str, &str)] = &[
         "scrollToIndex",
         1,
         decl!(
-            "(options: { index: number; animated?: boolean; viewPosition?: number; viewOffset?: number }): void"
+            "(options: { index: number; animated?: boolean; automatic?: boolean; viewPosition?: number; viewOffset?: number }): void"
         ),
         decl!(
-            "`List`: scrolls item `index` into view. `viewPosition` places it: 0 at the start of the viewport (default), 0.5 in the middle, 1 at the end; `viewOffset` shifts it further. Resolved natively with the current (measured or estimated) item sizes."
+            "`List`: scrolls item `index` into view. `viewPosition` places it: 0 at the start of the viewport (default), 0.5 in the middle, 1 at the end; `viewOffset` shifts it further. Resolved natively with the current (measured or estimated) item sizes. On GPUI and terminal backends, `automatic` retains only the latest target while native hover or keyboard focus is within the list, and resumes when idle."
         ),
     ),
     (
@@ -4052,6 +4052,7 @@ mod tests {
             const s = element("scroll");
             s.scrollTo({ y: 10, animated: false });
             s.scrollToIndex({ index: 3 });
+            s.scrollToIndex({ index: 7, viewPosition: 0.5, animated: false, automatic: true });
             const i = element("input");
             i.focus();
             i.setSelection(2);
@@ -4067,7 +4068,8 @@ mod tests {
             commands,
             [
                 "Command { id: 2, command: ScrollTo { x: 0pt, y: 10pt, animated: false } }",
-                "Command { id: 2, command: ScrollToIndex { index: 3, animated: true, view_position: 0%, view_offset: 0pt } }",
+                "Command { id: 2, command: ScrollToIndex { index: 3, animated: true, automatic: false, view_position: 0%, view_offset: 0pt } }",
+                "Command { id: 2, command: ScrollToIndex { index: 7, animated: false, automatic: true, view_position: 50%, view_offset: 0pt } }",
                 "Command { id: 4, command: Focus }",
                 "Command { id: 4, command: SetSelection { start: 2, end: 2 } }",
             ]

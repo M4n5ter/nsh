@@ -151,6 +151,9 @@ impl<M: TextEngine> Core<M> {
     /// tracks ([`MountItem::TrackStates`]); see [`crate::tailwind::state`].
     pub fn set_states(&mut self, id: NodeId, states: u8) {
         let Ok(key) = self.key(id) else { return };
+        if let Some(list) = self.nodes[key as usize].list.as_mut() {
+            list.interaction(states);
+        }
         self.set_node_states(key, states);
     }
 
@@ -604,7 +607,17 @@ impl<M: TextEngine> Core<M> {
     /// Tells the platform which states of `key` to report.
     pub(super) fn update_tracking(&mut self, key: Key) {
         let node = &mut self.nodes[key as usize];
-        let tracked = node.classes.as_ref().map_or(0, |c| c.tracked_states());
+        let tracked = node.classes.as_ref().map_or(0, |c| c.tracked_states())
+            | if node.list.as_ref().is_some_and(|list| list.automatic) {
+                state::HOVERED | state::FOCUS_WITHIN
+            } else {
+                0
+            }
+            | if node.overlay_watched & super::overlay::watch::HINT_FOCUS != 0 {
+                state::FOCUSED
+            } else {
+                0
+            };
         if tracked != node.tracked {
             node.tracked = tracked;
             // The platform stops reporting the states it no longer tracks,

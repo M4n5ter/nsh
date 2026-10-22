@@ -131,13 +131,20 @@ pub(super) enum PinTarget {
 /// A pinned scroll target and the offset the list was last sent to for
 /// it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Pin {
-    target: PinTarget,
-    at: f32,
-    /// An animated scroll the platform has not finished: the pin follows
-    /// by retargeting it, and the user moving away is only noticed once
-    /// it landed.
-    animating: bool,
+enum Pin {
+    WaitingForIdle {
+        target: PinTarget,
+        animated: bool,
+    },
+    Following {
+        target: PinTarget,
+        at: f32,
+        /// An animated scroll the platform has not finished: the pin follows
+        /// by retargeting it, and the user moving away is only noticed once
+        /// it landed.
+        animating: bool,
+        automatic: bool,
+    },
 }
 
 /// How a pinned list follows its target (`ListState::follow_pin`).
@@ -147,8 +154,8 @@ pub(super) enum Follow {
     Stay,
     /// Scroll by this much now (with the anchoring `ScrollBy`).
     By(f32),
-    /// Retarget the animated scroll to this offset.
-    To(f32),
+    /// Start or retarget a scroll to this offset.
+    To { offset: f32, animated: bool },
 }
 
 /// How far a reported offset may be from a pinned one and still count as
@@ -231,6 +238,10 @@ pub(super) struct ListState {
     /// The target of the last scroll command, until it is reached with
     /// measured cells or the user scrolls away.
     pin: Option<Pin>,
+    /// Native interaction tracking stays enabled after an automatic request.
+    pub(super) automatic: bool,
+    /// A direct native snapshot, unknown until the initial TrackStates report.
+    interaction: Option<u8>,
 }
 
 impl ListState {
@@ -268,6 +279,8 @@ impl ListState {
             moved: Vec::new(),
             splice_anchor: 0.0,
             pin: None,
+            automatic: false,
+            interaction: None,
         }
     }
 
@@ -376,29 +389,45 @@ impl ListState {
             self.offset = at;
             self.dirty = true;
         }
-        if let Some(pin) = &mut self.pin
+        if let Some(Pin::Following {
+            target,
+            at: pinned,
+            animating,
+            automatic,
+        }) = &mut self.pin
             && self.pending.is_empty()
         {
-            if (at - pin.at).abs() <= PIN_SLACK {
-                if pin.animating {
+            if (at - *pinned).abs() <= PIN_SLACK {
+                if *animating {
                     // Landed: a correction may follow.
-                    pin.animating = false;
+                    *animating = false;
                     self.dirty = true;
                 }
-            } else if !pin.animating {
-                // The user scrolled away.
-                self.pin = None;
+            } else if !*animating {
+                // An automatic target remains the latest intent while the
+                // user operates the list; explicit pins end on user scroll.
+                self.pin = automatic.then_some(Pin::WaitingForIdle {
+                    target: *target,
+                    animated: false,
+                });
             }
         }
     }
 
     /// Keeps following `target` after a scroll command sent the list to
     /// `offset` (animated or not); `None` (a plain offset) ends the pin.
-    pub(super) fn pin(&mut self, target: Option<PinTarget>, offset: f32, animated: bool) {
-        self.pin = target.map(|target| Pin {
+    pub(super) fn pin(
+        &mut self,
+        target: Option<PinTarget>,
+        offset: f32,
+        animated: bool,
+        automatic: bool,
+    ) {
+        self.pin = target.map(|target| Pin::Following {
             target,
             at: offset,
             animating: animated,
+            automatic,
         });
     }
 
@@ -414,37 +443,95 @@ impl ListState {
         }
     }
 
-    /// After measurements: where a pinned list goes for its target, which
-    /// moved as estimated sizes became real ones. The pin ends once the
-    /// list is there and every item in the viewport is measured (nothing
-    /// visible can move it any more).
+    /// A new automatic request replaces the previous target without issuing a
+    /// native scroll while interaction is unknown or active.
+    pub(super) fn wait_for_idle(&mut self, target: PinTarget, animated: bool) {
+        self.pin = Some(Pin::WaitingForIdle { target, animated });
+        self.dirty = true;
+    }
+
+    pub(super) fn idle(&self) -> bool {
+        self.interaction == Some(0)
+    }
+
+    /// The platform reports the list's own hover and focus-within together.
+    /// Child focus style propagation cannot temporarily make this list idle.
+    pub(super) fn interaction(&mut self, states: u8) {
+        if !self.automatic {
+            return;
+        }
+        let states =
+            states & (crate::tailwind::state::HOVERED | crate::tailwind::state::FOCUS_WITHIN);
+        if self.interaction != Some(states) {
+            self.interaction = Some(states);
+            self.dirty = true;
+        }
+    }
+
+    /// After measurements, follows the one pending target with current sizes.
+    /// Automatic requests stay pending until native interaction is known idle.
     pub(super) fn follow_pin(&mut self, anchored: f32) -> Follow {
-        let Some(mut pin) = self.pin else {
+        let Some(pin) = self.pin else {
             return Follow::Stay;
         };
         if self.viewport <= 0.0 {
             return Follow::Stay;
         }
-        let target = self.target_offset(pin.target);
-        if pin.animating {
-            // The platform moves an animation in flight along with the
-            // anchoring scroll.
-            pin.at += anchored;
-            let follow = if (target - pin.at).abs() > PIN_SLACK {
-                pin.at = target;
-                Follow::To(target)
+        let (target, mut at, animating, automatic) = match pin {
+            Pin::WaitingForIdle { target, animated } => {
+                if self.interaction != Some(0) {
+                    return Follow::Stay;
+                }
+                let offset = self.target_offset(target);
+                self.pin(Some(target), offset, animated, true);
+                if !animated {
+                    self.jump(offset);
+                }
+                return Follow::To { offset, animated };
+            }
+            Pin::Following {
+                target,
+                at,
+                animating,
+                automatic,
+            } => {
+                if automatic && !self.idle() {
+                    self.wait_for_idle(target, animating);
+                    return Follow::Stay;
+                }
+                (target, at, animating, automatic)
+            }
+        };
+        let offset = self.target_offset(target);
+        if animating {
+            at += anchored;
+            let follow = if (offset - at).abs() > PIN_SLACK {
+                at = offset;
+                Follow::To {
+                    offset,
+                    animated: true,
+                }
             } else {
                 Follow::Stay
             };
-            self.pin = Some(pin);
+            self.pin = Some(Pin::Following {
+                target,
+                at,
+                animating,
+                automatic,
+            });
             return follow;
         }
-        let delta = target - self.offset;
+        let delta = offset - self.offset;
         if delta != 0.0 {
-            self.jump(target);
+            self.jump(offset);
         }
-        pin.at = target;
-        self.pin = (!self.viewport_measured()).then_some(pin);
+        self.pin = (automatic || !self.viewport_measured()).then_some(Pin::Following {
+            target,
+            at: offset,
+            animating,
+            automatic,
+        });
         if delta == 0.0 {
             Follow::Stay
         } else {
@@ -1449,10 +1536,16 @@ mod tests {
         let mut l = list(100, 50.0, 400.0);
         // An animated scroll to the end: retargeted when the end moves,
         // corrected once it landed.
-        l.pin(Some(PinTarget::End), 4600.0, true);
+        l.pin(Some(PinTarget::End), 4600.0, true, false);
         l.issue_scroll_to(4600.0);
         l.measured(99, 90.0);
-        assert_eq!(l.follow_pin(0.0), Follow::To(4640.0));
+        assert_eq!(
+            l.follow_pin(0.0),
+            Follow::To {
+                offset: 4640.0,
+                animated: true
+            }
+        );
         l.issue_scroll_to(4640.0);
         l.reported(3000.0, 2);
         assert!(l.pinned(), "in flight");
@@ -1465,7 +1558,7 @@ mod tests {
         l.reported(4000.0, 2);
         assert!(!l.pinned());
         // Splices end it too.
-        l.pin(Some(PinTarget::End), 4650.0, false);
+        l.pin(Some(PinTarget::End), 4650.0, false, false);
         l.splice(0, 1, 0);
         assert!(!l.pinned());
     }

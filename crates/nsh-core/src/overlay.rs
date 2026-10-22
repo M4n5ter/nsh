@@ -151,6 +151,8 @@ pub struct OverlayConfig {
     /// says, never taking the pointer itself. `None`: shown whenever its
     /// views around it are.
     pub hint: Option<Duration>,
+    /// Also show this hint while its anchor has native keyboard focus.
+    pub hint_on_focus: bool,
     /// A hint shown (`Some(true)`) or hidden (`Some(false)`) whatever the
     /// pointer does: its owner decides from what the hint asks for
     /// (`EventKind::Show` / `EventKind::Dismiss`). `None`: the pointer

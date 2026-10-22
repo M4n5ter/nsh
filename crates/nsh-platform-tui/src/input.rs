@@ -2218,6 +2218,7 @@ impl Surface {
     /// A newly mounted state mask must receive the current state even
     /// when no pointer or focus transition followed the batch.
     pub(crate) fn refresh_input_states(&mut self, id: NodeId) {
+        self.set_hover(self.hovered);
         let chain = self.focus.map(|id| self.ancestors(id)).unwrap_or_default();
         let tracked = self.node(id).map_or(0, |n| n.tracked);
         if tracked != 0 {
@@ -2597,6 +2598,33 @@ mod tests {
 
     fn key(surface: &mut Surface, code: KeyCode, modifiers: KeyModifiers) {
         surface.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+
+    #[test]
+    fn newly_tracked_hover_starts_at_the_current_hit_and_clears_on_leave() {
+        use nsh_core::{MountBatch, MountItem};
+        let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+        let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+        items.extend(create(4, ViewKind::View, 2, 0.0));
+        surface.apply(MountBatch { items });
+        surface.set_hover(Some(4));
+        surface.events.clear();
+        surface.apply(MountBatch {
+            items: vec![MountItem::TrackStates {
+                id: 2,
+                states: state::HOVERED | state::FOCUS_WITHIN,
+            }],
+        });
+        assert!(surface.events.iter().any(|event| matches!(event,
+            SurfaceEvent::States(2, value) if *value == state::HOVERED)));
+        surface.events.clear();
+        surface.set_hover(None);
+        assert!(
+            surface
+                .events
+                .iter()
+                .any(|event| matches!(event, SurfaceEvent::States(2, 0)))
+        );
     }
 
     fn parked_focus_scene() -> Surface {

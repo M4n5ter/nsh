@@ -1129,8 +1129,11 @@ pub enum OverlayProp {
     /// A hint (a tooltip) shown after the pointer rested on the anchor this
     /// long ([`crate::overlay::OverlayConfig::hint`]); set by components
     /// (`nsh-base`'s `Tooltip`).
-    #[prop(reset = OverlayProp::Hint(None))]
+    #[prop(js = "hintDelay", with = crate::js::host_values::hint_delay, reset = OverlayProp::Hint(None), ts = "number", on = OVERLAY)]
     Hint(Option<std::time::Duration>),
+    /// Show the hint while its native anchor has keyboard focus too.
+    #[prop(js = "hintOnFocus", on = OVERLAY)]
+    HintOnFocus(bool),
     /// A hint shown or hidden whatever the pointer does
     /// ([`crate::overlay::OverlayConfig::open`]); set by components.
     #[prop(reset = OverlayProp::Open(None))]
@@ -1181,6 +1184,9 @@ pub enum Command {
         index: u32,
         /// Animate the change.
         animated: bool,
+        /// Wait while the list is hovered or contains keyboard focus; keep only
+        /// the latest automatic target and resume when it becomes idle.
+        automatic: bool,
         /// Where the item ends up: 0 at the start of the viewport, 1 at the
         /// end, 0.5 in the middle.
         view_position: Percentage,

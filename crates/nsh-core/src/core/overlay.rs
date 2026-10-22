@@ -55,6 +55,8 @@ pub(super) mod watch {
     pub(in crate::core) const HINT: u8 = 2;
     /// A hint has a show/dismiss listener, beyond native presentation.
     pub(in crate::core) const HINT_CALLBACK: u8 = 4;
+    /// Native anchor focus also controls hint presentation.
+    pub(in crate::core) const HINT_FOCUS: u8 = 8;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,7 +361,15 @@ impl<M: TextEngine> Core<M> {
                     self.unhint(key);
                 }
                 let state = self.overlay(key).expect("overlay");
-                if !state.config.open.unwrap_or(state.hinted.is_some()) {
+                let focused = state.config.hint_on_focus
+                    && self.hint_anchor(key).is_some_and(|anchor| {
+                        self.nodes[anchor as usize].states & crate::tailwind::state::FOCUSED != 0
+                    });
+                if !state
+                    .config
+                    .open
+                    .unwrap_or(state.hinted.is_some() || focused)
+                {
                     target = None;
                 }
             }
@@ -471,6 +481,11 @@ impl<M: TextEngine> Core<M> {
                         key: k,
                         id: self.nodes[k as usize].id,
                         kinds: watch::HINT
+                            | if self.overlay(key).is_some_and(|s| s.config.hint_on_focus) {
+                                watch::HINT_FOCUS
+                            } else {
+                                0
+                            }
                             | if callback || layout == 0 {
                                 watch::HINT_CALLBACK
                             } else {
@@ -539,12 +554,14 @@ impl<M: TextEngine> Core<M> {
             {
                 self.nodes[entry.key as usize].overlay_watched &= !entry.kinds;
                 self.mark(entry.key, super::dirty::EVENTS);
+                self.update_tracking(entry.key);
             }
         }
         for entry in new {
             if !old.contains(entry) {
                 self.nodes[entry.key as usize].overlay_watched |= entry.kinds;
                 self.mark(entry.key, super::dirty::EVENTS);
+                self.update_tracking(entry.key);
             }
         }
     }

@@ -372,6 +372,7 @@ pub(crate) fn render(cx: *mut JsContext, props: JsValue) -> Result<JsValue, JsVa
                     command: Command::ScrollToIndex {
                         index: index.max(0.0) as u32,
                         animated: false,
+                        automatic: false,
                         view_position: Percentage(0.0),
                         view_offset: Points::ZERO,
                     },

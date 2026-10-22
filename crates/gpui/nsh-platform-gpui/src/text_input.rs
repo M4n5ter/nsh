@@ -675,6 +675,7 @@ fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
         crate::native::focus_surface(surface);
     }
     let old = focused_view(surface);
+    let previous = crate::input::focus_chain(surface);
     if old.as_ref() == view {
         if view.is_some() {
             surface.sync_focus();
@@ -711,6 +712,7 @@ fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
         crate::access::focus_changed(surface, view);
         view.changed();
     }
+    crate::input::focus_within_changed(surface, &previous);
     surface.sync_focus();
     blink::update();
     // The input handler is registered (or not) by the next frame.
