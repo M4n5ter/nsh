@@ -46,7 +46,7 @@ use crate::{
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(super) struct Asked {
     /// A scroll to this offset (main axis), animated or not.
-    to: Option<(f32, bool)>,
+    pub(super) to: Option<(f32, bool)>,
     /// Then by this much.
     by: f32,
 }
@@ -480,10 +480,11 @@ impl<M: TextEngine> Core<M> {
         asked.by += by;
         if let Some(own) = node.list.as_mut() {
             // A list of its own moves its window as for its own commands.
-            if let Some((to, animated)) = to
-                && !animated
-            {
-                own.jump(to);
+            if let Some((to, animated)) = to {
+                own.pin(None, to, animated, false);
+                if !animated {
+                    own.jump(to);
+                }
             }
             own.offset += by;
             own.dirty = true;

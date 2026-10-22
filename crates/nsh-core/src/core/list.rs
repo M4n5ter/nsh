@@ -594,11 +594,14 @@ impl ListState {
             self.dirty = true;
         }
         if let Some(Pin::Reading { at: expected, .. }) = &self.pin
-            && (at - expected).abs() > PIN_SLACK
+            && at != *expected
         {
             // Replay already includes every unapplied correction. A real
             // displacement wins immediately, even with corrections pending.
             self.pin = None;
+            // Capture from the geometry the user actually scrolled through,
+            // before a source reply in this same turn can replace it.
+            self.anchor_source(false, 0.0);
         }
         if let Some(Pin::Following {
             target,
@@ -759,7 +762,7 @@ impl ListState {
 
     /// Keep the source glyph the reader saw at the same viewport position.
     /// Explicit navigation and end-follow retain their existing priority.
-    pub(super) fn anchor_source(&mut self, explicit: bool) -> f32 {
+    pub(super) fn anchor_source(&mut self, explicit: bool, anchored: f32) -> f32 {
         let near_end = self
             .follow_end
             .is_some_and(|threshold| self.content_len() - self.viewport - self.offset <= threshold);
@@ -769,10 +772,14 @@ impl ListState {
             }
             return 0.0;
         }
-        if let Some(Pin::Reading { point, line, .. }) = self.pin.clone() {
+        if let Some(Pin::Reading { point, line, at }) = self.pin.clone() {
             if let Some(y) = self.source_geometry.position(&point) {
                 let offset = self.clamped(y - line);
-                let delta = offset - self.offset;
+                // `at` includes earlier issued corrections, but not this
+                // turn's item/splice anchoring. A native report may have
+                // overwritten its speculative offset; count that anchoring
+                // exactly once in the final relative command.
+                let delta = offset - at - anchored;
                 self.offset = offset;
                 self.pin = Some(Pin::Reading {
                     point,

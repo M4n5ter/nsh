@@ -413,57 +413,60 @@ pub(crate) fn text_source<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Pro
             .then_some(n as u64)
     }
 
-    if input.is_nullish() {
-        return Some(Prop::TextSource(None));
-    }
-    let id = input.field("id")?.as_string()?;
-    if id.is_empty() {
-        return None;
-    }
-    let source = match (input.field("offset"), input.field("segments")) {
-        (Some(offset), None) => crate::TextSource::Literal {
-            id: id.into(),
-            offset: integer(&offset)?,
-        },
-        (None, Some(mapped)) => {
-            let list = mapped.as_list()?;
-            let mut segments = Vec::new();
-            let mut previous_end = 0;
-            for index in 0..list.len() {
-                let segment = list.item(index)?;
-                let start = u32::try_from(integer(&segment.field("start")?)?).ok()?;
-                let end = u32::try_from(integer(&segment.field("end")?)?).ok()?;
-                let source_start = integer(&segment.field("sourceStart")?)?;
-                let source_end = integer(&segment.field("sourceEnd")?)?;
-                let kind = match segment.field("kind")?.as_string()?.as_str() {
-                    "literal" => crate::TextSourceKind::Literal,
-                    "replacement" => crate::TextSourceKind::Replacement,
-                    _ => return None,
-                };
-                if start >= end
-                    || start < previous_end
-                    || source_start > source_end
-                    || (kind == crate::TextSourceKind::Replacement && source_start == source_end)
-                {
-                    return None;
-                }
-                previous_end = end;
-                segments.push(crate::TextSourceSegment {
-                    start,
-                    end,
-                    source_start,
-                    source_end,
-                    kind,
-                });
-            }
-            crate::TextSource::Mapped {
-                id: id.into(),
-                segments,
-            }
+    fn decode<I: HostInput>(input: &I) -> Option<crate::TextSource> {
+        let id = input.field("id")?.as_string()?;
+        if id.is_empty() {
+            return None;
         }
-        _ => return None,
-    };
-    Some(Prop::TextSource(Some(Arc::new(source))))
+        let source = match (input.field("offset"), input.field("segments")) {
+            (Some(offset), None) => crate::TextSource::Literal {
+                id: id.into(),
+                offset: integer(&offset)?,
+            },
+            (None, Some(mapped)) => {
+                let list = mapped.as_list()?;
+                let mut segments = Vec::new();
+                let mut previous_end = 0;
+                for index in 0..list.len() {
+                    let segment = list.item(index)?;
+                    let start = u32::try_from(integer(&segment.field("start")?)?).ok()?;
+                    let end = u32::try_from(integer(&segment.field("end")?)?).ok()?;
+                    let source_start = integer(&segment.field("sourceStart")?)?;
+                    let source_end = integer(&segment.field("sourceEnd")?)?;
+                    let kind = match segment.field("kind")?.as_string()?.as_str() {
+                        "literal" => crate::TextSourceKind::Literal,
+                        "replacement" => crate::TextSourceKind::Replacement,
+                        _ => return None,
+                    };
+                    if start >= end
+                        || start < previous_end
+                        || source_start > source_end
+                        || (kind == crate::TextSourceKind::Replacement
+                            && source_start == source_end)
+                    {
+                        return None;
+                    }
+                    previous_end = end;
+                    segments.push(crate::TextSourceSegment {
+                        start,
+                        end,
+                        source_start,
+                        source_end,
+                        kind,
+                    });
+                }
+                crate::TextSource::Mapped {
+                    id: id.into(),
+                    segments,
+                }
+            }
+            _ => return None,
+        };
+        Some(source)
+    }
+    // Invalid metadata revokes the previous source identity rather than
+    // retaining it on a reused text node. Glyph content is unaffected.
+    Some(Prop::TextSource(decode(input).map(Arc::new)))
 }
 
 /// `pan`: `{ x, y }` animated values.

@@ -1020,6 +1020,54 @@ mod tests {
     }
 
     #[test]
+    fn text_source_updates_revoke_invalid_or_cleared_identity() {
+        let decode = |source: &str| {
+            with_value(source, |value| {
+                decode_prop(
+                    9,
+                    Some(nsh_core::Tag::Text),
+                    "textSource",
+                    value.0,
+                    &mut Warnings::default(),
+                )
+                .unwrap()
+            })
+        };
+        let Some(Op::SetProp {
+            id: 9,
+            prop: Prop::TextSource(Some(source)),
+        }) = decode("{id: 'message/body', offset: 1280}")
+        else {
+            panic!("literal source must reach the mounted text");
+        };
+        assert_eq!(
+            *source,
+            nsh_core::TextSource::Literal {
+                id: "message/body".into(),
+                offset: 1280
+            }
+        );
+        for source in [
+            "null",
+            "undefined",
+            "{id: 'other', offset: -1}",
+            "{id: 'other', offset: 0, segments: []}",
+            "{id: 'other', segments: [{start: 2, end: 1, sourceStart: 0, sourceEnd: 1, kind: 'literal'}]}",
+        ] {
+            assert!(
+                matches!(
+                    decode(source),
+                    Some(Op::SetProp {
+                        id: 9,
+                        prop: Prop::TextSource(None)
+                    })
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn style_longhands_win_whatever_the_key_order() {
         // As React Native flattens the styles of an array into one object,
         // the longhand of a later style wins too.

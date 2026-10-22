@@ -1791,9 +1791,15 @@ fn source_reading_survives_prepend_and_rich_replacement() {
     assert_eq!(shift(c.commit()), 512.0);
 
     // A wheel move wins even before that correction has been acknowledged.
-    // The report replays the pending +512, so this is one line further down.
-    c.set_scroll_offset(2, point(px(0.0), px(336.0)), 0);
-    assert_eq!(shift(c.commit()), 0.0);
+    // A whole earlier item (estimated 50pt), the wheel report and the raw
+    // prefix arrive in one turn. Replay includes the pending +512; capture
+    // the user's old visual source before either kind of new prefix moves it.
+    c.apply(Op::SetProp {
+        id: 2,
+        prop: Prop::Splice(0, 0, 1),
+    })
+    .unwrap();
+    c.set_scroll_offset(2, point(px(0.0), px(336.5)), 0);
     apply(
         &mut c,
         vec![
@@ -1807,9 +1813,9 @@ fn source_reading_survives_prepend_and_rich_replacement() {
             },
         ],
     );
-    assert_eq!(shift(c.commit()), 512.0);
+    assert_eq!(shift(c.commit()), 562.0);
     // An older native receipt is not another user displacement.
-    c.set_scroll_offset(2, point(px(0.0), px(336.0)), 0);
+    c.set_scroll_offset(2, point(px(0.0), px(336.5)), 0);
     assert_eq!(shift(c.commit()), 0.0);
 
     // Rich rendering replaces the raw Text with two rule blocks and a
@@ -1891,7 +1897,9 @@ fn source_reading_survives_prepend_and_rich_replacement() {
     // source correction, even before descendant frame notifications queue.
     c.set_viewport(size_pt(160.0, 480.0));
     assert_eq!(shift(c.commit()), 336.0);
-    c.set_scroll_offset(2, point(px(0.0), px(704.0)), u32::MAX);
+    // A subpixel user step must remain effective rather than being pulled
+    // back by the target pin's tolerance for animated command receipts.
+    c.set_scroll_offset(2, point(px(0.0), px(754.0)), u32::MAX);
     assert_eq!(shift(c.commit()), 0.0);
 
     // Source identity can change without glyphs changing (recycled seats).
@@ -1972,8 +1980,8 @@ fn source_reading_survives_prepend_and_rich_replacement() {
         ],
     );
     let batch = c.commit().unwrap();
-    assert_eq!(scrolled(&batch, 1216.0), 2768.0);
-    c.set_scroll_offset(2, point(px(0.0), px(2768.0)), u32::MAX);
+    assert_eq!(scrolled(&batch, 1266.0), 2818.0);
+    c.set_scroll_offset(2, point(px(0.0), px(2818.0)), u32::MAX);
     c.commit();
     c.apply(Op::SetText {
         id: 21,
@@ -15582,6 +15590,68 @@ fn a_page_list_in_a_cell_of_a_list_follows_that_list() {
     c.set_scroll_offset(2, point(px(0.0), px(2100.0)), u32::MAX);
     c.commit();
     assert_eq!(bound_items(&c, 4), (32..=56).collect::<Vec<_>>());
+
+    // Text in a parent-viewport list contributes to the enclosing List's
+    // source anchor, but explicit navigation from that child must replace
+    // the enclosing reader's old position, including before its receipt.
+    let (mut next_id, mut cells) = (100, Vec::new());
+    render_binds(&mut c, &mut next_id, &mut cells, 50.0);
+    let row = cells[bound_slot(&c, 4, 40) as usize];
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 1000,
+                tag: Tag::Text,
+            },
+            Op::SetProp {
+                id: 1000,
+                prop: Prop::TextSource(Some(Arc::new(crate::TextSource::Literal {
+                    id: "page/item-40".into(),
+                    offset: 0,
+                }))),
+            },
+            Op::Create {
+                id: 1001,
+                tag: Tag::RawText,
+            },
+            Op::SetText {
+                id: 1001,
+                text: "R".repeat(80).into(),
+            },
+            Op::Insert {
+                parent: 1000,
+                child: 1001,
+                before: None,
+            },
+            Op::Insert {
+                parent: row,
+                child: 1000,
+                before: None,
+            },
+        ],
+    );
+    c.commit();
+    c.apply(style_op(3, &[("height", StyleValue::Number(120.0))]))
+        .unwrap();
+    assert_eq!(page_scrolls(&c.commit().unwrap()), [(false, 20.0)]);
+    c.apply(Op::Command {
+        id: 4,
+        command: Command::ScrollToIndex {
+            index: 43,
+            animated: false,
+            automatic: false,
+            view_position: crate::geometry::Percentage(0.0),
+            view_offset: px(0.0),
+        },
+    })
+    .unwrap();
+    assert_eq!(page_scrolls(&c.commit().unwrap()), [(true, 2270.0)]);
+    assert!(
+        c.commit()
+            .is_none_or(|batch| page_scrolls(&batch).is_empty())
+    );
+
     // Released, the outer list leaves the inner one without a view.
     c.apply(Op::Remove {
         parent: ROOT_ID,

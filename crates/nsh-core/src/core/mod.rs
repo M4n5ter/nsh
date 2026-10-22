@@ -5408,17 +5408,22 @@ impl<M: TextEngine> Core<M> {
             list.source_geometry = geometry;
             list.source_dirty = false;
         }
-        let explicit = self.commands.iter().any(|(target, command)| {
-            *target == id
-                && matches!(
-                    command,
-                    Command::ScrollTo { .. }
-                        | Command::ScrollToIndex { .. }
-                        | Command::ScrollToEnd { .. }
-                )
-        });
+        let explicit = self.nodes[key as usize]
+            .scroll
+            .as_ref()
+            .and_then(|scroll| scroll.asked.as_ref())
+            .is_some_and(|asked| asked.to.is_some())
+            || self.commands.iter().any(|(target, command)| {
+                *target == id
+                    && matches!(
+                        command,
+                        Command::ScrollTo { .. }
+                            | Command::ScrollToIndex { .. }
+                            | Command::ScrollToEnd { .. }
+                    )
+            });
         let list = self.nodes[key as usize].list.as_mut().expect("list");
-        anchor += list.anchor_source(explicit);
+        anchor += list.anchor_source(explicit, anchor);
         // The last scroll command's target moves as its cells are
         // measured: the list follows it.
         let mut retarget = None;
