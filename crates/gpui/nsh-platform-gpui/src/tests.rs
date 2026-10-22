@@ -619,6 +619,11 @@ mount(() => <View>
     wait_for_button(&view, cx, "first-link");
     cx.simulate_keystrokes("enter tab space shift-tab enter f6");
     wait_for_report(&view, cx, "ready|first|second|first|true:false");
+    // TestWindow sends only key downs. Release this first F6 so the
+    // post-drag press is a new key, not a correctly suppressed repeat.
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("f6").unwrap(),
+    });
     // A real native pointer drag through the wrapped label selects text
     // without firing its application link action.
     let (start, end) = view.read_with(cx, |view, _| {
