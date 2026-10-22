@@ -4,6 +4,17 @@ Performance is the project's first priority; the rules are in `AGENTS.md`. Chang
 after `nsh test --trace` timings and item counts (`nsh trace` before it, in the records below). Current baselines
 (Apple Silicon):
 
+List source publication (macOS Apple Silicon, debug headless CLI, five alternating pairs against
+`36c0fa75`): `nsh test --trace` keeps counter first/press work at 56/10 ops and 49/7 mount items.
+Gallery `Bench.tsx` keeps 1226 ops / 1029 items initially and 1064 ops / 961 items over a 3000 pt
+scroll. Median core time for the full scroll was 82.30 → 83.19 ms, with overlapping ranges
+(74.02–86.05 / 70.57–85.19 ms); initial core time was 5.67 → 5.83 ms. In the core list-binding
+compat case, prepending keeps 19 ops / 22 items (median 1.18 → 1.06 ms); removing changes
+7 ops / 9 items to 6 ops / 8 items (0.58 → 0.70 ms, overlapping ranges). Both versions retain
+the selected row in ordinary insertion/removal. The correction covers a pending bind from the
+previous published source after JS has queued another source change; these ordinary traces
+establish bounded work, not a general speedup or the frequency of that cross-frame condition.
+
 `onMouseMove` (Desktop and web): Linux x86_64, debug CLI, five interleaved runs of
 `echo 'await app.press("+1")' | nsh test examples/counter/App.tsx --trace`, against main `fd772aef`.
 The first commit stays at 56 ops / 49 mount items / 21 nodes; the press stays at 10 ops / 7 items / 24 nodes.

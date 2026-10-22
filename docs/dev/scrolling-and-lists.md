@@ -87,6 +87,11 @@
   every step is reached through a list in parent mode, and a plain scroll view checks an empty list
   (`crates/nsh-core/src/core/parent_viewport.rs`).
 - **List internals** (the window, binding cells, recycling): `crates/nsh-core/src/core/list.rs`.
+- **JS cell binding**: the host publishes a list's source with the count and splice operations returned by
+  `Host::take_ops`. A pending core bind reads that published source, even if JS has already queued another source
+  change. Each cell owns its item and index signals; a bind resolves the item first, then updates both in one batch.
+  Surviving keyed children retain their owners and local state across insertions and removals. Replacements reach
+  the child when the core processes their splice and binds the cell; signals inside a bound item remain reactive.
 - **Indexed data**: TSX `each` also accepts `ReadonlyListSource<T>`, a readonly snapshot with `length` and `at(index)`.
   Only bound and viewable items are read. Replacing a snapshot's identity replaces the full range without reading its
   items; arrays retain their identity-based common-prefix / suffix splice behavior. Counts use the core's existing u32 range.

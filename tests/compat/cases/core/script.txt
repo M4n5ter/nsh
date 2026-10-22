@@ -125,6 +125,26 @@ covers [props] List.header
 covers [props] List.footer
 covers [props] List.empty
 covers [props] List.separator
+# core-list-binding
+tap id:case-core-list-binding
+expect A/0/false
+expect B/1/false
+tap id:select-B
+expect B/1/true
+tap id:prepend
+expect X/0/false
+expect A/1/false
+expect B/2/true
+tap id:remove
+expect A/0/false
+expect B/1/true
+tap id:rename
+expect B2/1/true
+tap id:replace
+expect C/1/false
+absent B2/1/true
+tap id:select-C
+expect C/1/true
 # core-reactive
 tap id:case-core-reactive
 expect Sum: 3
