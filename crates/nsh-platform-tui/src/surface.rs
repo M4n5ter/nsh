@@ -591,6 +591,7 @@ impl Surface {
         let mut layout = None::<nsh_core::LayoutAnimation>;
         let mut scrolls = Vec::new();
         let mut focus_reveal: Option<FocusReveal> = None;
+        let mut removed_focus = false;
         for item in batch.items {
             match item {
                 MountItem::LayoutAnimation(animation) => layout = Some(animation),
@@ -642,7 +643,13 @@ impl Surface {
                     }
                 }
                 MountItem::Remove { id } => {
-                    self.retire_recycled_focus(id);
+                    if focus_reveal
+                        .as_ref()
+                        .is_some_and(|reveal| self.ancestors(reveal.target.0).contains(&id))
+                    {
+                        focus_reveal = None;
+                    }
+                    removed_focus |= self.retire_recycled_focus(id);
                     self.retire_input_within(id, focus_return.as_mut());
                     if self.navigation_removing(id) {
                         continue;
@@ -947,6 +954,7 @@ impl Surface {
                             focus_reveal = None;
                             if self.focus.is_none() {
                                 self.focus_history.clear();
+                                removed_focus = false;
                             }
                         } else if self.focus != old_focus || self.focus.is_none() {
                             let target = self.node(id).map(|node| (id, node.generation));
@@ -992,7 +1000,7 @@ impl Surface {
             self.set_focus_from(Some(reveal.target.0), crate::input::FocusSource::Mount);
         }
         let opened_popups = self.reconcile_focus_return(focus_return);
-        self.reconcile_focus();
+        self.reconcile_focus(removed_focus);
         self.focus_opened_popups(&opened_popups);
         if let Some(reveal) = focus_reveal
             && self.focus == Some(reveal.target.0)
@@ -1199,7 +1207,7 @@ impl Surface {
             self.finish_retained_removal(id);
         }
         if changed {
-            self.reconcile_focus();
+            self.reconcile_focus(false);
         }
         changed
     }

@@ -639,7 +639,7 @@ impl Surface {
                 true
             }
             Event::FocusGained => {
-                self.reconcile_focus();
+                self.reconcile_focus(false);
                 true
             }
         }
@@ -705,34 +705,16 @@ impl Surface {
         self.focus_history = history;
     }
 
-    /// Remove can rebind the same native slot to another logical row. Retire
-    /// its focus now; Delete's logical node focus is reconciled after the batch.
-    pub(crate) fn retire_recycled_focus(&mut self, root: NodeId) {
-        let previous = self.focus.or_else(|| self.focus_history.last().copied());
-        if !previous.is_some_and(|id| self.within_popup(id, root)) {
-            return;
+    /// Remove can rebind the same slot. Report an ordinary displaced focus
+    /// for this batch; a popup/modal keeps ownership of its own return chain.
+    /// Delete's logical node focus is reconciled against the final tree.
+    pub(crate) fn retire_recycled_focus(&mut self, root: NodeId) -> bool {
+        if !self.focus.is_some_and(|id| self.within_popup(id, root)) {
+            return false;
         }
-        // A real popup/modal owns its return chain, including a deliberately
-        // retired opener. Ordinary displaced controls use existing history.
-        if self.current_popup_owner().is_none() {
-            let visible = self.visible_ids();
-            let eligible = |id: &NodeId| {
-                visible.contains(id) && !self.within_popup(*id, root) && self.focusable(*id)
-            };
-            if let Some(fallback) = self
-                .focus_history
-                .iter()
-                .rev()
-                .copied()
-                .find(eligible)
-                .or_else(|| visible.iter().copied().find(eligible))
-            {
-                self.remember_focus(fallback);
-            }
-        }
-        if self.focus.is_some() {
-            self.set_focus(None);
-        }
+        let ordinary = self.current_popup_owner().is_none();
+        self.set_focus(None);
+        ordinary
     }
 
     pub(crate) fn set_focus_from(&mut self, id: Option<NodeId>, source: FocusSource) {
@@ -762,7 +744,7 @@ impl Surface {
 
     /// A batch may remove the focused field or cover it with a modal.
     /// Focus follows the active scope and returns when that scope closes.
-    pub(crate) fn reconcile_focus(&mut self) {
+    pub(crate) fn reconcile_focus(&mut self, removed_focus: bool) {
         let visible = self.visible_ids();
         let popup = self
             .current_popup_owner()
@@ -843,7 +825,7 @@ impl Surface {
                 if let Some(index) = restore {
                     let id = self.focus_history.remove(index);
                     self.set_focus(Some(id));
-                } else if displaced || !self.autofocus_seen.contains(&ROOT_ID) {
+                } else if displaced || removed_focus || !self.autofocus_seen.contains(&ROOT_ID) {
                     let first = visible.iter().copied().find(|id| self.focusable(*id));
                     self.set_focus(first);
                 }
@@ -4749,7 +4731,7 @@ mod tests {
         surface.node_mut(2).unwrap().input = config;
         key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(surface.focused(), None);
-        surface.reconcile_focus();
+        surface.reconcile_focus(false);
         assert_eq!(surface.focused(), None);
     }
 
@@ -4766,7 +4748,7 @@ mod tests {
         key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(surface.focused(), Some(2));
         surface.node_mut(ROOT_ID).unwrap().props.pointer_events = PointerEvents::None;
-        surface.reconcile_focus();
+        surface.reconcile_focus(false);
         assert_eq!(surface.focused(), None);
     }
 

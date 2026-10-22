@@ -525,7 +525,7 @@ impl Surface {
             }
         }
         if active {
-            self.reconcile_focus();
+            self.reconcile_focus(false);
         }
         active
     }
@@ -825,7 +825,7 @@ impl Surface {
                 self.emit(id, EventKind::Dismiss, EventPayload::None);
             }
         }
-        self.reconcile_focus();
+        self.reconcile_focus(false);
     }
 
     /// Dialogs cover the viewport; their appearance belongs to the app.
