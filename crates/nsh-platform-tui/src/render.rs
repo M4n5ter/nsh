@@ -4327,7 +4327,14 @@ mod tests {
                 &crate::fonts::FontCatalog::default(),
             )
             .unwrap();
-            assert!(pixels.rgba.chunks_exact(4).all(|pixel| pixel[..3] == color));
+            assert!(
+                pixels
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel[..3] == color)
+            );
             requests.push(
                 crate::protocol::Request::capture(
                     raster.clone(),
