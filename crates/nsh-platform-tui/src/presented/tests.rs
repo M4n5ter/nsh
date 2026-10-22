@@ -1454,7 +1454,14 @@ fn a_presented_label_retains_native_focus_unicode_selection_and_copy() {
 
 #[test]
 fn presented_label_contacts_reject_changed_text_layout_owner_and_callbacks() {
-    for change in ["content", "layout", "owner", "cover", "focus"] {
+    for change in [
+        "content",
+        "layout",
+        "content-position",
+        "owner",
+        "cover",
+        "focus",
+    ] {
         let mut surface = editor_surface();
         surface.apply(MountBatch {
             items: selectable_items(20, "A中文😀 tail"),
@@ -1475,6 +1482,18 @@ fn presented_label_contacts_reject_changed_text_layout_owner_and_callbacks() {
             .into_iter()
             .filter(|item| matches!(item, MountItem::Text { .. }))
             .collect(),
+            "content-position" => {
+                // Core retains the same layout when padding/alignment moves
+                // content without changing the shaped box size.
+                let (text, layout, mut content) = surface.node(20).unwrap().text.clone().unwrap();
+                content.origin.x = px(8.0);
+                vec![MountItem::Text {
+                    id: 20,
+                    text,
+                    layout,
+                    content,
+                }]
+            }
             "owner" => {
                 let mut items = vec![MountItem::Delete { id: 20 }];
                 items.extend(selectable_items(20, "A中文😀 tail"));

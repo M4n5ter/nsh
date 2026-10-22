@@ -58,11 +58,14 @@ enum PointerTarget {
 struct TextContact {
     revision: u64,
     layout: TextLayout,
+    content: Bounds<Points>,
 }
 
 impl PartialEq for TextContact {
     fn eq(&self, other: &Self) -> bool {
-        self.revision == other.revision && Arc::ptr_eq(&self.layout.0, &other.layout.0)
+        self.revision == other.revision
+            && Arc::ptr_eq(&self.layout.0, &other.layout.0)
+            && self.content == other.content
     }
 }
 
@@ -549,12 +552,13 @@ impl Surface {
             return None;
         }
         if node.kind == ViewKind::Text {
-            let (_, layout, _) = node.text.as_ref()?;
+            let (_, layout, content) = node.text.as_ref()?;
             return self.press_route(
                 target,
                 PointerTarget::Text(TextContact {
                     revision: node.editor.revision(),
                     layout: layout.clone(),
+                    content: *content,
                 }),
                 geometry,
             );
