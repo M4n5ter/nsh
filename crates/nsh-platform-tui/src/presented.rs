@@ -37,7 +37,8 @@ pub struct InputSnapshot {
     blocked: bool,
     owners: HashMap<NodeId, NodeId>,
     routes: HashMap<NodeId, PressRoute>,
-    wheel_owners: HashMap<(NodeId, bool), NodeId>,
+    // Some(horizontal) selects a scroll axis; None retains native Ctrl+wheel Pinch.
+    wheel_owners: HashMap<(NodeId, Option<bool>), NodeId>,
     wheel_routes: HashMap<(NodeId, bool), WheelRoute>,
 }
 
@@ -182,7 +183,8 @@ impl InputSnapshot {
         let control = mouse
             .modifiers
             .contains(crossterm::event::KeyModifiers::CONTROL);
-        let owner = self.wheel_owners.get(&(hit, control))?;
+        let axis = (!control).then(|| Surface::horizontal_wheel(mouse));
+        let owner = self.wheel_owners.get(&(hit, axis))?;
         let route = self.wheel_routes.get(&(*owner, control))?.clone();
         Some(WheelLease {
             instance: self.instance.clone(),
@@ -244,22 +246,21 @@ impl Surface {
         if !blocked {
             for &hit in geometry.visible_ids() {
                 let path = geometry.ancestors(hit);
-                if self.pointer.is_none()
-                    && !path.iter().any(|&id| self.opaque_wheel_node(id))
-                    && let Some(target) = path.iter().copied().find(|&id| {
-                        self.node(id).is_some_and(|node| {
-                            node.kind == ViewKind::Scroll && node.scroll.enabled
-                        })
-                    })
-                {
-                    if let std::collections::hash_map::Entry::Vacant(entry) =
-                        wheel_routes.entry((target, false))
-                        && let Some(route) = self.wheel_route(target, &geometry)
-                    {
-                        entry.insert(route);
-                    }
-                    if wheel_routes.contains_key(&(target, false)) {
-                        wheel_owners.insert((hit, false), target);
+                if self.pointer.is_none() && !path.iter().any(|&id| self.opaque_wheel_node(id)) {
+                    for horizontal in [false, true] {
+                        let Some(target) = self.wheel_scroll_target(path.clone(), horizontal)
+                        else {
+                            continue;
+                        };
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            wheel_routes.entry((target, false))
+                            && let Some(route) = self.wheel_route(target, &geometry)
+                        {
+                            entry.insert(route);
+                        }
+                        if wheel_routes.contains_key(&(target, false)) {
+                            wheel_owners.insert((hit, Some(horizontal)), target);
+                        }
                     }
                 }
                 if self.pointer.is_none()
@@ -279,7 +280,7 @@ impl Surface {
                     && let Some(route) = self.pinch_route(target, &geometry)
                 {
                     wheel_routes.entry((target, true)).or_insert(route);
-                    wheel_owners.insert((hit, true), target);
+                    wheel_owners.insert((hit, None), target);
                 }
                 if !path.iter().any(|&id| self.opaque_native_gesture_node(id))
                     && self.native_gesture_focus_safe(&path)

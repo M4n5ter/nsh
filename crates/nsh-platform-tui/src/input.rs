@@ -1432,6 +1432,33 @@ impl Surface {
         }
     }
 
+    pub(crate) fn horizontal_wheel(mouse: MouseEvent) -> bool {
+        matches!(
+            mouse.kind,
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+        ) || mouse.modifiers.contains(KeyModifiers::SHIFT)
+    }
+
+    pub(crate) fn wheel_scroll_target(
+        &self,
+        path: Vec<NodeId>,
+        horizontal: bool,
+    ) -> Option<NodeId> {
+        let axis = |id: &NodeId| {
+            self.node(*id)
+                .filter(|node| node.kind == ViewKind::Scroll && node.scroll.enabled)
+                .map(|node| node.scroll.horizontal)
+        };
+        // Detents retain their owner at content edges, including published leases.
+        nsh_core::input::scroll_target(
+            path,
+            px(if horizontal { 1.0 } else { 0.0 }),
+            px(if horizontal { 0.0 } else { 1.0 }),
+            |id| axis(id),
+            |id| axis(id).is_some(),
+        )
+    }
+
     /// Handles consecutive identical wheel detents against one hit-tested target.
     ///
     /// The host groups only events with the same coordinates, direction and
@@ -1505,7 +1532,20 @@ impl Surface {
         {
             return steps;
         }
-        let scroll = self.scroll_ancestor(hit.or(self.focus));
+        let scroll = if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+            self.scroll_ancestor(hit.or(self.focus))
+        } else {
+            let visible = self.visible_ids();
+            let path = hit
+                .or(self.focus)
+                .map(|id| self.ancestors(id))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| visible.contains(id))
+                .collect();
+            self.wheel_scroll_target(path, Self::horizontal_wheel(mouse))
+                .or_else(|| self.scroll_ancestor(None))
+        };
         if mouse.modifiers.contains(KeyModifiers::CONTROL)
             && let Some(hit) = hit
         {
