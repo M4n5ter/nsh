@@ -45,6 +45,7 @@ pub mod svg;
 pub mod tailwind;
 mod text;
 pub mod text_edit;
+mod text_source;
 pub mod time;
 mod transform;
 pub mod transition;
@@ -99,5 +100,6 @@ pub use crate::{
         FontExtent, LinePiece, ResolvedTextStyle, TextAttachment, TextBackground, TextEngine,
         TextLayout, TextLine, TextLink, TextSpan,
     },
+    text_source::{TextSource, TextSourceKind, TextSourceSegment},
     transform::{Decomposed, MAX_TRANSFORMS, Matrix, Transform, TransformKind, TransformOp},
 };

@@ -1930,6 +1930,11 @@ pub enum Prop {
     /// browsers), unset leaves it to the platform.
     #[prop(js = "selectable", on = TEXT)]
     Selectable(Option<bool>),
+    /// `textSource`: the original source of this text. Local segment ranges are
+    /// UTF-16 offsets; source offsets are absolute UTF-8 byte offsets. The core
+    /// validates ranges against the flattened text before using them.
+    #[prop(js = "textSource", with = crate::js::host_values::text_source, reset = Prop::TextSource(None), ts = "{ id: string; offset: number; segments?: never } | { id: string; offset?: never; segments: { start: number; end: number; sourceStart: number; sourceEnd: number; kind: \"literal\" | \"replacement\" }[] }", on = TEXT)]
+    TextSource(Option<Arc<crate::TextSource>>),
     /// `adjustsFontSizeToFit`: shrink the font until the text fits its lines
     /// (`numberOfLines`) and box.
     #[prop(js = "adjustsFontSizeToFit", on = TEXT)]

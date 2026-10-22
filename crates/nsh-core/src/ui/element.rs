@@ -1812,6 +1812,16 @@ impl Text {
         self
     }
 
+    /// The original source of this text, with local UTF-16 ranges mapped to
+    /// absolute UTF-8 byte offsets. `None` clears the source mapping.
+    pub fn text_source(
+        mut self,
+        source: impl IntoReactive<Option<Arc<crate::TextSource>>>,
+    ) -> Self {
+        super::host::bind_prop(&mut self.0, source, Prop::TextSource);
+        self
+    }
+
     /// The highlight of its selection, when it is selectable.
     pub fn selection_color(mut self, color: impl IntoReactive<Hsla>) -> Self {
         super::host::bind_prop(&mut self.0, color, |c: Hsla| {

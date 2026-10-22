@@ -4,6 +4,7 @@ mod list;
 mod measure;
 mod overlay;
 mod parent_viewport;
+mod reading;
 mod renders;
 mod services;
 mod sticky;
@@ -35,6 +36,7 @@ use crate::{
     style::{EllipsizeMode, Style, StylePatch, TextAlign, TextStyle, ViewStyle},
     tailwind::{ClassEnvironment, ClassList, ClassProps, Tailwind},
     text::{AttributedText, MeasureCache, ResolvedTextStyle, TextEngine, TextLayout},
+    text_source::{SourceCollector, SourceGeometry, SourceMap},
 };
 
 /// Slab index of a node. Internal links use keys, never ids, to avoid the
@@ -437,6 +439,8 @@ struct Node {
     props: Option<Box<ViewProps>>,
     /// Raw text content.
     text: String,
+    /// Canonical source metadata of this block or inline span.
+    text_source: Option<Arc<crate::TextSource>>,
     /// Paragraph settings of a text block or input.
     paragraph: Paragraph,
     image: Option<Box<ImageState>>,
@@ -576,6 +580,7 @@ impl Node {
             logical: None,
             props: None,
             text: String::new(),
+            text_source: None,
             paragraph: Paragraph::default(),
             image: matches!(kind, Kind::Image).then(Box::default),
             scroll: matches!(kind, Kind::Scroll | Kind::List).then(Box::default),
@@ -609,6 +614,8 @@ impl Node {
 /// Taffy context of a text block.
 struct TextContext<P> {
     text: Arc<AttributedText>,
+    sources: SourceMap,
+    source_geometry: Option<SourceGeometry>,
     alignments: crate::AttachmentAlignments,
     /// `text.layout_hash()`, computed once per content.
     layout_hash: u64,
@@ -627,6 +634,8 @@ impl<P> TextContext<P> {
             layout_hash: text.layout_hash(),
             alignments: Default::default(),
             text,
+            sources: SourceMap::default(),
+            source_geometry: None,
             prepared: None,
             cache: None,
             laid_out: None,
@@ -698,6 +707,8 @@ pub struct Core<M: TextEngine> {
     measure_cache: MeasureCache,
     /// Text blocks whose final layout must be (re)made after layout.
     pending_text: Vec<Key>,
+    /// Text source membership changed, independently of shaping and layout.
+    reading_dirty: bool,
     /// Text blocks with attachments (checked for attachments laid out
     /// again).
     attachment_blocks: Vec<Key>,
@@ -827,6 +838,7 @@ impl<M: TextEngine> Core<M> {
             text_engine: Rc::new(text_engine),
             measure_cache: MeasureCache::default(),
             pending_text: Vec::new(),
+            reading_dirty: false,
             attachment_blocks: Vec::new(),
             max_nodes: usize::MAX,
             access: Arc::default(),
@@ -1426,6 +1438,7 @@ impl<M: TextEngine> Core<M> {
             self.layout_cells();
         }
         self.update_lists(relayout);
+        self.reading_dirty = false;
         if !self.overlays.is_empty() {
             self.place_overlays();
         }
@@ -2524,6 +2537,12 @@ impl<M: TextEngine> Core<M> {
             Prop::NumberOfLines(lines) => {
                 if node.paragraph.lines != lines {
                     node.paragraph.lines = lines;
+                    self.mark_text_block(key);
+                }
+            }
+            Prop::TextSource(source) => {
+                if node.kind == Kind::Text && node.text_source != source {
+                    node.text_source = source;
                     self.mark_text_block(key);
                 }
             }
@@ -4071,7 +4090,9 @@ impl<M: TextEngine> Core<M> {
         let multiplier = node.paragraph.font_multiplier(self.font_scale);
         let inserted = self.update_attachments(key);
         let mut alignments = crate::AttachmentAlignments::default();
-        self.collect_text(key, base, &mut text, &mut alignments);
+        let mut sources = SourceCollector::default();
+        self.collect_text(key, base, &mut text, &mut alignments, &mut sources, None);
+        let sources = sources.finish(&text.text);
         if multiplier != 1.0 {
             for span in &mut text.spans {
                 span.style = scaled(span.style, multiplier);
@@ -4080,7 +4101,13 @@ impl<M: TextEngine> Core<M> {
         let layout = self.nodes[key as usize]
             .layout
             .expect("text block has layout");
+        let sources_changed = matches!(self.layout.get_node_context(layout), Some(LeafContext::Text(cx)) if cx.sources != sources);
+        self.reading_dirty |= sources_changed;
         let cx = self.text_cx(layout);
+        if sources_changed {
+            cx.sources = sources;
+            cx.source_geometry = None;
+        }
         if *cx.text == text && cx.alignments == alignments {
             if inserted {
                 // New attachment views: placed with the next final layout.
@@ -4094,6 +4121,7 @@ impl<M: TextEngine> Core<M> {
         // Platform typesetting state embeds colors too: always rebuild it.
         cx.prepared = None;
         cx.laid_out = None;
+        cx.source_geometry = None;
         if !same_layout {
             cx.layout_hash = cx.alignments.layout_hash(&cx.text);
             cx.cache = None;
@@ -4109,18 +4137,29 @@ impl<M: TextEngine> Core<M> {
         style: ResolvedTextStyle,
         out: &mut AttributedText,
         alignments: &mut crate::AttachmentAlignments,
+        sources: &mut SourceCollector,
+        inherited_source: Option<usize>,
     ) {
+        let own_source = self.nodes[key as usize]
+            .text_source
+            .as_ref()
+            .map(|source| sources.begin(source.clone(), out.len_utf16()));
+        let source = own_source.or(inherited_source);
         for &c in &self.nodes[key as usize].children {
             let child = &self.nodes[c as usize];
             match child.kind {
-                Kind::RawText => out.push(&child.text, style),
+                Kind::RawText => {
+                    let start = out.len_utf16();
+                    out.push(&child.text, style);
+                    sources.text(source, start, out.len_utf16());
+                }
                 Kind::Text => {
                     let start = out.len_utf16();
                     let mut inner = style.inherit(&child.text_style);
                     if let Some(b) = span_background(&child.view_style, child.id) {
                         inner.background = Some(b);
                     }
-                    self.collect_text(c, inner, out, alignments);
+                    self.collect_text(c, inner, out, alignments, sources, source);
                     if pressable(child.events) {
                         out.links.push(crate::text::TextLink {
                             start,
@@ -4146,6 +4185,9 @@ impl<M: TextEngine> Core<M> {
                     }
                 }
             }
+        }
+        if let Some(scope) = own_source {
+            sources.end(scope, out.len_utf16());
         }
     }
 
@@ -4761,13 +4803,24 @@ impl<M: TextEngine> Core<M> {
     /// box changed, and emits it.
     fn flush_text(&mut self) {
         let mut pending = std::mem::take(&mut self.pending_text);
+        self.flush_texts(&pending, true);
+        pending.clear();
+        self.pending_text = pending;
+    }
+
+    /// Source reading can need final text geometry before a list issues its
+    /// correction. The normal flush reuses this same layout and still drains
+    /// the ordinary queue after frames and overlays have been placed.
+    fn flush_texts(&mut self, pending: &[Key], dequeue: bool) {
         // Attachment views to place: (block, its final layout, content box).
         let mut placements: Vec<(Key, TextLayout, Bounds<Points>)> = Vec::new();
-        for &key in &pending {
+        for &key in pending {
             let Some(node) = self.nodes.get_mut(key as usize) else {
                 continue;
             };
-            node.text_queued = false;
+            if dequeue {
+                node.text_queued = false;
+            }
             let align_vertical = node.text_style.align_vertical.unwrap_or_default();
             let report_lines = node.events.contains(EventKind::TextLayout);
             // Shrinking stops at a tenth: smaller is unreadable anyway.
@@ -4799,11 +4852,13 @@ impl<M: TextEngine> Core<M> {
                 // not clip text to its box (a browser), so it gets an
                 // empty layout; the text itself stays what it is.
                 if matches!(&cx.laid_out, Some((r, _)) if *r == content) {
+                    refresh_source_geometry(engine, cx);
                     continue;
                 }
                 let layout =
                     engine.layout(&engine.prepare(&AttributedText::default()), content.size);
                 cx.laid_out = Some((content, layout.clone()));
+                cx.source_geometry = Some(SourceGeometry::default());
                 self.mount.push(MountItem::Text {
                     id,
                     text: cx.text.clone(),
@@ -4831,12 +4886,15 @@ impl<M: TextEngine> Core<M> {
             if let Some(min) = fit {
                 // Shrunk to fit: its own text, laid out on its own.
                 if matches!(&cx.laid_out, Some((r, _)) if *r == content) {
+                    refresh_source_geometry(engine, cx);
                     continue;
                 }
                 let text = Arc::new(fitted(engine, &cx.text, &cx.alignments, size, min));
                 let prepared = engine.prepare_aligned(&text, &cx.alignments);
                 let text_layout = engine.layout(&prepared, size);
                 cx.laid_out = Some((content, text_layout.clone()));
+                cx.source_geometry = None;
+                refresh_source_geometry(engine, cx);
                 if report_lines {
                     self.events.push(crate::ui::JsEvent::Event(
                         id,
@@ -4856,7 +4914,10 @@ impl<M: TextEngine> Core<M> {
                 continue;
             }
             let text_layout = match &cx.laid_out {
-                Some((r, _)) if *r == content => continue,
+                Some((r, _)) if *r == content => {
+                    refresh_source_geometry(engine, cx);
+                    continue;
+                }
                 // Only moved (padding, vertical alignment): the same layout.
                 Some((r, l)) if r.size == size => l.clone(),
                 _ => {
@@ -4875,6 +4936,8 @@ impl<M: TextEngine> Core<M> {
                 }
             };
             cx.laid_out = Some((content, text_layout.clone()));
+            cx.source_geometry = None;
+            refresh_source_geometry(engine, cx);
             if !cx.text.attachments.is_empty() {
                 placements.push((key, text_layout.clone(), content));
             }
@@ -4885,8 +4948,6 @@ impl<M: TextEngine> Core<M> {
                 content,
             });
         }
-        pending.clear();
-        self.pending_text = pending;
         for (key, layout, content) in placements {
             self.place_attachments(key, &layout, content);
         }
@@ -5268,7 +5329,12 @@ impl<M: TextEngine> Core<M> {
             return;
         }
         let list = node.list.as_ref().expect("list");
-        if !(relayout || moved || list.dirty || self.commands.iter().any(|c| c.0 == node.id)) {
+        if !(relayout
+            || moved
+            || list.dirty
+            || self.reading_dirty
+            || self.commands.iter().any(|c| c.0 == node.id))
+        {
             return;
         }
         let list_hidden = self.displays_none(key);
@@ -5333,6 +5399,26 @@ impl<M: TextEngine> Core<M> {
         // Inverted lists keep their distance from the end instead;
         // `maintainVisibleContentPosition` follows the end near it.
         anchor += list.anchor_end();
+        let rebuild_sources = self.reading_dirty
+            || list.source_dirty
+            || (relayout && !list.source_geometry.is_empty());
+        if rebuild_sources {
+            let geometry = self.list_source_geometry(key);
+            let list = self.nodes[key as usize].list.as_mut().expect("list");
+            list.source_geometry = geometry;
+            list.source_dirty = false;
+        }
+        let explicit = self.commands.iter().any(|(target, command)| {
+            *target == id
+                && matches!(
+                    command,
+                    Command::ScrollTo { .. }
+                        | Command::ScrollToIndex { .. }
+                        | Command::ScrollToEnd { .. }
+                )
+        });
+        let list = self.nodes[key as usize].list.as_mut().expect("list");
+        anchor += list.anchor_source(explicit);
         // The last scroll command's target moves as its cells are
         // measured: the list follows it.
         let mut retarget = None;
@@ -5747,6 +5833,18 @@ fn content_box(l: &taffy::Layout) -> Bounds<Points> {
         (l.size.height - l.padding.top - l.padding.bottom - l.border.top - l.border.bottom)
             .max(0.0),
     )
+}
+
+fn refresh_source_geometry<M: TextEngine>(engine: &M, cx: &mut TextContext<M::Prepared>) {
+    if cx.source_geometry.is_none() {
+        cx.source_geometry = if cx.sources.is_empty() {
+            Some(SourceGeometry::default())
+        } else {
+            cx.laid_out
+                .as_ref()
+                .map(|(_, layout)| cx.sources.geometry(&cx.text.text, engine.lines(layout)))
+        };
+    }
 }
 
 /// Size of an image with a known natural size: fill a known dimension and

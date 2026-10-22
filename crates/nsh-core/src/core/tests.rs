@@ -18,6 +18,7 @@ struct FakeEngine {
 /// attachments go.
 struct FakeLayout {
     chars: usize,
+    width: f32,
     points: Vec<Option<Point<Points>>>,
 }
 
@@ -41,7 +42,7 @@ impl TextEngine for FakeEngine {
         }
     }
 
-    fn layout(&self, (chars, attachments): &(usize, Vec<u32>), _: Size<Points>) -> TextLayout {
+    fn layout(&self, (chars, attachments): &(usize, Vec<u32>), size: Size<Points>) -> TextLayout {
         self.layouts.set(self.layouts.get() + 1);
         // One line; the third attachment on is cut off.
         let points: Vec<Option<Point<Points>>> = attachments
@@ -53,6 +54,7 @@ impl TextEngine for FakeEngine {
             .collect();
         TextLayout(Arc::new(FakeLayout {
             chars: *chars,
+            width: size.width.0,
             points,
         }))
     }
@@ -62,6 +64,22 @@ impl TextEngine for FakeEngine {
             .downcast::<FakeLayout>()
             .map(|l| l.points.clone())
             .unwrap_or_default()
+    }
+
+    fn lines(&self, layout: &TextLayout) -> Vec<crate::TextLine> {
+        let layout = layout.downcast::<FakeLayout>().unwrap();
+        let columns = (layout.width / 8.0).floor().max(1.0) as usize;
+        (0..layout.chars)
+            .step_by(columns)
+            .enumerate()
+            .map(|(row, start)| crate::TextLine {
+                start: start as u32,
+                end: (start + columns).min(layout.chars) as u32,
+                y: px(row as f32 * 16.0),
+                height: px(16.0),
+                ..crate::TextLine::default()
+            })
+            .collect()
     }
 }
 
@@ -1651,6 +1669,291 @@ fn list_keeps_visible_content_anchored() {
         shift > 0.0,
         "rows above the viewport grew; content must be shifted down"
     );
+
+    // One message can itself be larger than the viewport. Its item top
+    // remains zero while earlier source fragments arrive inside that item.
+    source_reading_survives_prepend_and_rich_replacement();
+}
+
+fn source_reading_survives_prepend_and_rich_replacement() {
+    let mut c = core();
+    let source = |offset| {
+        Prop::TextSource(Some(Arc::new(crate::TextSource::Literal {
+            id: "session/message/body".into(),
+            offset,
+        })))
+    };
+    let shift = |batch: Option<MountBatch>| -> f32 {
+        batch.map_or(0.0, |batch| {
+            batch
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    MountItem::ScrollBy { id: 2, dy, .. } => Some(dy.0),
+                    _ => None,
+                })
+                .sum()
+        })
+    };
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::List,
+            },
+            style_op(2, &[("height", StyleValue::Number(400.0))]),
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Count(1),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    c.commit();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 100,
+                tag: Tag::Cell,
+            },
+            Op::SetProp {
+                id: 100,
+                prop: Prop::Slot(CellSlot::Item(0)),
+            },
+            Op::Insert {
+                parent: 2,
+                child: 100,
+                before: None,
+            },
+            Op::Create {
+                id: 10,
+                tag: Tag::Text,
+            },
+            Op::SetProp {
+                id: 10,
+                prop: source(2560),
+            },
+            Op::Create {
+                id: 11,
+                tag: Tag::RawText,
+            },
+            Op::SetText {
+                id: 11,
+                text: "R".repeat(2000).into(),
+            },
+            Op::Insert {
+                parent: 10,
+                child: 11,
+                before: None,
+            },
+            Op::Insert {
+                parent: 100,
+                child: 10,
+                before: None,
+            },
+            Op::SetProp {
+                id: 100,
+                prop: Prop::CellIndex(0),
+            },
+        ],
+    );
+    c.commit();
+    c.set_scroll_offset(2, point(px(0.0), px(320.0)), 0);
+    assert_eq!(shift(c.commit()), 0.0);
+
+    // 40 characters per shaped line: the source at byte 3360 was at the
+    // viewport top. Adding 1280 earlier bytes moves it down exactly 512pt.
+    let prefix = format!("{}\n", "*".repeat(1279));
+    apply(
+        &mut c,
+        vec![
+            Op::SetProp {
+                id: 10,
+                prop: source(1280),
+            },
+            Op::SetText {
+                id: 11,
+                text: format!("{prefix}{}", "R".repeat(2000)).into(),
+            },
+        ],
+    );
+    assert_eq!(shift(c.commit()), 512.0);
+
+    // A wheel move wins even before that correction has been acknowledged.
+    // The report replays the pending +512, so this is one line further down.
+    c.set_scroll_offset(2, point(px(0.0), px(336.0)), 0);
+    assert_eq!(shift(c.commit()), 0.0);
+    apply(
+        &mut c,
+        vec![
+            Op::SetProp {
+                id: 10,
+                prop: source(0),
+            },
+            Op::SetText {
+                id: 11,
+                text: format!("{prefix}{prefix}{}", "R".repeat(2000)).into(),
+            },
+        ],
+    );
+    assert_eq!(shift(c.commit()), 512.0);
+    // An older native receipt is not another user displacement.
+    c.set_scroll_offset(2, point(px(0.0), px(336.0)), 0);
+    assert_eq!(shift(c.commit()), 0.0);
+
+    // Rich rendering replaces the raw Text with two rule blocks and a
+    // large verbatim code Text. A disabled vertical Scroll around wrapped
+    // code is not an independent reader and must remain eligible.
+    apply(
+        &mut c,
+        vec![
+            Op::Remove {
+                parent: 100,
+                child: 10,
+            },
+            Op::Release { id: 11 },
+            Op::Release { id: 10 },
+            Op::Create {
+                id: 12,
+                tag: Tag::View,
+            },
+            style_op(12, &[("height", StyleValue::Number(16.0))]),
+            Op::Insert {
+                parent: 100,
+                child: 12,
+                before: None,
+            },
+            Op::Create {
+                id: 14,
+                tag: Tag::View,
+            },
+            style_op(14, &[("height", StyleValue::Number(16.0))]),
+            Op::Insert {
+                parent: 100,
+                child: 14,
+                before: None,
+            },
+            Op::Create {
+                id: 16,
+                tag: Tag::Scroll,
+            },
+            Op::SetProp {
+                id: 16,
+                prop: Prop::Native(NativeProp::Scrollable(false)),
+            },
+            Op::Insert {
+                parent: 100,
+                child: 16,
+                before: None,
+            },
+            Op::Create {
+                id: 20,
+                tag: Tag::Text,
+            },
+            Op::SetProp {
+                id: 20,
+                prop: source(2560),
+            },
+            Op::Create {
+                id: 21,
+                tag: Tag::RawText,
+            },
+            Op::SetText {
+                id: 21,
+                text: "R".repeat(2000).into(),
+            },
+            Op::Insert {
+                parent: 20,
+                child: 21,
+                before: None,
+            },
+            Op::Insert {
+                parent: 16,
+                child: 20,
+                before: None,
+            },
+        ],
+    );
+    assert_eq!(shift(c.commit()), -992.0);
+
+    // Only width changes: ensure final text geometry before applying the
+    // source correction, even before descendant frame notifications queue.
+    c.set_viewport(size_pt(160.0, 480.0));
+    assert_eq!(shift(c.commit()), 336.0);
+    c.set_scroll_offset(2, point(px(0.0), px(704.0)), u32::MAX);
+    assert_eq!(shift(c.commit()), 0.0);
+
+    // Source identity can change without glyphs changing (recycled seats).
+    // Clearing it must not preserve an anchor from the previous document.
+    c.apply(Op::SetProp {
+        id: 20,
+        prop: Prop::TextSource(None),
+    })
+    .unwrap();
+    assert_eq!(shift(c.commit()), 0.0);
+    c.apply(Op::SetText {
+        id: 21,
+        text: "R".repeat(2640).into(),
+    })
+    .unwrap();
+    assert_eq!(shift(c.commit()), 0.0);
+
+    // An enabled inner vertical Scroll owns its own reading position.
+    // Its source-bearing text must not compensate the outer List.
+    apply(
+        &mut c,
+        vec![
+            Op::SetProp {
+                id: 20,
+                prop: source(2560),
+            },
+            Op::SetProp {
+                id: 16,
+                prop: Prop::Native(NativeProp::Scrollable(true)),
+            },
+            Op::SetText {
+                id: 21,
+                text: "R".repeat(3280).into(),
+            },
+        ],
+    );
+    assert_eq!(shift(c.commit()), 0.0);
+
+    // Explicit End and near-bottom append following retain priority over
+    // source anchoring. The native end receipt completes the original To.
+    apply(
+        &mut c,
+        vec![
+            Op::SetProp {
+                id: 16,
+                prop: Prop::Native(NativeProp::Scrollable(false)),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::FollowEnd(Some(px(32.0))),
+            },
+            Op::Command {
+                id: 2,
+                command: Command::ScrollToEnd { animated: false },
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(scrolled(&batch, 704.0), 2256.0);
+    c.set_scroll_offset(2, point(px(0.0), px(2256.0)), u32::MAX);
+    c.commit();
+    c.apply(Op::SetText {
+        id: 21,
+        text: "R".repeat(3320).into(),
+    })
+    .unwrap();
+    assert_eq!(shift(c.commit()), 32.0);
 }
 
 /// A list of 100 rows estimated at 50 pt in a 400 pt viewport.

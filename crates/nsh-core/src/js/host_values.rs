@@ -2,6 +2,8 @@
 //! descriptions, list layouts) and the props whose whole variant is
 //! decoded by hand (`#[prop(with = …)]`): the shapes JS sends them in.
 
+use std::sync::Arc;
+
 use super::host::{HostCx, HostInput, HostList, HostValue, field};
 use crate::{
     AccessibilityProp, AccessibilityRole, AccessibilityState, AutoFill, CellSlot, EdgeInsets,
@@ -399,6 +401,69 @@ pub(crate) fn selection<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop>
         start,
         field("end").map_or(start, |e| e.max(0.0) as u32),
     ))
+}
+
+/// `textSource`: one literal byte offset, or ordered, non-overlapping local
+/// UTF-16 ranges mapped to absolute source byte ranges. Text boundaries are
+/// checked by the core against the actual flattened text.
+pub(crate) fn text_source<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
+    fn integer<I: HostInput>(input: &I) -> Option<u64> {
+        let n = input.as_number()?;
+        (n.is_finite() && (0.0..=9_007_199_254_740_991.0).contains(&n) && n.fract() == 0.0)
+            .then_some(n as u64)
+    }
+
+    if input.is_nullish() {
+        return Some(Prop::TextSource(None));
+    }
+    let id = input.field("id")?.as_string()?;
+    if id.is_empty() {
+        return None;
+    }
+    let source = match (input.field("offset"), input.field("segments")) {
+        (Some(offset), None) => crate::TextSource::Literal {
+            id: id.into(),
+            offset: integer(&offset)?,
+        },
+        (None, Some(mapped)) => {
+            let list = mapped.as_list()?;
+            let mut segments = Vec::new();
+            let mut previous_end = 0;
+            for index in 0..list.len() {
+                let segment = list.item(index)?;
+                let start = u32::try_from(integer(&segment.field("start")?)?).ok()?;
+                let end = u32::try_from(integer(&segment.field("end")?)?).ok()?;
+                let source_start = integer(&segment.field("sourceStart")?)?;
+                let source_end = integer(&segment.field("sourceEnd")?)?;
+                let kind = match segment.field("kind")?.as_string()?.as_str() {
+                    "literal" => crate::TextSourceKind::Literal,
+                    "replacement" => crate::TextSourceKind::Replacement,
+                    _ => return None,
+                };
+                if start >= end
+                    || start < previous_end
+                    || source_start > source_end
+                    || (kind == crate::TextSourceKind::Replacement && source_start == source_end)
+                {
+                    return None;
+                }
+                previous_end = end;
+                segments.push(crate::TextSourceSegment {
+                    start,
+                    end,
+                    source_start,
+                    source_end,
+                    kind,
+                });
+            }
+            crate::TextSource::Mapped {
+                id: id.into(),
+                segments,
+            }
+        }
+        _ => return None,
+    };
+    Some(Prop::TextSource(Some(Arc::new(source))))
 }
 
 /// `pan`: `{ x, y }` animated values.

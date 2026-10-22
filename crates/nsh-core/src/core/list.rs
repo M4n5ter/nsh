@@ -55,6 +55,7 @@ use rustc_hash::FxHashMap;
 use crate::{
     fenwick::Fenwick,
     ops::{CellSlot, ListContentStyle, Viewability},
+    text_source::{SourceGeometry, SourcePoint},
 };
 
 /// How far beyond the viewport cells are kept rendered, in viewports.
@@ -195,8 +196,15 @@ pub(super) enum PinTarget {
 
 /// A pinned scroll target and the offset the list was last sent to for
 /// it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 enum Pin {
+    Reading {
+        point: SourcePoint,
+        /// The shaped line's position in the viewport, including partial lines.
+        line: f32,
+        /// The expected offset, including corrections not yet reported applied.
+        at: f32,
+    },
     WaitingForIdle {
         target: PinTarget,
         animated: bool,
@@ -307,6 +315,9 @@ pub(super) struct ListState {
     /// The target of the last scroll command, until it is reached with
     /// measured cells or the user scrolls away.
     pin: Option<Pin>,
+    /// Derived only when rendered source geometry or cell placement changes.
+    pub(super) source_geometry: SourceGeometry,
+    pub(super) source_dirty: bool,
     /// Native interaction tracking stays enabled after an automatic request.
     pub(super) automatic: bool,
     /// A direct native snapshot, unknown until the initial TrackStates report.
@@ -367,6 +378,8 @@ impl ListState {
             moved: Vec::new(),
             splice_anchor: 0.0,
             pin: None,
+            source_geometry: SourceGeometry::default(),
+            source_dirty: false,
             automatic: false,
             interaction: None,
             parent: false,
@@ -430,7 +443,7 @@ impl ListState {
         let shift = start - self.outer_start;
         if shift != 0.0
             && !shift.is_nan()
-            && let Some(Pin::Following { at, .. }) = &mut self.pin
+            && let Some(Pin::Following { at, .. } | Pin::Reading { at, .. }) = &mut self.pin
         {
             // What moved the list in its view is no scroll of the user's.
             *at -= shift;
@@ -471,7 +484,10 @@ impl ListState {
             return;
         }
         // The visible content keeps its place instead.
-        self.pin = None;
+        if !matches!(self.pin, Some(Pin::Reading { .. })) {
+            self.pin = None;
+        }
+        self.source_dirty |= !self.source_geometry.is_empty();
         // The first visible item and where it is in the viewport.
         // In its parent's viewport, only while the list's start is scrolled
         // past (when it shows, the content below it moves instead).
@@ -577,6 +593,13 @@ impl ListState {
             self.offset = at;
             self.dirty = true;
         }
+        if let Some(Pin::Reading { at: expected, .. }) = &self.pin
+            && (at - expected).abs() > PIN_SLACK
+        {
+            // Replay already includes every unapplied correction. A real
+            // displacement wins immediately, even with corrections pending.
+            self.pin = None;
+        }
         if let Some(Pin::Following {
             target,
             at: pinned,
@@ -659,13 +682,14 @@ impl ListState {
     /// After measurements, follows the one pending target with current sizes.
     /// Automatic requests stay pending until native interaction is known idle.
     pub(super) fn follow_pin(&mut self, anchored: f32) -> Follow {
-        let Some(pin) = self.pin else {
+        let Some(pin) = self.pin.clone() else {
             return Follow::Stay;
         };
         if self.viewport <= 0.0 {
             return Follow::Stay;
         }
         let (target, mut at, animating, automatic) = match pin {
+            Pin::Reading { .. } => return Follow::Stay,
             Pin::WaitingForIdle { target, animated } => {
                 if self.interaction != Some(0) {
                     return Follow::Stay;
@@ -731,6 +755,50 @@ impl ListState {
     #[cfg(test)]
     pub(super) fn pinned(&self) -> bool {
         self.pin.is_some()
+    }
+
+    /// Keep the source glyph the reader saw at the same viewport position.
+    /// Explicit navigation and end-follow retain their existing priority.
+    pub(super) fn anchor_source(&mut self, explicit: bool) -> f32 {
+        let near_end = self
+            .follow_end
+            .is_some_and(|threshold| self.content_len() - self.viewport - self.offset <= threshold);
+        if explicit || self.parent || self.horizontal || self.inverted || near_end {
+            if matches!(self.pin, Some(Pin::Reading { .. })) {
+                self.pin = None;
+            }
+            return 0.0;
+        }
+        if let Some(Pin::Reading { point, line, .. }) = self.pin.clone() {
+            if let Some(y) = self.source_geometry.position(&point) {
+                let offset = self.clamped(y - line);
+                let delta = offset - self.offset;
+                self.offset = offset;
+                self.pin = Some(Pin::Reading {
+                    point,
+                    line,
+                    at: offset,
+                });
+                return delta;
+            }
+            self.pin = None;
+        }
+        if self.pin.is_none()
+            && self
+                .pending
+                .iter()
+                .all(|(_, scroll)| matches!(scroll, PendingScroll::By(_)))
+            && let Some((point, y)) = self
+                .source_geometry
+                .first_visible(self.offset, self.offset + self.viewport)
+        {
+            self.pin = Some(Pin::Reading {
+                point,
+                line: y - self.offset,
+                at: self.offset,
+            });
+        }
+        0.0
     }
 
     /// Whether every item overlapping the viewport has its measured size.
@@ -808,6 +876,7 @@ impl ListState {
     }
 
     fn rebuild_offsets(&mut self) {
+        self.source_dirty |= !self.source_geometry.is_empty();
         let gap = self.main_gap() as f64;
         let rows = (0..self.row_count()).map(|r| self.row_size(r) as f64 + gap);
         self.rows = Fenwick::from_sizes(rows.collect::<Vec<_>>().into_iter());
@@ -924,6 +993,7 @@ impl ListState {
             return;
         }
         self.count = count;
+        self.source_dirty |= !self.source_geometry.is_empty();
         self.sizes.resize(count as usize, f32::NAN);
         self.rebuild_offsets();
         if self.load_more_at.is_some_and(|c| c != count) {
@@ -1101,7 +1171,10 @@ impl ListState {
     /// Later relative corrections must start at the same clamped reported offset;
     /// explicit pins supply their own correction before the viewport frame.
     pub(super) fn predict_clamp(&mut self, maximum: f32) {
-        if !self.inverted && self.follow_end.is_some() && self.pin.is_none() {
+        if !self.inverted
+            && self.follow_end.is_some()
+            && matches!(self.pin, None | Some(Pin::Reading { .. }))
+        {
             self.offset = self.offset.min(maximum);
         }
     }
@@ -1182,6 +1255,7 @@ impl ListState {
     // --- Cells -------------------------------------------------------------
 
     pub(super) fn add_slot_cell(&mut self, slot: CellSlot, cell: u32) {
+        self.source_dirty |= !self.source_geometry.is_empty();
         let s = match slot {
             CellSlot::Item(s) => s as usize,
             CellSlot::Header => return self.set_extra(ExtraKind::Header, cell),
@@ -1208,6 +1282,7 @@ impl ListState {
     }
 
     pub(super) fn remove_cell(&mut self, cell: u32) {
+        self.source_dirty |= !self.source_geometry.is_empty();
         for slot in &mut self.slots {
             if slot.cell == cell {
                 slot.cell = u32::MAX;
@@ -1224,6 +1299,7 @@ impl ListState {
     }
 
     pub(super) fn rendered(&mut self, cell: u32, index: u32) {
+        self.source_dirty |= !self.source_geometry.is_empty();
         if let Some(slot) = self.slots.iter_mut().find(|s| s.cell == cell) {
             slot.rendered = Some(index);
             self.dirty = true;

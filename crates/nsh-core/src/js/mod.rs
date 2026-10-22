@@ -143,6 +143,10 @@ mod tests {
             ),
             ("ImageHostProps", "  onLoad?: (e: Size) => void;"),
             (
+                "TextHostProps",
+                "  textSource?: { id: string; offset: number; segments?: never } | { id: string; offset?: never; segments: { start: number; end: number; sourceStart: number; sourceEnd: number; kind: \"literal\" | \"replacement\" }[] };",
+            ),
+            (
                 "VideoHostProps",
                 "  onLoad?: (e: { duration: number; size: Size }) => void;",
             ),
