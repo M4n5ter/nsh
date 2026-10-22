@@ -479,7 +479,7 @@ pub(crate) fn after_batch(surface: &Rc<Surface>, batch: &MountBatch, before: Opt
         .borrow_mut()
         .reconcile(surface, batch, before);
     if let Some(target) = target {
-        crate::input::focus_stop(surface, &target);
+        crate::input::restore_focus(surface, &target);
     }
 }
 

@@ -1105,6 +1105,15 @@ pub(crate) fn focus_stop(surface: &Rc<Surface>, target: &crate::text_input::Focu
     }
 }
 
+/// Restores the native owner without applying Tab's input select-all policy.
+pub(crate) fn restore_focus(surface: &Rc<Surface>, target: &crate::text_input::FocusTarget) {
+    if target.view().kind() == ViewKind::Native {
+        crate::native::tab_to(surface, target.id());
+    } else {
+        crate::text_input::set_focus_target(surface, Some(target.clone()));
+    }
+}
+
 /// Whether this view takes native keyboard focus. Eligibility is checked
 /// against its actual ancestry, including concealed screens and modals.
 pub(crate) fn focusable(surface: &Surface, view: &NshView) -> bool {

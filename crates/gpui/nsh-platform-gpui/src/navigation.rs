@@ -961,7 +961,7 @@ impl Nav {
             && is_ancestor(&self.focus_scope(surface), field.view())
         {
             // The navigation borrow is held: use the already checked scope.
-            crate::input::focus_stop(surface, &field);
+            crate::input::restore_focus(surface, &field);
         }
         match leaves {
             Some((duration, fade)) => {
