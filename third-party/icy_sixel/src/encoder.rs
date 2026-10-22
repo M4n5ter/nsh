@@ -305,6 +305,11 @@ fn encode_indexed_to_sixel<W: Write + ?Sized>(
                     run_len += 1;
                 }
 
+                // Zero-bit tails draw nothing, and '$' resets x for the next color.
+                if bits == 0 && x + run_len == width {
+                    break;
+                }
+
                 // Write RLE or raw sixels
                 if run_len > 3 {
                     out.write_all(b"!")?;
@@ -380,6 +385,64 @@ mod tests {
                 0, 0, 0, 0, 0, 0, 0, 0,
             ]
         );
+    }
+
+    #[test]
+    fn empty_color_tails_preserve_pixels_raster_and_band_positions() {
+        let palette = [Rgb { r: 255, g: 0, b: 0 }, Rgb { r: 0, g: 255, b: 0 }];
+        let mut indices = [0; 12 * 7];
+        let mut opacity = BitMask::zeros(indices.len());
+        for (x, y, color) in [(0, 0, 0), (8, 0, 0), (4, 0, 1), (2, 6, 1)] {
+            let index = y * 12 + x;
+            indices[index] = color;
+            opacity.set(index);
+        }
+        for mode in [BackgroundMode::Transparent, BackgroundMode::Opaque] {
+            let mut output = Vec::new();
+            encode_indexed_to_sixel(
+                &palette,
+                &indices,
+                &opacity,
+                (12, 7),
+                PixelAspectRatio::default(),
+                mode,
+                &mut output,
+            )
+            .unwrap();
+            let header = format!(
+                "\x1bP9;{};0q\"1;1;12;7#0;2;100;0;0#1;2;0;100;0",
+                mode.to_p2_value()
+            );
+            assert_eq!(
+                output,
+                format!("{header}#0@!7?@$#1!4?@$-#1??@$-\x1b\\").as_bytes()
+            );
+
+            // The full-width stream exercises the same image with explicit empty
+            // tails. Leading gaps, interior gaps and the final partial band stay.
+            let full_width = format!("{header}#0@!7?@???$#1!4?@!7?$-#1??@!9?$-\x1b\\");
+            let decoded = crate::SixelImage::decode(&output).unwrap();
+            let original = crate::SixelImage::decode(full_width.as_bytes()).unwrap();
+            assert_eq!((decoded.width, decoded.height), (12, 12));
+            assert_eq!(
+                (decoded.width, decoded.height),
+                (original.width, original.height)
+            );
+            assert_eq!(decoded.pixels, original.pixels);
+            if mode == BackgroundMode::Transparent {
+                let mut pixels = vec![0; 12 * 12 * 4];
+                for (x, y, rgba) in [
+                    (0, 0, [255, 0, 0, 255]),
+                    (8, 0, [255, 0, 0, 255]),
+                    (4, 0, [0, 255, 0, 255]),
+                    (2, 6, [0, 255, 0, 255]),
+                ] {
+                    let offset = (y * 12 + x) * 4;
+                    pixels[offset..offset + 4].copy_from_slice(&rgba);
+                }
+                assert_eq!(decoded.pixels, pixels);
+            }
+        }
     }
 
     #[test]
