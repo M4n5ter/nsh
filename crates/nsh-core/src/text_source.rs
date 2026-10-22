@@ -548,5 +548,39 @@ mod tests {
             },
         );
         assert!(invalid.is_empty());
+
+        // An inline image is one real UTF-16 placeholder even after CJK
+        // and a surrogate pair; its source syntax is an indivisible unit.
+        let image = source(
+            "中😀\u{FFFC}",
+            TextSource::Mapped {
+                id: "document".into(),
+                segments: vec![TextSourceSegment {
+                    start: 3,
+                    end: 4,
+                    source_start: 20,
+                    source_end: 40,
+                    kind: TextSourceKind::Replacement,
+                }],
+            },
+        )
+        .geometry("中😀\u{FFFC}", vec![line(0, 3, 0.0), line(3, 4, 16.0)]);
+        assert_eq!(
+            image.first_visible(0.0, 32.0),
+            Some((
+                SourcePoint {
+                    id: "document".into(),
+                    byte: 20
+                },
+                16.0
+            ))
+        );
+        assert_eq!(
+            image.position(&SourcePoint {
+                id: "document".into(),
+                byte: 30
+            }),
+            Some(16.0)
+        );
     }
 }

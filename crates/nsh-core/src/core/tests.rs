@@ -4928,6 +4928,113 @@ fn views_inside_text_are_attachments() {
         .unwrap();
     assert_eq!(text.text, "abcd\u{FFFC}");
     assert_eq!(frame_of(&batch, 8).map(|f| f.origin.x.0), Some(5.0 + 32.0));
+
+    // The image's real placeholder represents its complete source syntax.
+    // Other text in the same paragraph has no source mapping here, so only
+    // that actual attachment can keep the reader's source position.
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 20,
+                tag: Tag::List,
+            },
+            style_op(20, &[("height", StyleValue::Number(100.0))]),
+            Op::SetProp {
+                id: 20,
+                prop: Prop::Count(1),
+            },
+            insert(ROOT_ID, 20),
+        ],
+    );
+    c.commit();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 22,
+                tag: Tag::Cell,
+            },
+            Op::SetProp {
+                id: 22,
+                prop: Prop::Slot(CellSlot::Item(0)),
+            },
+            insert(20, 22),
+            Op::Create {
+                id: 24,
+                tag: Tag::View,
+            },
+            style_op(24, &[("height", StyleValue::Number(400.0))]),
+            insert(22, 24),
+            Op::Remove {
+                parent: ROOT_ID,
+                child: 2,
+            },
+            insert(22, 2),
+            Op::Create {
+                id: 26,
+                tag: Tag::View,
+            },
+            style_op(26, &[("height", StyleValue::Number(400.0))]),
+            insert(22, 26),
+            Op::SetProp {
+                id: 6,
+                prop: Prop::TextSource(Some(Arc::new(crate::TextSource::Mapped {
+                    id: "message/body".into(),
+                    segments: vec![crate::TextSourceSegment {
+                        start: 2,
+                        end: 3,
+                        source_start: 100,
+                        source_end: 120,
+                        kind: crate::TextSourceKind::Replacement,
+                    }],
+                }))),
+            },
+            Op::SetProp {
+                id: 22,
+                prop: Prop::CellIndex(0),
+            },
+        ],
+    );
+    c.commit();
+    let shift = |batch: Option<MountBatch>| -> f32 {
+        batch.map_or(0.0, |batch| {
+            batch
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    MountItem::ScrollBy { id: 20, dy, .. } => Some(dy.0),
+                    _ => None,
+                })
+                .sum()
+        })
+    };
+    c.set_scroll_offset(20, point(px(0.0), px(405.0)), 0);
+    assert_eq!(shift(c.commit()), 0.0);
+    c.apply(style_op(24, &[("height", StyleValue::Number(440.0))]))
+        .unwrap();
+    assert_eq!(shift(c.commit()), 40.0);
+
+    // Removing the image removes that source seat too: no phantom caption
+    // or stale attachment anchor remains to compensate later reflow.
+    apply(
+        &mut c,
+        vec![
+            Op::Remove {
+                parent: 6,
+                child: 8,
+            },
+            style_op(24, &[("height", StyleValue::Number(480.0))]),
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(
+        batch
+            .items
+            .iter()
+            .any(|item| matches!(item, MountItem::Text { id: 2, text, .. } if text.text == "abcd"))
+    );
+    assert_eq!(shift(Some(batch)), 0.0);
 }
 
 #[test]

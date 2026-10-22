@@ -4178,12 +4178,14 @@ impl<M: TextEngine> Core<M> {
                 _ => {
                     if let Some(l) = child.layout {
                         let size = self.rounded_layout(l).size;
+                        let start = out.len_utf16();
                         alignments.push(
                             out,
                             crate::geometry::size_pt(size.width, size.height),
                             child.vertical_align,
                             style,
                         );
+                        sources.text(source, start, out.len_utf16());
                     }
                 }
             }
