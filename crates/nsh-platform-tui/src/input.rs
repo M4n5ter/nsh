@@ -975,7 +975,7 @@ impl Surface {
         })
     }
 
-    fn ancestors(&self, id: NodeId) -> Vec<NodeId> {
+    pub(crate) fn ancestors(&self, id: NodeId) -> Vec<NodeId> {
         let mut result = Vec::new();
         let mut next = Some(id);
         while let Some(id) = next {
@@ -2668,7 +2668,7 @@ fn keystroke(event: KeyEvent) -> Option<Keystroke> {
 
 #[cfg(test)]
 mod tests {
-    use nsh_core::{Bounds, Point, Size};
+    use nsh_core::{Bounds, Command, Point, Size};
 
     use super::*;
 
