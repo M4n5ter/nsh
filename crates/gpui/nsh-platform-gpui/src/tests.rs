@@ -576,7 +576,7 @@ keymap.bind("f8", () => reader.focus(), { when: "always" });
 keymap.bind("f11", () => { shown.set(false); record("removed"); }, { when: "always" });
 mount(() => <View>
   <Input testID="report" autoFocus readonly value={events()} style={{height: 30}} />
-  <Scroll ref={(node) => reader = node} testID="reader" style={{width: 90, height: 200}} onScrollIntent={({intent}) => record(`intent:${intent}`)}>
+  <Scroll ref={(node) => reader = node} testID="reader" style={{width: 90, height: 200}} onScrollIntent={({intent}) => record(`intent:${intent}`)} onScrollDragStart={() => record("drag-start")} onScrollDragEnd={() => record("drag-end")}>
     <Text testID="sentence" selectable style={{fontSize: 20}}>
       <If when={shown()}><Text ref={(node) => first = node} testID="first-link" accessibilityRole="link" accessibilityLabel="First document" focusable onPress={() => record("first")}>
         打开<Text style={{fontWeight: "bold"}}>跨行中文</Text>文档
@@ -682,6 +682,33 @@ mount(() => <View>
         &view,
         cx,
         "ready|first|second|first|true:false|true:false|removed|second|false:true|intent:start|intent:end|intent:scroll",
+    );
+    // A touchpad attempt at a reader boundary reports intent without
+    // inventing a drag lifecycle or changing its native scroll offset.
+    ime(&view, cx, |surface| {
+        let reader = find_test_view(&surface.root, "reader").unwrap();
+        let (x, y) = reader.to_root().unwrap().map(20.0, 20.0).unwrap();
+        let event = crate::input::WheelEvent {
+            x,
+            y,
+            dx: 0.0,
+            dy: 32.0,
+            precise: true,
+            time: surface.clock(),
+            modifiers: crate::input::Modifiers::default(),
+        };
+        crate::input::touchpad(surface, event, crate::input::GesturePhase::Began);
+        crate::input::touchpad(
+            surface,
+            crate::input::WheelEvent { dy: 0.0, ..event },
+            crate::input::GesturePhase::Ended,
+        );
+        assert_eq!(reader.state().scroll.as_ref().unwrap().y.0, 0.0);
+    });
+    wait_for_report(
+        &view,
+        cx,
+        "ready|first|second|first|true:false|true:false|removed|second|false:true|intent:start|intent:end|intent:scroll|intent:scroll",
     );
     view.update(cx, |view, _| view.stop());
 }

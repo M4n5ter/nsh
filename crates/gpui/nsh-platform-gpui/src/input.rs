@@ -2634,20 +2634,29 @@ fn scroll_target(surface: &Surface, x: f32, y: f32, dx: f32, dy: f32) -> Option<
         |v| v.state().scroll.as_ref().map(|s| s.horizontal),
         |v| v.kind() == ViewKind::Scroll && crate::scroll::can_scroll(v, dx, dy),
     )
-    .or_else(|| {
-        input::scroll_target(
-            chain(&hit.view),
-            Points(dx),
-            Points(dy),
-            |view| view.state().scroll.as_ref().map(|scroll| scroll.horizontal),
-            |view| {
-                view.state()
-                    .scroll
-                    .as_ref()
-                    .is_some_and(|scroll| scroll.behavior.enabled)
-            },
-        )
-    })
+}
+
+/// An edge attempt still cancels application navigation, without starting
+/// a scroll/drag phase that the original native routing did not consume.
+fn boundary_scroll_intent(surface: &Surface, x: f32, y: f32, dx: f32, dy: f32) {
+    let Some(hit) = pick(&surface.root, x, y, true) else {
+        return;
+    };
+    let target = input::scroll_target(
+        chain(&hit.view),
+        Points(dx),
+        Points(dy),
+        |view| view.state().scroll.as_ref().map(|scroll| scroll.horizontal),
+        |view| {
+            view.state()
+                .scroll
+                .as_ref()
+                .is_some_and(|scroll| scroll.behavior.enabled)
+        },
+    );
+    if let Some(view) = target {
+        crate::scroll::intent(surface, &view, "scroll");
+    }
 }
 
 /// Whether `view` is still shown in its surface.
@@ -2699,6 +2708,7 @@ fn wheel_input(
             };
             let Some(view) = latched.or_else(|| scroll_target(surface, x, y, dx, dy)) else {
                 input.latch.borrow_mut().take();
+                boundary_scroll_intent(surface, x, y, dx, dy);
                 return false;
             };
             *input.latch.borrow_mut() = Some((view.clone(), horizontal, time));
@@ -2732,6 +2742,7 @@ fn wheel_input(
             let beginning = input.wheel.borrow().is_none();
             if beginning {
                 let Some(view) = scroll_target(surface, x, y, dx, dy) else {
+                    boundary_scroll_intent(surface, x, y, dx, dy);
                     return false;
                 };
                 *input.wheel.borrow_mut() = Some(Wheel::new(view.clone(), time, phased));

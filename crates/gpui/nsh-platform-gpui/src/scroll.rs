@@ -537,23 +537,38 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, x: f32, y: f32) -> bo
                 .is_some_and(|scroll| scroll.behavior.enabled)
         })
     });
+    let origin = focused.or_else(|| pick(root, x, y));
+    let user_intent = match m {
+        KeyMove::Start => "start",
+        KeyMove::End => "end",
+        _ => "scroll",
+    };
     let Some(view) = edge_owner.or_else(|| {
-        focused
-            .or_else(|| pick(root, x, y))
-            .and_then(|v| key_scroll_view(&v, horizontal, m.sign()))
+        origin
+            .as_ref()
+            .and_then(|view| key_scroll_view(view, horizontal, m.sign()))
     }) else {
+        if let Some(origin) = origin {
+            let target = nsh_core::input::scroll_target(
+                std::iter::successors(Some(origin), NshView::parent_view),
+                Points(if horizontal { m.sign() } else { 0.0 }),
+                Points(if horizontal { 0.0 } else { m.sign() }),
+                |view| view.state().scroll.as_ref().map(|scroll| scroll.horizontal),
+                |view| {
+                    view.state()
+                        .scroll
+                        .as_ref()
+                        .is_some_and(|scroll| scroll.behavior.enabled)
+                },
+            );
+            if let Some(target) = target {
+                intent(surface, &target, user_intent);
+            }
+        }
         return false;
     };
     // Left and Right follow what they show in a right-to-left list.
-    intent(
-        surface,
-        &view,
-        match m {
-            KeyMove::Start => "start",
-            KeyMove::End => "end",
-            _ => "scroll",
-        },
-    );
+    intent(surface, &view, user_intent);
     shared::key_scroll(&Host::new(surface, &view), m, horizontal);
     true
 }
@@ -563,19 +578,11 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, x: f32, y: f32) -> bo
 /// that axis first, then a horizontal one (as vertical wheels move those).
 fn key_scroll_view(view: &NshView, horizontal: bool, sign: f32) -> Option<NshView> {
     let mut chain = Vec::new();
-    let mut boundary = Vec::new();
     let mut current = Some(view.clone());
     while let Some(v) = current {
         current = v.parent_view();
         if v.kind() != ViewKind::Scroll {
             continue;
-        }
-        if v.state()
-            .scroll
-            .as_ref()
-            .is_some_and(|scroll| scroll.behavior.enabled)
-        {
-            boundary.push(v.clone());
         }
         let (dx, dy) = {
             let state = v.state();
@@ -593,9 +600,8 @@ fn key_scroll_view(view: &NshView, horizontal: bool, sign: f32) -> Option<NshVie
         }
     }
     let along = |v: &NshView| v.state().scroll.as_ref().is_some_and(|s| s.horizontal) == horizontal;
-    let candidates = if chain.is_empty() { boundary } else { chain };
-    let first = candidates.iter().position(along).unwrap_or(0);
-    candidates.into_iter().nth(first)
+    let first = chain.iter().position(along).unwrap_or(0);
+    chain.into_iter().nth(first)
 }
 
 /// The innermost view at `(x, y)` (`view`'s coordinates).
