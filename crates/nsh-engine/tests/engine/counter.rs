@@ -94,12 +94,12 @@ fn tap_after_idle_gc_updates_the_ui() {
 }
 
 #[test]
-fn queued_sealed_press_keeps_the_presented_owner_across_js_rebinding() {
+fn queued_presses_follow_js_rebinding_in_fifo_order() {
     use nsh_core::{EventPayload, NodeId};
 
     let registry = nsh_base::registry();
     let source = nsh_bundler::compile_module(
-        "queued-bound-input.tsx",
+        "queued-input.tsx",
         r#"import { inputAction, mount, signal, Text, View } from "nsh";
 import { Button } from "nsh/base";
 const owner = signal("A"), background = signal(0), log = signal("");
@@ -133,14 +133,13 @@ mount(() => <View>
             .iter()
             .find_map(|item| match item {
                 MountItem::ViewProps { id, props } if props.test_id.as_deref() == Some(name) => {
-                    Some((*id, props.input_action))
+                    Some(*id)
                 }
                 _ => None,
             })
             .unwrap_or_else(|| panic!("missing {name}"))
     };
-    let (row, binding) = node("row");
-    let binding = binding.expect("the base Button publishes its sealed JS binding");
+    let row = node("row");
     let control = engine.control();
     let press = |id: NodeId| control.dispatch_event(id, EventKind::Press, EventPayload::None);
     let frame = || {
@@ -159,29 +158,18 @@ mount(() => <View>
             .expect("the rendered log changed")
     };
 
-    press(node("background").0);
-    control.dispatch_bound_event(row, EventKind::Press, EventPayload::None, binding);
+    press(node("background"));
+    press(row);
     assert_eq!(log(&frame()), "log A,");
 
-    // JS rebinds the retained native node before the platform has consumed
-    // its next batch. The old presented binding must not call owner B.
-    press(node("rebind").0);
-    control.dispatch_bound_event(row, EventKind::Press, EventPayload::None, binding);
-    press(node("fence").0);
-    let rebound = frame();
-    assert_eq!(log(&rebound), "log A,fence,");
-    let current_binding = rebound
-        .iter()
-        .flat_map(|batch| &batch.items)
-        .find_map(|item| match item {
-            MountItem::ViewProps { id, props } if *id == row => props.input_action,
-            _ => None,
-        })
-        .expect("the same row publishes its replacement binding");
-    assert_ne!(current_binding, binding);
+    // Earlier queued input updates the action before the next press runs.
+    press(node("rebind"));
+    press(row);
+    press(node("fence"));
+    assert_eq!(log(&frame()), "log A,B,fence,");
 
-    control.dispatch_bound_event(row, EventKind::Press, EventPayload::None, current_binding);
-    assert_eq!(log(&frame()), "log A,fence,B,");
+    press(row);
+    assert_eq!(log(&frame()), "log A,B,fence,B,");
 }
 
 /// What the engine handed a [`ResizeSink`].

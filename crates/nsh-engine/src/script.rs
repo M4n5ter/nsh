@@ -223,25 +223,8 @@ mod imp {
             self.host.deliver(event);
         }
 
-        pub(crate) fn deliver_now(&self, event: nsh_core::ui::JsEvent) -> bool {
-            self.host.deliver_now(event)
-        }
-
-        pub(crate) fn input_action_matches(&self, id: NodeId, token: u64) -> bool {
-            self.host.input_action_matches(id, token)
-        }
-
         pub(crate) fn cancel_touch(&self, contact: u32) {
             self.host.cancel_touch(contact);
-        }
-
-        pub(crate) fn deliver_bound_now(
-            &self,
-            event: nsh_core::ui::JsEvent,
-            node: NodeId,
-            token: u64,
-        ) -> Option<bool> {
-            self.host.deliver_bound_now(event, node, token)
         }
 
         pub(crate) fn bind_list(&self, list: NodeId, binds: &[(u32, u32)]) {
@@ -392,24 +375,7 @@ mod stub {
             match *self {}
         }
 
-        pub(crate) fn deliver_now(&self, _: nsh_core::ui::JsEvent) -> bool {
-            match *self {}
-        }
-
-        pub(crate) fn input_action_matches(&self, _: NodeId, _: u64) -> bool {
-            match *self {}
-        }
-
         pub(crate) fn cancel_touch(&self, _: u32) {
-            match *self {}
-        }
-
-        pub(crate) fn deliver_bound_now(
-            &self,
-            _: nsh_core::ui::JsEvent,
-            _: NodeId,
-            _: u64,
-        ) -> Option<bool> {
             match *self {}
         }
 

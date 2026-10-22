@@ -175,27 +175,10 @@ pub(crate) fn measure(cx: *mut JsContext, id: u32) -> JsValue {
 /// runs (conversions, drops) cannot unwind out: a panic there is logged,
 /// or rejects the call's promise.
 pub(crate) fn deliver(cx: *mut JsContext, event: JsEvent) -> Result<(), JsValue> {
-    deliver_inner(cx, event, false).1
-}
-
-/// Delivers only a subscribed event and reports any possible app entry.
-pub(crate) fn deliver_now(cx: *mut JsContext, event: JsEvent) -> (bool, Result<(), JsValue>) {
-    deliver_inner(cx, event, true)
-}
-
-fn deliver_inner(cx: *mut JsContext, event: JsEvent, now: bool) -> (bool, Result<(), JsValue>) {
     match event {
-        JsEvent::Event(..) => (false, Ok(())),
+        JsEvent::Event(..) => Ok(()),
         JsEvent::Component { host, event } => {
             let name = event.name();
-            let handler = if now {
-                let Some(handler) = dom::component_handler(cx, host, name) else {
-                    return (false, Ok(()));
-                };
-                Some(Owned(cx, handler))
-            } else {
-                None
-            };
             let host_js = crate::classes::host_outside_calls(cx);
             let spread = event.spread();
             let data = catch_unwind(AssertUnwindSafe(move || {
@@ -207,7 +190,7 @@ fn deliver_inner(cx: *mut JsContext, event: JsEvent, now: bool) -> (bool, Result
                     // What a conversion threw (the error says it).
                     let _ = crate::web::js::take_exception(cx);
                     log::error!(target: "js", "the data of event `{name}` did not convert: {e}");
-                    return (true, Ok(()));
+                    return Ok(());
                 }
                 Err(payload) => {
                     let _ = crate::web::js::take_exception(cx);
@@ -216,32 +199,14 @@ fn deliver_inner(cx: *mut JsContext, event: JsEvent, now: bool) -> (bool, Result
                         "the data of event `{name}` panicked as it converted: {}",
                         crate::classes::panic_message(payload)
                     );
-                    return (true, Ok(()));
+                    return Ok(());
                 }
             };
-            (
-                true,
-                component_event_with(
-                    cx,
-                    host,
-                    name,
-                    crate::classes::from_raw(data),
-                    spread,
-                    handler,
-                ),
-            )
+            component_event_with(cx, host, name, crate::classes::from_raw(data), spread)
         }
         JsEvent::Children { host, wanted } => {
-            let handler = if now {
-                let Some(handler) = dom::component_handler(cx, host, CHILDREN) else {
-                    return (false, Ok(()));
-                };
-                Some(Owned(cx, handler))
-            } else {
-                None
-            };
             let data = if wanted { qjs::JS_TRUE } else { qjs::JS_FALSE };
-            (true, component_event(cx, host, CHILDREN, data, handler))
+            component_event(cx, host, CHILDREN, data)
         }
         JsEvent::Render {
             host,
@@ -249,14 +214,6 @@ fn deliver_inner(cx: *mut JsContext, event: JsEvent, now: bool) -> (bool, Result
             key,
             value,
         } => {
-            let handler = if now {
-                let Some(handler) = dom::component_handler(cx, host, RENDER) else {
-                    return (false, Ok(()));
-                };
-                Some(Owned(cx, handler))
-            } else {
-                None
-            };
             let host_js = crate::classes::host_outside_calls(cx);
             let converted = catch_unwind(AssertUnwindSafe(|| {
                 value.render_js(&host_js).map(|v| v.into_raw())
@@ -266,7 +223,7 @@ fn deliver_inner(cx: *mut JsContext, event: JsEvent, now: bool) -> (bool, Result
                 Ok(Err(e)) => {
                     let _ = crate::web::js::take_exception(cx);
                     log::error!(target: "js", "the value `{prop}` renders did not convert: {e}");
-                    return (true, Ok(()));
+                    return Ok(());
                 }
                 Err(payload) => {
                     let _ = crate::web::js::take_exception(cx);
@@ -275,27 +232,19 @@ fn deliver_inner(cx: *mut JsContext, event: JsEvent, now: bool) -> (bool, Result
                         "the value `{prop}` renders panicked as it converted: {}",
                         crate::classes::panic_message(payload)
                     );
-                    return (true, Ok(()));
+                    return Ok(());
                 }
             };
             let data = render_data(cx, prop, &key);
             // SAFETY: the object takes the value.
             unsafe { qjs::JS_SetPropertyStr(cx, data, c"value".as_ptr(), value) };
-            (true, component_event(cx, host, RENDER, data, handler))
+            component_event(cx, host, RENDER, data)
         }
         JsEvent::Unrender { host, prop, key } => {
-            let handler = if now {
-                let Some(handler) = dom::component_handler(cx, host, UNRENDER) else {
-                    return (false, Ok(()));
-                };
-                Some(Owned(cx, handler))
-            } else {
-                None
-            };
             let data = render_data(cx, prop, &key);
-            (true, component_event(cx, host, UNRENDER, data, handler))
+            component_event(cx, host, UNRENDER, data)
         }
-        JsEvent::Reply { call, result } => (true, settle(cx, call, result)),
+        JsEvent::Reply { call, result } => settle(cx, call, result),
     }
 }
 
@@ -325,9 +274,8 @@ fn component_event(
     host: nsh_core::NodeId,
     name: &str,
     data: JsValue,
-    handler: Option<Owned>,
 ) -> Result<(), JsValue> {
-    component_event_with(cx, host, name, data, false, handler)
+    component_event_with(cx, host, name, data, false)
 }
 
 /// [`component_event`]; `spread`: the handler takes the items of `data`
@@ -338,10 +286,8 @@ fn component_event_with(
     name: &str,
     data: JsValue,
     spread: bool,
-    handler: Option<Owned>,
 ) -> Result<(), JsValue> {
-    let handler = handler
-        .or_else(|| dom::handler(cx, host, EventKind::NativeEvent).map(|value| Owned(cx, value)));
+    let handler = dom::handler(cx, host, EventKind::NativeEvent).map(|value| Owned(cx, value));
     let Some(handler) = handler else {
         // SAFETY: ours.
         unsafe { qjs::JS_FreeValue(cx, data) };

@@ -12,7 +12,7 @@
 //! block native scroll views through the same command, which the core
 //! sends for both ([`Core::block_native`]).
 
-use super::{Core, components::EventDispatch};
+use super::Core;
 use crate::{
     Command, EventKind, EventPayload, NodeId, ROOT_ID, TextEngine, TouchEvent, TouchPhase,
     TouchPoint,
@@ -73,12 +73,7 @@ impl<M: TextEngine> Core<M> {
     /// A touch event of the surface (`payload` is `touch`): the components'
     /// handlers on the finger's path, the negotiation, the responder's
     /// events.
-    pub(super) fn touches(
-        &mut self,
-        payload: &EventPayload,
-        touch: &TouchEvent,
-        dispatch: &mut EventDispatch<'_>,
-    ) {
+    pub(super) fn touches(&mut self, payload: &EventPayload, touch: &TouchEvent) {
         let phase = touch.phase;
         let lifted = matches!(phase, TouchPhase::End | TouchPhase::Cancel);
         if phase == TouchPhase::Start {
@@ -122,20 +117,14 @@ impl<M: TextEngine> Core<M> {
         for &id in &path {
             if let Some(host) = self.touch_host(id) {
                 let mut from = 0;
-                while !dispatch.stopped()
-                    && let Some((at, listener)) =
-                        self.next_handler(host, id, EventKind::Touch, from)
+                while let Some((at, listener)) = self.next_handler(host, id, EventKind::Touch, from)
                 {
                     from = at + 1;
-                    if !self.run_listener(host, &listener, payload, dispatch) {
+                    if !self.run_listener(host, &listener, payload) {
                         break;
                     }
                 }
             }
-        }
-        if dispatch.stopped() {
-            self.forget_lifted(touch);
-            return;
         }
         // A pan the platform activated: its element claims the touches.
         if let Some(id) = touch.activated
@@ -144,24 +133,20 @@ impl<M: TextEngine> Core<M> {
             let responder = self.live_responder();
             let event = self.responder_event_now(about, touch);
             if responder != Some(id)
-                && let Some(block) = self.claims(id, ClaimPhase::Pan, false, event, dispatch)
+                && let Some(block) = self.claims(id, ClaimPhase::Pan, false, event)
             {
-                self.take_over(id, block, responder, about, touch, dispatch);
+                self.take_over(id, block, responder, about, touch);
             }
         }
         match phase {
-            TouchPhase::Start => self.negotiate(ClaimPhase::Start, &path, about, touch, dispatch),
-            TouchPhase::Move => self.negotiate(ClaimPhase::Move, &path, about, touch, dispatch),
+            TouchPhase::Start => self.negotiate(ClaimPhase::Start, &path, about, touch),
+            TouchPhase::Move => self.negotiate(ClaimPhase::Move, &path, about, touch),
             TouchPhase::End | TouchPhase::Cancel => {}
-        }
-        if dispatch.stopped() {
-            self.forget_lifted(touch);
-            return;
         }
         if let Some(responder) = self.components.touch.responder {
             if phase == TouchPhase::Cancel {
                 let event = self.responder_event_now(about, touch);
-                self.responder_event(responder, |el| el.terminate.as_ref(), event, dispatch);
+                self.responder_event(responder, |el| el.terminate.as_ref(), event);
                 self.release_responder();
             } else {
                 self.components.touch.gesture.update(touch);
@@ -171,10 +156,10 @@ impl<M: TextEngine> Core<M> {
                     TouchPhase::Move => |el| el.moved.as_ref(),
                     _ => |el| el.end.as_ref(),
                 };
-                self.responder_event(responder, pick, event, dispatch);
+                self.responder_event(responder, pick, event);
                 if phase == TouchPhase::End && down == 0 {
                     self.release_responder();
-                    self.responder_event(responder, |el| el.release.as_ref(), event, dispatch);
+                    self.responder_event(responder, |el| el.release.as_ref(), event);
                 }
             }
         }
@@ -220,11 +205,7 @@ impl<M: TextEngine> Core<M> {
         path: &[NodeId],
         about: &TouchPoint,
         touch: &TouchEvent,
-        dispatch: &mut EventDispatch<'_>,
     ) {
-        if dispatch.stopped() {
-            return;
-        }
         let responder = self.live_responder();
         let mut from = 0;
         if let Some(r) = responder {
@@ -243,14 +224,14 @@ impl<M: TextEngine> Core<M> {
         let event = self.responder_event_now(about, touch);
         let mut wanting = None;
         for &id in asked.iter().rev() {
-            if let Some(block) = self.claims(id, phase, true, event, dispatch) {
+            if let Some(block) = self.claims(id, phase, true, event) {
                 wanting = Some((id, block));
                 break;
             }
         }
         if wanting.is_none() {
             for &id in asked {
-                if let Some(block) = self.claims(id, phase, false, event, dispatch) {
+                if let Some(block) = self.claims(id, phase, false, event) {
                     wanting = Some((id, block));
                     break;
                 }
@@ -262,7 +243,7 @@ impl<M: TextEngine> Core<M> {
         if Some(wanting) == responder {
             return;
         }
-        self.take_over(wanting, block, responder, about, touch, dispatch);
+        self.take_over(wanting, block, responder, about, touch);
     }
 
     /// The responder, if its node still exists.
@@ -282,11 +263,7 @@ impl<M: TextEngine> Core<M> {
         responder: Option<NodeId>,
         about: &TouchPoint,
         touch: &TouchEvent,
-        dispatch: &mut EventDispatch<'_>,
     ) {
-        if dispatch.stopped() {
-            return;
-        }
         let event = self.responder_event_now(about, touch);
         if let Some(r) = responder {
             let keeps = self
@@ -294,14 +271,12 @@ impl<M: TextEngine> Core<M> {
                 .and_then(|host| self.responder_el(host, r))
                 .is_some_and(|el| el.keep);
             if keeps {
-                self.responder_event(wanting, |el| el.reject.as_ref(), event, dispatch);
+                self.responder_event(wanting, |el| el.reject.as_ref(), event);
                 return;
             }
-            self.responder_event(r, |el| el.terminate.as_ref(), event, dispatch);
+            self.responder_event(r, |el| el.terminate.as_ref(), event);
         }
-        if !dispatch.stopped() {
-            self.grant(wanting, block, about, touch, dispatch);
-        }
+        self.grant(wanting, block, about, touch);
     }
 
     /// Whether node `id` claims the touches in `phase` (its claims of that
@@ -314,11 +289,7 @@ impl<M: TextEngine> Core<M> {
         phase: ClaimPhase,
         capture: bool,
         event: ResponderEvent,
-        dispatch: &mut EventDispatch<'_>,
     ) -> Option<bool> {
-        if dispatch.stopped() {
-            return None;
-        }
         let host = self.touch_host(id)?;
         let el = self.responder_el(host, id)?;
         let gated = el.claims.iter().any(|c| c.phase == ClaimPhase::Pan);
@@ -334,10 +305,7 @@ impl<M: TextEngine> Core<M> {
                 None => return Some(claim.block_native),
                 Some(ask) => {
                     let request = ClaimRequest::new(event);
-                    self.run_listener(host, ask, &request, dispatch);
-                    if dispatch.stopped() {
-                        return None;
-                    }
+                    self.run_listener(host, ask, &request);
                     if request.claimed() {
                         return Some(claim.block_native);
                     }
@@ -348,19 +316,12 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// Node `id` becomes the responder; the gesture starts again here.
-    fn grant(
-        &mut self,
-        id: NodeId,
-        block: bool,
-        about: &TouchPoint,
-        touch: &TouchEvent,
-        dispatch: &mut EventDispatch<'_>,
-    ) {
+    fn grant(&mut self, id: NodeId, block: bool, about: &TouchPoint, touch: &TouchEvent) {
         let state = &mut self.components.touch;
         state.responder = Some(id);
         state.gesture = PanGesture::begin(touch);
         let event = self.responder_event_now(about, touch);
-        self.responder_event(id, |el| el.grant.as_ref(), event, dispatch);
+        self.responder_event(id, |el| el.grant.as_ref(), event);
         self.block_native(Side::Rust, block.then_some(id));
     }
 
@@ -370,13 +331,7 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// Runs the listener `pick` chooses of node `id`'s responder part.
-    fn responder_event(
-        &mut self,
-        id: NodeId,
-        pick: Pick,
-        event: ResponderEvent,
-        dispatch: &mut EventDispatch<'_>,
-    ) {
+    fn responder_event(&mut self, id: NodeId, pick: Pick, event: ResponderEvent) {
         let Some(host) = self.touch_host(id) else {
             return;
         };
@@ -384,7 +339,7 @@ impl<M: TextEngine> Core<M> {
             return;
         };
         if let Some(listener) = pick(&el) {
-            self.run_listener(host, listener, &event, dispatch);
+            self.run_listener(host, listener, &event);
         }
     }
 

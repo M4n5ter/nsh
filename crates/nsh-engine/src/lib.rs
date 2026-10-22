@@ -828,7 +828,6 @@ const MAX_ADVANCE_ROUNDS: usize = 100_000;
 enum Message {
     Event(NodeId, EventKind, EventPayload),
     HintObservation(nsh_core::overlay::HintObservation),
-    BoundEvent(NodeId, EventKind, EventPayload, u64),
     CancelTouch(u32),
     Scroll(NodeId, Point<Points>, u32),
     Zoom(NodeId, f32),
@@ -908,25 +907,6 @@ impl EngineControl {
         let _ = self.tx.send(Message::HintObservation(observation));
     }
 
-    /// Delivers a sealed press binding captured from a completed presentation.
-    ///
-    /// The platform first validates the native target's presentation lease.
-    /// The engine validates `binding` again when this FIFO message reaches the
-    /// JS owner, so queued work cannot redirect the input to a new action on
-    /// the same node. Stale bindings and opaque native routes are discarded
-    /// before entering that action. This never falls back to an unbound event.
-    pub fn dispatch_bound_event(
-        &self,
-        id: NodeId,
-        event: EventKind,
-        payload: EventPayload,
-        binding: u64,
-    ) {
-        let _ = self
-            .tx
-            .send(Message::BoundEvent(id, event, payload, binding));
-    }
-
     /// Reports the content offset of a scroll view or list, and how many
     /// scrolls the core asked for (`MountItem::ScrollBy` items and
     /// `Command::ScrollTo` commands for the view) were applied before it.
@@ -966,8 +946,6 @@ impl EngineControl {
 
     /// Publishes the terminal's native focus path in FIFO order before
     /// related input or environment messages. This snapshot runs no JS.
-    /// Local hosts delivering input immediately use
-    /// [`LocalEngine::set_focus_path_now`] instead of queueing this message.
     pub fn set_focus_path(&self, path: Vec<NodeId>) {
         let _ = self.tx.send(Message::FocusPath(path));
     }
@@ -1215,80 +1193,9 @@ impl<M: TextEngine + 'static> LocalEngine<M> {
         self.control.clone()
     }
 
-    /// Replaces the terminal's native focus snapshot synchronously, without
-    /// processing queued messages, running JS or committing a frame. Report
-    /// the current surface path before immediate input and environment changes.
-    /// Use this path consistently rather than mixing it with queued snapshots.
-    pub fn set_focus_path_now(&mut self, path: &[NodeId]) {
-        if let Some(script) = &self.driver.script {
-            script.set_focus_path(path);
-        }
-    }
-
-    /// Delivers an event from the currently presented UI before queued work.
-    ///
-    /// The embedding host must keep this engine and its mounted surface at
-    /// the same completed presentation while it resolves the target. Calling
-    /// [`Self::pump`] first may recycle a list cell or replace its handler.
-    /// This method does not commit or advance timers. Each physical input's
-    /// target must be captured before any callback is invoked; this entry
-    /// point stops native component routing at its first application entry
-    /// and returns `true` then. JS touch responder negotiation is treated as
-    /// one conservative application entry and retains its existing routing.
-    /// An unhandled component phase returns `false` without running JS jobs,
-    /// so the host may continue resolving that presentation's native input.
-    /// A `true` result requires a new presentation before further input.
-    pub fn dispatch_event_now(
-        &mut self,
-        id: NodeId,
-        event: EventKind,
-        payload: EventPayload,
-    ) -> bool {
-        let _clock = self.driver.clock.enter();
-        let state = &mut self.driver.state;
-        if state.trace {
-            log::info!(target: "nsh::perf", "presented event {event:?} on view {id}");
-        }
-        if let (EventKind::ChangeText, EventPayload::Text { text, count }) = (event, &payload) {
-            state.core.input_changed(id, text, *count);
-        }
-        let script = self.driver.script.as_ref();
-        state
-            .core
-            .component_event_now(id, event, &payload, |event| {
-                script.is_some_and(|script| script.deliver_now(event))
-            })
-    }
-
-    /// Delivers a sealed press binding from a completed presentation.
-    ///
-    /// The host first validates the native target's presentation lease.
-    /// `None` rejects a stale binding or a route with opaque native listeners
-    /// before any application code runs. `Some` carries the same first-entry
-    /// receipt as [`Self::dispatch_event_now`]. This method never pumps queued
-    /// work, reads JS properties or advances timers to validate the binding.
-    pub fn dispatch_bound_event_now(
-        &mut self,
-        id: NodeId,
-        event: EventKind,
-        payload: EventPayload,
-        binding: u64,
-    ) -> Option<bool> {
-        let _clock = self.driver.clock.enter();
-        deliver_bound_event(
-            self.driver.script.as_ref(),
-            &mut self.driver.state.core,
-            id,
-            event,
-            &payload,
-            binding,
-        )
-    }
-
     /// Whether queued messages or due timers call for a pump in an otherwise
     /// idle host. This scheduling hint does not consume input or run app code.
-    /// Hosts still pump after native input or [`Self::dispatch_event_now`],
-    /// which may change app state without enqueueing a message.
+    /// Hosts pump after enqueueing native input to deliver its callbacks.
     pub fn needs_pump(&self) -> bool {
         !self.rx.is_empty()
             || self
@@ -2369,36 +2276,6 @@ fn deliver_component_event<M: TextEngine>(
     handled
 }
 
-/// Shared by immediate hosts and the engine thread: native routing and the
-/// JS binding check happen together, immediately before the first app entry.
-fn deliver_bound_event<M: TextEngine>(
-    script: Option<&Script>,
-    core: &mut Core<M>,
-    id: NodeId,
-    kind: EventKind,
-    payload: &EventPayload,
-    binding: u64,
-) -> Option<bool> {
-    let target = core.bound_press_target(id, kind)?;
-    let script = script?;
-    if !script.input_action_matches(target, binding) {
-        return None;
-    }
-    let mut stale = false;
-    let entered = core.component_event_now(id, kind, payload, |event| {
-        match script.deliver_bound_now(event, target, binding) {
-            Some(entered) => entered,
-            None => {
-                // Stop the transparent route without letting a later
-                // listener reinterpret this rejected presentation.
-                stale = true;
-                true
-            }
-        }
-    });
-    (!stale).then_some(entered)
-}
-
 /// Returns false on shutdown.
 fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message: Message) -> bool {
     match message {
@@ -2421,10 +2298,6 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             if let Some(script) = script {
                 script.cancel_touch(contact);
             }
-        }
-        Message::BoundEvent(id, event, payload, binding) => {
-            state.dispatch_hover_moves(script);
-            let _ = deliver_bound_event(script, &mut state.core, id, event, &payload, binding);
         }
         Message::Event(id, event, payload) => {
             if state.trace {
@@ -2792,10 +2665,10 @@ mod tests {
 
     #[cfg(feature = "js")]
     #[test]
-    fn presented_component_events_stop_at_application_entry_and_preserve_its_emits() {
+    fn queued_component_events_deliver_all_listeners_and_preserve_their_emits() {
         use std::cell::Cell;
 
-        use nsh_core::{ApproxTextEngine, EventKind, EventPayload, Op, ui::prelude::*};
+        use nsh_core::{ApproxTextEngine, EventKind, EventPayload, ui::prelude::*};
 
         use super::{Bundle, EngineConfig, LocalEngine, MountSink};
 
@@ -2826,19 +2699,18 @@ mod tests {
                 self.0.send(batch).unwrap();
             }
         }
-        let mut registry = Registry::ui_set("test/presented");
+        let mut registry = Registry::ui_set("test/queued");
         registry.register::<Forward>().register::<Business>();
         let sets = vec![nsh_base::registry(), registry];
         let descriptions = sets.iter().map(Into::into).collect::<Vec<_>>();
         let source = nsh_bundler::compile_module(
-            "presented.tsx",
+            "queued.tsx",
             r#"import { mount, signal, Text, View } from "nsh";
-import { text } from "nsh:rt";
 import { Button } from "nsh/base";
-import { Forward, Business } from "test/presented";
+import { Forward, Business } from "test/queued";
 const rendered = signal("");
 let sequence = 0;
-const report = value => { text(value); rendered.set(`${++sequence}:${value}`); };
+const report = value => rendered.set(`${++sequence}:${value}`);
 mount(() => <View>
   <Button testID="button" onPress={() => report("button")} />
   <Forward onPress={() => report("forward")} />
@@ -2874,21 +2746,6 @@ mount(() => <View>
                 .unwrap_or_else(|| panic!("missing {name}: {:?}", first.items))
         };
         let (button, forward, business) = (node("button"), node("forward"), node("business"));
-        // Observe the callback's actual JS output before any frame, then
-        // hand its ops back to the ordinary commit.
-        let reports = |engine: &mut LocalEngine<ApproxTextEngine>| {
-            let mut ops = Vec::new();
-            engine.driver.script.as_ref().unwrap().take_ops(&mut ops);
-            let reports = ops
-                .iter()
-                .filter_map(|op| match op {
-                    Op::CreateText { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            engine.driver.state.ops.extend(ops);
-            reports
-        };
         let rendered = || {
             rx.try_iter()
                 .flat_map(|batch| batch.items)
@@ -2898,225 +2755,33 @@ mount(() => <View>
                 })
                 .collect::<Vec<_>>()
         };
-        assert!(!engine.dispatch_event_now(button, EventKind::PressDown, EventPayload::None));
-        assert!(!engine.dispatch_event_now(button, EventKind::PressUp, EventPayload::None));
-        assert!(reports(&mut engine).is_empty());
-        assert!(engine.dispatch_event_now(button, EventKind::Press, EventPayload::None));
-        assert_eq!(reports(&mut engine), ["button"]);
+        let control = engine.control();
+        for phase in [EventKind::PressDown, EventKind::PressUp] {
+            control.dispatch_event(button, phase, EventPayload::None);
+        }
+        engine.pump();
+        assert!(rendered().is_empty());
+
+        control.dispatch_event(button, EventKind::Press, EventPayload::None);
         engine.pump();
         assert_eq!(rendered(), ["1:button"]);
 
-        engine
-            .control()
-            .dispatch_event(button, EventKind::Press, EventPayload::None);
-        assert!(engine.dispatch_event_now(forward, EventKind::Press, EventPayload::None));
-        assert_eq!(
-            reports(&mut engine),
-            ["forward"],
-            "queued input stays queued"
-        );
-        assert_eq!(
-            LATER.with(Cell::get),
-            0,
-            "JS entry stops the later Rust listener"
-        );
+        control.dispatch_event(button, EventKind::Press, EventPayload::None);
+        control.dispatch_event(forward, EventKind::Press, EventPayload::None);
+        assert_eq!(LATER.with(Cell::get), 0, "callbacks wait for the pump");
         engine.pump();
-        assert_eq!(
-            rendered(),
-            ["3:button"],
-            "direct and queued callbacks execute once in order before the single commit"
-        );
+        assert_eq!(rendered(), ["3:forward"]);
+        assert_eq!(LATER.with(Cell::get), 1);
 
-        assert!(engine.dispatch_event_now(business, EventKind::Press, EventPayload::None));
-        assert!(
-            reports(&mut engine).is_empty(),
-            "an opaque Rust callback is the first entry"
-        );
-        assert_eq!(LATER.with(Cell::get), 0);
+        control.dispatch_event(business, EventKind::Press, EventPayload::None);
         engine.pump();
-        assert_eq!(
-            rendered(),
-            ["4:business"],
-            "the first callback's own emit survives"
-        );
+        assert_eq!(rendered(), ["4:business"], "Rust callback emits reach JS");
+        assert_eq!(LATER.with(Cell::get), 2);
 
-        engine
-            .control()
-            .dispatch_event(forward, EventKind::Press, EventPayload::None);
+        control.dispatch_event(forward, EventKind::Press, EventPayload::None);
         engine.pump();
         assert_eq!(rendered(), ["5:forward"]);
-        assert_eq!(
-            LATER.with(Cell::get),
-            1,
-            "ordinary queued dispatch retains all listeners"
-        );
-    }
-
-    #[cfg(feature = "js")]
-    #[test]
-    fn bound_base_button_keeps_its_action_across_underlay_updates_and_rejects_rebinding() {
-        use std::cell::Cell;
-
-        use nsh_core::{ApproxTextEngine, EventKind, EventPayload, Op, ui::prelude::*};
-
-        use super::{Bundle, EngineConfig, LocalEngine, MountSink};
-
-        thread_local! {
-            static OPAQUE_UP: Cell<u32> = const { Cell::new(0) };
-        }
-        #[derive(Event)]
-        enum Activated {
-            Press,
-        }
-        #[component]
-        fn UnsafePhase(cx: Scope<Activated>) -> impl IntoElement {
-            view()
-                .test_id("unsafe")
-                .on_press(cx.forward(Activated::Press))
-                .on_press_up(|_: &()| OPAQUE_UP.with(|count| count.set(count.get() + 1)))
-        }
-        struct Sink(crossbeam_channel::Sender<nsh_core::MountBatch>);
-        impl MountSink for Sink {
-            fn submit(&self, batch: nsh_core::MountBatch) {
-                self.0.send(batch).unwrap();
-            }
-        }
-        let mut custom = Registry::ui_set("test/bound");
-        custom.register::<UnsafePhase>();
-        let sets = vec![nsh_base::registry(), custom];
-        let source = nsh_bundler::compile_module(
-            "bound-input.tsx",
-            r#"import { inputAction, mount, signal, Text, View } from "nsh";
-import { text } from "nsh:rt";
-import { Button } from "nsh/base";
-import { UnsafePhase } from "test/bound";
-const row = signal("A"), underlay = signal(0);
-const report = args => text(args.action);
-mount(() => <View>
-  <Button testID="close" onPress={inputAction(report, {action: "close:commands"})} />
-  <Button testID="row" onPress={inputAction(report, {action: `row:${row()}`})} />
-  <UnsafePhase onPress={inputAction(report, {action: "unsafe"})} />
-  <View testID="background" onPress={() => underlay.set(underlay() + 1)} />
-  <View testID="rebind" onPress={() => row.set("B")} />
-  <Text>{`Recent ${underlay()}`}</Text>
-</View>);"#,
-            &sets.iter().map(Into::into).collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut engine = LocalEngine::start(
-            EngineConfig {
-                ui_sets: sets,
-                ..EngineConfig::new(Bundle::source(source))
-            },
-            ApproxTextEngine,
-            Sink(tx),
-        )
-        .unwrap();
-        let first = rx.try_recv().unwrap();
-        let node = |name| {
-            first
-                .items
-                .iter()
-                .find_map(|item| match item {
-                    MountItem::ViewProps { id, props }
-                        if props.test_id.as_deref() == Some(name) =>
-                    {
-                        Some((*id, props.input_action))
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("missing {name}: {:?}", first.items))
-        };
-        let (close, close_binding) = node("close");
-        let close_binding = close_binding.expect("the base Button publishes its sealed action");
-        let (row, row_binding) = node("row");
-        let row_binding = row_binding.unwrap();
-        let (unsafe_phase, unsafe_binding) = node("unsafe");
-        let (background, _) = node("background");
-        let (rebind, _) = node("rebind");
-        let reports = |engine: &mut LocalEngine<ApproxTextEngine>| {
-            let mut ops = Vec::new();
-            engine.driver.script.as_ref().unwrap().take_ops(&mut ops);
-            let reports = ops
-                .iter()
-                .filter_map(|op| match op {
-                    Op::CreateText { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            engine.driver.state.ops.extend(ops);
-            reports
-        };
-        assert!(engine.dispatch_event_now(background, EventKind::Press, EventPayload::None));
-        engine.pump();
-        let underlay = rx
-            .try_iter()
-            .flat_map(|batch| batch.items)
-            .collect::<Vec<_>>();
-        assert!(
-            underlay.iter().any(
-                |item| matches!(item, MountItem::Text { text, .. } if text.text == "Recent 1")
-            )
-        );
-        for phase in [EventKind::PressDown, EventKind::PressUp] {
-            assert_eq!(
-                engine.dispatch_bound_event_now(close, phase, EventPayload::None, close_binding),
-                Some(false),
-                "unsubscribed native button phases stay transparent"
-            );
-        }
-        assert_eq!(
-            engine.dispatch_bound_event_now(
-                close,
-                EventKind::Press,
-                EventPayload::None,
-                close_binding,
-            ),
-            Some(true)
-        );
-        assert_eq!(reports(&mut engine), ["close:commands"]);
-
-        assert!(engine.dispatch_event_now(rebind, EventKind::Press, EventPayload::None));
-        assert_eq!(
-            engine.dispatch_bound_event_now(
-                row,
-                EventKind::PressDown,
-                EventPayload::None,
-                row_binding
-            ),
-            None,
-            "the host rejects stale args before the next native commit"
-        );
-        assert!(reports(&mut engine).is_empty());
-        engine.pump();
-        let rebound = rx
-            .try_iter()
-            .flat_map(|batch| batch.items)
-            .find_map(|item| match item {
-                MountItem::ViewProps { id, props } if id == row => props.input_action,
-                _ => None,
-            })
-            .expect("the same row publishes its new binding");
-        assert_ne!(rebound, row_binding);
-        assert_eq!(
-            engine.dispatch_bound_event_now(row, EventKind::Press, EventPayload::None, rebound),
-            Some(true)
-        );
-        assert_eq!(reports(&mut engine), ["row:B"]);
-
-        assert_eq!(
-            engine.dispatch_bound_event_now(
-                unsafe_phase,
-                EventKind::PressDown,
-                EventPayload::None,
-                unsafe_binding.unwrap(),
-            ),
-            None,
-            "an opaque Up listener rejects the whole route before Down"
-        );
-        assert_eq!(OPAQUE_UP.with(Cell::get), 0);
-        assert!(reports(&mut engine).is_empty());
+        assert_eq!(LATER.with(Cell::get), 3, "every Rust listener runs once");
     }
 
     #[cfg(feature = "js")]

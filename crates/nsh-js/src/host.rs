@@ -601,48 +601,6 @@ impl Host {
         }
     }
 
-    /// Delivers one event immediately and reports whether it may have entered
-    /// application code through a handler, property access or data conversion.
-    /// An unsubscribed event does not run pending JS jobs. A component event's
-    /// `name` and `Drop` must not enter application code, as with the core's
-    /// closed event forwarders.
-    pub fn deliver_now(&self, event: nsh_core::ui::JsEvent) -> bool {
-        if let nsh_core::ui::JsEvent::Event(id, kind, payload) = &event {
-            return self.dispatch_event_now(*id, *kind, payload);
-        }
-        let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.guarded(Phase::Call, || {
-                let entered = self.cx.with(|cx| {
-                    let (entered, result) =
-                        crate::components::deliver_now(cx.as_raw().as_ptr(), event);
-                    if result.is_err() {
-                        self.report::<()>(&cx, Err(rquickjs::Error::Exception));
-                    }
-                    entered
-                });
-                if entered {
-                    self.run_jobs();
-                }
-                entered
-            })
-            .unwrap_or(false)
-        }));
-        match delivered {
-            Ok(entered) => entered,
-            Err(_) => {
-                log::error!(target: "js", "a value for JS panicked as it dropped");
-                true
-            }
-        }
-    }
-
-    /// Checks a node's currently installed sealed input action without
-    /// reading props, calling app code or running pending jobs.
-    pub fn input_action_matches(&self, id: NodeId, token: u64) -> bool {
-        self.cx
-            .with(|cx| crate::dom::input_action_event(cx.as_raw().as_ptr(), id, token).is_some())
-    }
-
     /// Forgets a physically cancelled native contact without handlers or jobs.
     /// The last known contact releases the JS responder and native scroll block;
     /// cancelling an unknown contact is inert, including repeated cancellation.
@@ -658,92 +616,6 @@ impl Host {
                 command: nsh_core::Command::ClearJsResponder,
             });
         }
-    }
-
-    /// Delivers an event to the sealed action captured by a presented input.
-    /// `None` rejects a changed binding or mismatched route before app entry;
-    /// `Some(false)` is an unsubscribed phase. Component event names and drops
-    /// must be inert, as with the core's closed event forwarders.
-    pub fn deliver_bound_now(
-        &self,
-        event: nsh_core::ui::JsEvent,
-        node: NodeId,
-        token: u64,
-    ) -> Option<bool> {
-        let press = self.cx.with(|cx| {
-            let owner = crate::dom::input_action_event(cx.as_raw().as_ptr(), node, token)?;
-            match &event {
-                nsh_core::ui::JsEvent::Event(id, kind, _)
-                    if *id == node && owner == EventKind::Press =>
-                {
-                    Some(*kind == EventKind::Press)
-                }
-                nsh_core::ui::JsEvent::Component { host, event }
-                    if *host == node && owner == EventKind::NativeEvent =>
-                {
-                    Some(event.name() == "press")
-                }
-                _ => None,
-            }
-        })?;
-        if !press {
-            return Some(false);
-        }
-        self.guarded(Phase::Call, || {
-            let entered = self.cx.with(|cx| {
-                let callable = crate::dom::bound_input_action(cx.as_raw().as_ptr(), node, token)?;
-                // SAFETY: the selected handler owns a sealed callable duplicate.
-                let callable = unsafe { Value::from_raw(cx.clone(), callable) };
-                let callable = callable.into_function()?;
-                self.report(&cx, callable.call::<_, ()>(()));
-                Some(true)
-            });
-            if entered == Some(true) {
-                self.run_jobs();
-            }
-            entered
-        })
-        .unwrap_or(Some(false))
-    }
-
-    fn dispatch_event_now(&self, id: NodeId, event: EventKind, payload: &EventPayload) -> bool {
-        self.guarded(Phase::Call, || {
-            let entered = self.cx.with(|cx| {
-                let raw = cx.as_raw().as_ptr();
-                // The responder system can enter several app handlers.
-                if let (EventKind::Touch, EventPayload::Touch(touch)) = (event, payload) {
-                    if crate::touch::dispatch(raw, touch).is_err() {
-                        self.report::<()>(&cx, Err(rquickjs::Error::Exception));
-                    }
-                    return true;
-                }
-                let Some(handler) = crate::dom::handler(raw, id, event) else {
-                    return false;
-                };
-                // SAFETY: an owned function value of this context.
-                let handler = unsafe { Value::from_raw(cx.clone(), handler) };
-                let Some(handler) = handler.into_function() else {
-                    return false;
-                };
-                let payload = match (event, payload) {
-                    (EventKind::ChangeText, EventPayload::Text { text, .. }) => {
-                        rquickjs::String::from_str(cx.clone(), text).map(|s| s.into_value())
-                    }
-                    (_, EventPayload::Value(value)) => payload_value(&cx, value),
-                    _ => payload_object(&cx, payload),
-                };
-                self.report(
-                    &cx,
-                    payload.and_then(|payload| handler.call::<_, ()>((payload,))),
-                );
-                true
-            });
-            if entered {
-                self.run_jobs();
-            }
-            entered
-        })
-        .unwrap_or(false)
     }
 
     /// Delivers a native event (and its data) to the node's JS handler.
@@ -2015,100 +1887,8 @@ const report = (v) => text(String(v));
     }
 
     #[test]
-    fn immediate_component_events_report_property_entry_without_running_unbound_work() {
-        use nsh_core::ui::{EventToJs, JsEvent, JsHost, JsOwned, PropError};
-
-        struct CountedEvent {
-            name: &'static str,
-            conversions: Rc<Cell<u32>>,
-        }
-
-        impl EventToJs for CountedEvent {
-            fn name(&self) -> &'static str {
-                self.name
-            }
-
-            fn data_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
-                self.conversions.set(self.conversions.get() + 1);
-                Ok(JsOwned::new(host, host.undefined()))
-            }
-        }
-
-        let host = Host::with_options(HostOptions {
-            ui_sets: vec![nsh_base::registry()],
-            ..Default::default()
-        })
-        .unwrap();
-        host.eval_source(
-            r#"import { Button } from "nsh/base";
-            globalThis.log = [];
-            globalThis.delivering = false;
-            globalThis.undefinedButton = Button({
-                get onPress() { if (delivering) log.push("undefined"); return undefined; }
-            });
-            globalThis.throwingButton = Button({
-                get onPress() {
-                    if (delivering) { log.push("throw"); throw Error("getter failed"); }
-                    return undefined;
-                }
-            });
-            delivering = true;"#,
-        )
-        .unwrap();
-        let ids = host.cx.with(|cx| {
-            ["undefinedButton", "throwingButton"].map(|name| {
-                let node: Value = cx.globals().get(name).unwrap();
-                crate::dom::node_id(cx.as_raw().as_ptr(), node.as_raw()).unwrap()
-            })
-        });
-        host.cx.with(|cx| {
-            cx.eval::<(), _>("Promise.resolve().then(() => log.push('job'));")
-                .unwrap();
-        });
-        let log = || {
-            host.cx
-                .with(|cx| cx.eval::<String, _>("log.join(',')").unwrap())
-        };
-        let conversions = Rc::new(Cell::new(0));
-        let event = |host, name| JsEvent::Component {
-            host,
-            event: Box::new(CountedEvent {
-                name,
-                conversions: conversions.clone(),
-            }),
-        };
-        assert!(!host.deliver_now(event(ids[0], "pressDown")));
-        assert_eq!(conversions.get(), 0);
-        assert_eq!(log(), "");
-
-        assert!(host.deliver_now(event(ids[0], "press")));
-        assert_eq!(conversions.get(), 1);
-        assert_eq!(log(), "undefined,job");
-
-        assert!(host.deliver_now(event(ids[1], "press")));
-        assert_eq!(conversions.get(), 2);
-        assert_eq!(log(), "undefined,job,throw");
-    }
-
-    #[test]
-    fn sealed_input_actions_preserve_snapshots_and_reject_changed_bindings() {
-        use nsh_core::{
-            Prop,
-            ui::{EventToJs, JsEvent, JsHost, JsOwned, PropError},
-        };
-
-        struct Press(Rc<Cell<u32>>);
-
-        impl EventToJs for Press {
-            fn name(&self) -> &'static str {
-                "press"
-            }
-
-            fn data_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
-                self.0.set(self.0.get() + 1);
-                Ok(JsOwned::new(host, host.undefined()))
-            }
-        }
+    fn input_actions_capture_immutable_args_and_follow_component_dispatch() {
+        use nsh_core::ui::JsEvent;
 
         let host = Host::with_options(HostOptions {
             ui_sets: vec![nsh_base::registry()],
@@ -2119,10 +1899,7 @@ const report = (v) => text(String(v));
             r#"import { Button } from "nsh/base";
             import { inputAction, signal } from "nsh";
             globalThis.log = [];
-            globalThis.reads = 0;
             globalThis.source = { target: "A", nested: { value: 1 }, text: "x".repeat(70000) };
-            globalThis.args = signal(source);
-            globalThis.tick = signal(0);
             const press = (captured) => log.push([
                 captured.target, captured.nested.value, captured.text.length,
                 Object.isFrozen(captured), Object.isFrozen(captured.nested)
@@ -2134,8 +1911,10 @@ const report = (v) => text(String(v));
             rejected = false;
             try { inputAction(press, sparse); } catch { rejected = true; }
             if (!rejected) throw Error("oversized sparse capture accepted");
+            globalThis.action = signal(inputAction(press, source));
+            globalThis.rebind = () => action.set(inputAction(press, { ...source, target: 'B' }));
             globalThis.bound = Button({
-                get onPress() { tick(); reads++; return inputAction(press, args()); }
+                get onPress() { return action(); }
             });"#,
         )
         .unwrap();
@@ -2143,115 +1922,30 @@ const report = (v) => text(String(v));
             let node: Value = cx.globals().get("bound").unwrap();
             crate::dom::node_id(cx.as_raw().as_ptr(), node.as_raw()).unwrap()
         });
-        let published = |updates: Vec<Op>| {
-            updates.into_iter().find_map(|op| match op {
-                Op::SetProp {
-                    id,
-                    prop: Prop::InputAction(Some(token)),
-                } if id == node => Some(token),
-                _ => None,
-            })
-        };
-        let token = published(ops(&host)).unwrap();
-        let conversions = Rc::new(Cell::new(0));
-        host.eval_source("tick.set(1);").unwrap();
-        assert_eq!(published(ops(&host)), None);
         host.eval_source("source.nested.value = 99;").unwrap();
-        let reads = host
-            .cx
-            .with(|cx| cx.globals().get::<_, u32>("reads").unwrap());
         host.cx.with(|cx| {
             cx.eval::<(), _>("Promise.resolve().then(() => log.push('job'));")
                 .unwrap();
         });
-        assert!(host.input_action_matches(node, token));
-        assert_eq!(
-            host.deliver_bound_now(
-                JsEvent::Children {
-                    host: node,
-                    wanted: true
-                },
-                node,
-                token
-            ),
-            None,
-        );
-        assert_eq!(
-            host.cx
-                .with(|cx| cx.eval::<String, _>("log.join(',')").unwrap()),
-            "",
-        );
-        assert_eq!(
-            host.deliver_bound_now(
-                JsEvent::Component {
-                    host: node,
-                    event: Box::new(Press(conversions.clone())),
-                },
-                node,
-                token,
-            ),
-            Some(true),
-        );
+        host.deliver(JsEvent::Component {
+            host: node,
+            event: Box::new(nsh_base::ButtonEvent::Press),
+        });
         assert_eq!(
             host.cx
                 .with(|cx| cx.eval::<String, _>("log.join(',')").unwrap()),
             "A:1:70000:true:true,job",
         );
-        assert_eq!(
-            host.cx
-                .with(|cx| cx.globals().get::<_, u32>("reads").unwrap()),
-            reads,
-        );
-        assert_eq!(conversions.get(), 0);
 
-        host.eval_source("args.set({ ...source, target: 'B' });")
-            .unwrap();
-        let replacement = published(ops(&host)).unwrap();
-        assert_ne!(replacement, token);
-        assert!(!host.input_action_matches(node, token));
-        assert!(host.input_action_matches(node, replacement));
+        host.eval_source("rebind();").unwrap();
         host.cx.with(|cx| {
             cx.eval::<(), _>("Promise.resolve().then(() => log.push('replacement job'));")
                 .unwrap();
         });
-        assert_eq!(
-            host.deliver_bound_now(
-                JsEvent::Component {
-                    host: node,
-                    event: Box::new(nsh_base::ButtonEvent::Press),
-                },
-                node,
-                token,
-            ),
-            None,
-        );
-        assert_eq!(
-            host.deliver_bound_now(
-                JsEvent::Component {
-                    host: node,
-                    event: Box::new(nsh_base::ButtonEvent::PressDown),
-                },
-                node,
-                replacement,
-            ),
-            Some(false),
-        );
-        assert_eq!(
-            host.cx
-                .with(|cx| cx.eval::<String, _>("log.join(',')").unwrap()),
-            "A:1:70000:true:true,job",
-        );
-        assert_eq!(
-            host.deliver_bound_now(
-                JsEvent::Component {
-                    host: node,
-                    event: Box::new(nsh_base::ButtonEvent::Press),
-                },
-                node,
-                replacement,
-            ),
-            Some(true),
-        );
+        host.deliver(JsEvent::Component {
+            host: node,
+            event: Box::new(nsh_base::ButtonEvent::Press),
+        });
         assert_eq!(
             host.cx
                 .with(|cx| cx.eval::<String, _>("log.join(',')").unwrap()),

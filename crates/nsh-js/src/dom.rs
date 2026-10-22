@@ -3205,50 +3205,6 @@ pub(crate) fn handler(cx: *mut JsContext, id: NodeId, event: EventKind) -> Optio
         .map(|h| unsafe { qjs::JS_DupValue(cx, h.value) })
 }
 
-/// Selects a component event before converting its data or reading props.
-/// An opaque handler may run app code for any event.
-pub(crate) fn component_handler(cx: *mut JsContext, id: NodeId, name: &str) -> Option<JsValue> {
-    let p = dom(cx).by_id(id);
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: live node data; a dup of the selected handler.
-    let handler = unsafe { &(*p).handlers }
-        .iter()
-        .find(|h| h.event == EventKind::NativeEvent)?;
-    if let Some(events) = &handler.component_events
-        && !events.contains(&name)
-    {
-        return None;
-    }
-    Some(unsafe { qjs::JS_DupValue(cx, handler.value) })
-}
-
-/// The kind of the node's currently valid sealed binding (no JS entry).
-pub(crate) fn input_action_event(cx: *mut JsContext, id: NodeId, token: u64) -> Option<EventKind> {
-    let p = dom(cx).by_id(id);
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: live node data; native-only selection and token equality.
-    let data = unsafe { &*p };
-    selected_input_action(data)
-        .filter(|action| action.token == token)
-        .map(|_| data.handlers[0].event)
-}
-
-/// Duplicates the currently valid stored callable without reading props.
-pub(crate) fn bound_input_action(cx: *mut JsContext, id: NodeId, token: u64) -> Option<JsValue> {
-    let p = dom(cx).by_id(id);
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: live node data; the caller owns the duplicate.
-    selected_input_action(unsafe { &*p })
-        .filter(|action| action.token == token)
-        .map(|action| unsafe { qjs::JS_DupValue(cx, action.callable) })
-}
-
 // --- The primitives as components -----------------------------------------------------
 
 /// A component rendering host element `tag` with its props (children too

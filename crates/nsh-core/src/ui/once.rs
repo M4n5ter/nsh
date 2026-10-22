@@ -44,9 +44,7 @@ impl<E: Event> Scope<E> {
         super::reactive::emit(self.host, Box::new(event));
     }
 
-    /// A listener that only forwards this fixed event to the component's
-    /// listeners. Unlike an arbitrary closure, forwarding alone does not
-    /// enter application code when the app has no listener for this event.
+    /// A listener that forwards this fixed event to the component's listeners.
     pub fn forward(&self, event: E) -> super::Listener<()> {
         super::Listener::<()>::forward(self.host, Rc::new(event))
     }

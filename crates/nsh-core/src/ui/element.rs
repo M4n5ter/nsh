@@ -23,30 +23,24 @@ use crate::{
 pub struct Listener<E: ?Sized> {
     f: Rc<dyn Fn(&E)>,
     owner: super::Owner,
-    application: bool,
-    forward_host: Option<NodeId>,
 }
 
 impl<E: ?Sized + 'static> Listener<E> {
     /// A listener that does nothing (the element still listens).
     pub(crate) fn noop() -> Self {
-        let mut listener = Self::new(Rc::new(|_| {}));
-        listener.application = false;
-        listener
+        Self::new(Rc::new(|_| {}))
     }
 
     fn new(f: Rc<dyn Fn(&E)>) -> Self {
         Self {
             f,
             owner: super::Owner::current_or_detached(),
-            application: true,
-            forward_host: None,
         }
     }
 
     pub(super) fn forward(host: NodeId, event: Rc<dyn AnyEvent>) -> Listener<()> {
         let name = event.name();
-        let mut listener = Listener::new(Rc::new(move |_: &()| {
+        Listener::new(Rc::new(move |_: &()| {
             super::reactive::emit(
                 host,
                 Box::new(SharedEvent {
@@ -54,23 +48,7 @@ impl<E: ?Sized + 'static> Listener<E> {
                     name,
                 }),
             );
-        }));
-        listener.application = false;
-        listener.forward_host = Some(host);
-        listener
-    }
-
-    pub(crate) fn is_live(&self) -> bool {
-        self.owner == super::Owner::detached() || self.owner.is_live()
-    }
-
-    pub(crate) fn forward_host(&self) -> Option<NodeId> {
-        self.forward_host
-    }
-
-    /// Whether calling this live listener enters arbitrary application code.
-    pub(crate) fn enters_application(&self) -> bool {
-        self.application && self.is_live()
+        }))
     }
 
     /// Calls it with `event`, under its owner; not once that owner is
@@ -90,8 +68,6 @@ impl<E: ?Sized + 'static> Listener<E> {
         Listener {
             f: Rc::new(move |event: &F| f(&*inner, event)),
             owner: self.owner,
-            application: self.application,
-            forward_host: self.forward_host,
         }
     }
 }
@@ -99,10 +75,7 @@ impl<E: ?Sized + 'static> Listener<E> {
 impl<E: 'static> Listener<E> {
     /// This listener for events of another type, turned into `E` by `f`.
     pub fn map<F: ?Sized + 'static>(self, f: impl Fn(&F) -> E + 'static) -> Listener<F> {
-        let mut listener = self.wrap(move |inner, event: &F| inner(&f(event)));
-        listener.application = true;
-        listener.forward_host = None;
-        listener
+        self.wrap(move |inner, event: &F| inner(&f(event)))
     }
 }
 
@@ -161,8 +134,6 @@ impl<E: ?Sized> Clone for Listener<E> {
         Self {
             f: self.f.clone(),
             owner: self.owner,
-            application: self.application,
-            forward_host: self.forward_host,
         }
     }
 }

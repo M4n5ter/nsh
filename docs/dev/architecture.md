@@ -12,10 +12,6 @@ Input                        native gestures -> EngineControl::dispatch_event ->
 
 - The platform main thread never waits for JS (one bounded exception: macOS waits up to 16 ms for the layout at a new
   window size, `macos.md`).
-- A platform holding a completed presentation's native press lease sends its sealed `ViewProps::input_action`
-  through `EngineControl::dispatch_bound_event`. The engine rechecks the original JS binding at FIFO delivery,
-  sharing the validation of `LocalEngine::dispatch_bound_event_now`; reusing a native node cannot redirect that
-  input to the node's replacement action. A rejected binding is discarded before app entry.
 - **Reactivity is native**: signals, memos, effects, owners and context are a graph in Rust (`crates/nsh-js/src/reactive.rs`,
   scheduled by Solid 1.9's algorithm) whose nodes are QuickJS objects of native classes, so the QuickJS GC sees the
   cycles through them. Apps reach it through `nsh` (`signal`, `computed`, `effect`, ...).
