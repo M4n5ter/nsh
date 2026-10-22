@@ -2739,8 +2739,13 @@ mod tests {
                 text: "abcdefghijklmno".into(),
                 count: 0,
             },
+            MountItem::Command {
+                id: 10,
+                command: Command::Focus,
+            },
         ]);
         surface.apply(MountBatch { items });
+        key(&mut surface, KeyCode::Home, KeyModifiers::NONE);
         let mouse = |kind, column| {
             Event::Mouse(MouseEvent {
                 kind,
@@ -2754,8 +2759,10 @@ mod tests {
         let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 6);
         assert!(surface.handle_event(drag.clone()));
         assert_eq!(surface.input_context().unwrap().selection, 1..6);
+        assert_eq!(surface.snapshot().lines().nth(4), Some("defg"));
         assert!(surface.handle_event(drag));
         assert_eq!(surface.input_context().unwrap().selection, 1..9);
+        assert_eq!(surface.snapshot().lines().nth(4), Some("ghij"));
         assert!(surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 6)));
         surface.handle_event(Event::Paste("X".into()));
         assert_eq!(
