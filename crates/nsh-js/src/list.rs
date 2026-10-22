@@ -115,6 +115,8 @@ struct Cell {
 
 struct ListData {
     props: JsValue,
+    /// The source after its cells' indices have followed the splice.
+    source: JsValue,
     node: JsValue,
     /// The owner the list was made under: cells are made as its roots.
     owner: u32,
@@ -148,6 +150,7 @@ fn free_data(cx: *mut JsContext, data: ListData) {
     // SAFETY: values the list owned.
     unsafe {
         qjs::JS_FreeValue(cx, data.props);
+        qjs::JS_FreeValue(cx, data.source);
         qjs::JS_FreeValue(cx, data.node);
         for cell in data.cells.into_iter().flatten() {
             qjs::JS_FreeValue(cx, cell.node);
@@ -302,6 +305,7 @@ pub(crate) fn render(cx: *mut JsContext, props: JsValue) -> Result<JsValue, JsVa
     // SAFETY: dups the list owns.
     let data = Box::new(ListData {
         props: unsafe { qjs::JS_DupValue(cx, props) },
+        source: UNDEFINED,
         node: unsafe { qjs::JS_DupValue(cx, node) },
         owner: reactive::current_owner(cx),
         cells: Vec::new(),
@@ -317,11 +321,16 @@ pub(crate) fn render(cx: *mut JsContext, props: JsValue) -> Result<JsValue, JsVa
         e
     };
     // The items: tells the core how they changed (by identity: the common
-    // start and end stay), so measurements follow their items.
+    // start and end stay), so measurements follow their items. Cells read
+    // this memo, never the new source paired with their old index.
     let func = native(cx, splice_run, 1, &mut [node, props]);
-    let r = reactive::render_effect(cx, func);
-    // SAFETY: the effect keeps its own value.
-    unsafe { qjs::JS_FreeValue(cx, r) };
+    let source = reactive::memo(cx, func, false);
+    if let Some(data) = lists(cx).map.borrow_mut().get_mut(&id) {
+        data.source = source;
+    } else {
+        // SAFETY: the list was disposed while evaluating its source.
+        unsafe { qjs::JS_FreeValue(cx, source) };
+    }
     // The forwarded props, the estimated size, the end threshold and the
     // host props passed on.
     let rest = rest_names(cx, props).map_err(fail)?;
@@ -442,7 +451,44 @@ fn set(cx: *mut JsContext, node: JsValue, name: &str, value: JsValue) -> Result<
     r
 }
 
-/// A run of the items effect: the items set last in, the current out.
+/// Keeps the JS cells on the same items the core's splice retains. A
+/// removed cell holds its last item until the core reuses its slot.
+fn splice_indices(cx: *mut JsContext, list: NodeId, at: i64, removed: i64, inserted: i64) {
+    let count = lists(cx)
+        .map
+        .borrow()
+        .get(&list)
+        .map_or(0, |data| data.cells.len());
+    for slot in 0..count {
+        let index = lists(cx)
+            .map
+            .borrow()
+            .get(&list)
+            .and_then(|data| data.cells.get(slot))
+            .and_then(|cell| cell.as_ref().map(|cell| cell.index));
+        let Some(index) = index else { continue };
+        let Some(old) = reactive::peek_number(cx, index) else {
+            continue;
+        };
+        if old < at as f64 {
+            continue;
+        }
+        let old = old as i64;
+        let next = if old >= at + removed {
+            old - removed + inserted
+        } else if old < at + inserted {
+            // A replacement at this index still updates without a rebind.
+            old
+        } else {
+            -1
+        };
+        if next != old {
+            reactive::set_signal(cx, index, qjs::JS_NewFloat64(next as f64));
+        }
+    }
+}
+
+/// A run of the source memo: the items set last in, the current out.
 unsafe extern "C" fn splice_run(
     cx: *mut JsContext,
     _this: JsValue,
@@ -503,6 +549,13 @@ unsafe extern "C" fn splice_run(
                     qjs::JS_FreeValue(cx, next);
                     return e;
                 }
+                splice_indices(
+                    cx,
+                    dom::node_id(cx, node).expect("a list"),
+                    start,
+                    removed,
+                    inserted,
+                );
             }
         }
         if let Err(e) = set(cx, node, "count", qjs::JS_NewFloat64(next_len as f64)) {
@@ -843,15 +896,15 @@ pub(crate) fn bind(
 
 /// A new cell for `slot`, showing item `first`.
 fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<(), JsValue> {
-    let (props, list_node, owner) = {
+    let (props, source, list_node, owner) = {
         let map = lists(cx).map.borrow();
         let d = &map[&list];
-        (d.props, d.node, d.owner)
+        (d.props, d.source, d.node, d.owner)
     };
     let mut made = None;
     let (root, r) = reactive::with_root_under(cx, owner, || -> Result<(), JsValue> {
         let index = reactive::new_signal(cx, qjs::JS_NewFloat64(first as f64));
-        let item_fn = native(cx, item_run, 0, &mut [props, index]);
+        let item_fn = native(cx, item_run, 0, &mut [source, index]);
         let item = reactive::memo(cx, item_fn, false);
         let cell = dom::create_element(cx, Tag::Cell)?;
         made = Some((cell, index));
@@ -919,8 +972,8 @@ fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<
     r
 }
 
-/// A cell's item from `props.each`, or the last one past the end (the
-/// data shrank before the core unbound the cell).
+/// A cell's item from the reconciled source, or its last item while
+/// unbound (the data changed before the core reused the cell).
 unsafe extern "C" fn item_run(
     cx: *mut JsContext,
     _this: JsValue,
@@ -931,12 +984,17 @@ unsafe extern "C" fn item_run(
 ) -> JsValue {
     // SAFETY: two data values; values got are freed or returned.
     unsafe {
-        let (props, index) = (*data, *data.add(1));
+        let (source, index) = (*data, *data.add(1));
+        // Reading the source first reconciles this cell's index before
+        // the keyed child can observe the new items.
+        let each = qjs::JS_Call(cx, source, UNDEFINED, 0, ptr::null_mut());
+        if qjs::JS_IsException(each) {
+            return each;
+        }
         let i = qjs::JS_Call(cx, index, UNDEFINED, 0, ptr::null_mut());
         let mut n = 0f64;
         qjs::JS_ToFloat64(cx, &mut n, i);
         qjs::JS_FreeValue(cx, i);
-        let each = get(cx, props, "each");
         let len = match source_length(cx, each) {
             Ok(len) => len,
             Err(e) => {
