@@ -586,6 +586,45 @@ mod tests {
                 assert!(pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
             }
         }
+        if has_color_emoji {
+            for sample in ["©\u{fe0f}", "👩🏽‍💻", "1\u{fe0f}\u{20e3}"] {
+                let line = text.layout_line(
+                    sample,
+                    px(16.0),
+                    &[gpui::FontRun {
+                        len: sample.len(),
+                        font_id,
+                    }],
+                );
+                assert!(line.width > px(0.0), "{sample}");
+                assert!(!line.runs.is_empty(), "{sample}");
+                assert!(
+                    line.runs
+                        .iter()
+                        .flat_map(|run| &run.glyphs)
+                        .all(|glyph| glyph.id.0 != 0 && glyph.is_emoji),
+                    "the whole presentation cluster must use the color font: {sample}"
+                );
+            }
+        }
+        for sample in ["©", "©\u{fe0e}"] {
+            let line = text.layout_line(
+                sample,
+                px(16.0),
+                &[gpui::FontRun {
+                    len: sample.len(),
+                    font_id,
+                }],
+            );
+            assert!(line.width > px(0.0), "{sample}");
+            assert!(
+                line.runs
+                    .iter()
+                    .flat_map(|run| &run.glyphs)
+                    .all(|glyph| glyph.id.0 != 0 && !glyph.is_emoji),
+                "default text and explicit VS15 must retain the text font: {sample}"
+            );
+        }
         let presses = Rc::new(Cell::new(0));
         let pressed = presses.clone();
         let window = Rc::new(RefCell::new(None));
