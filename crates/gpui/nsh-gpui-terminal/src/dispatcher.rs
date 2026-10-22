@@ -49,7 +49,13 @@ impl Dispatcher {
             stopped: AtomicBool::new(false),
             wake,
         });
-        for index in 0..2 {
+        // Account for the foreground owner when sizing the shared executor.
+        let worker_count = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .max(1);
+        for index in 0..worker_count {
             let rx = rx.clone();
             let worker = thread::Builder::new()
                 .name(format!("nsh-gpui-background-{index}"))

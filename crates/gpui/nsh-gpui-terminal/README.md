@@ -10,8 +10,9 @@ repository, and `test-support` is not a production dependency.
 
 The host constructs `gpui_wgpu::WgpuHeadlessRenderer` and creates `TerminalPlatform`, uses `Application::with_platform` and
 `run_embedded`, and pumps foreground work when woken or a timer is due. One
-native window is supported. The platform keeps two background executor workers
-and at most 64 foreground jobs per pump. Frames are requested when dirty; there
+native window is supported. The shared background executor uses one fewer worker
+than the host's available parallelism, with at least one worker. The foreground
+pump runs at most 64 jobs. Frames are requested when dirty; there
 is no imposed 60 Hz timer. Drawing encodes and submits the scene on the native
 owner thread, then hands an owned GPU readback ticket to the host. The host's
 existing background executor waits for readback, copies RGBA pixels and encodes
