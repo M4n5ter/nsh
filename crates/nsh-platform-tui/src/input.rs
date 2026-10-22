@@ -1261,7 +1261,9 @@ impl Surface {
                 self.key_press(id, "Enter".into());
                 let submit = config.submit();
                 if config.multiline && (shift || alt || submit == SubmitBehavior::Newline) {
-                    self.edit_input(id, |editor, config| editor.replace("\n", config));
+                    self.edit_input(id, |editor, config| {
+                        editor.replace(nsh_core::text_edit::line_ending(editor.text()), config)
+                    });
                 } else {
                     if let Some(node) = self.node(id) {
                         let payload = EventPayload::Text {
