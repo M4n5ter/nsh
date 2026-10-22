@@ -143,6 +143,10 @@ import -window root -display :170 whole.png        # the display, if the window'
   focus cannot steal focus from a component. The native ancestor path scopes `nsh/keymap` bindings and is sent
   through the engine FIFO before events or environment changes; it is a nonreactive snapshot for
   `keymap.focusedWithin`. GPUI advertises this support in its initial and refreshed native environment.
+  Popovers and dialogs retain the actual native opener across replacement in a mount batch. A dialog can inherit
+  a retiring popover's return target, and a replacement popover inherits the closing dialog's target. The saved
+  view keeps its identity and caret while covered; returning focus checks its current lifetime and modal scope.
+  An outside focus change or explicit focus command keeps its chosen owner.
   This ordering covers NSH controls and their ordinary or sealed events. Foreign `NativeComponent` callbacks
   retain their original cross-thread `ComponentContext::emit` channel: their snapshot follows the actual GPUI
   component focus projection at prepaint, without a same-callback freshness guarantee.

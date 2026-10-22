@@ -2,6 +2,7 @@
 //! because the native overlay views are siblings in the surface or modal.
 //! Capture before a batch can run child autoFocus; reconcile its final
 //! tree, so moving an overlay is not a close followed by another opening.
+//! Modal return targets join that same chain when a batch replaces a scope.
 
 use std::rc::Rc;
 
@@ -11,10 +12,11 @@ use crate::{surface::Surface, view::NshView};
 
 #[derive(Default)]
 pub(crate) struct FocusReturns {
-    popups: Vec<Popup>,
+    popups: Vec<FocusScope>,
 }
 
-struct Popup {
+#[derive(Clone)]
+struct FocusScope {
     view: NshView,
     parent: NshView,
     restore: Option<NshView>,
@@ -23,6 +25,7 @@ struct Popup {
 pub(crate) struct BeforeBatch {
     focused: Option<NshView>,
     owner: Option<NshView>,
+    modals: Vec<FocusScope>,
 }
 
 fn focused(surface: &Surface) -> Option<NshView> {
@@ -56,10 +59,11 @@ fn candidate(item: &MountItem) -> Option<NodeId> {
 }
 
 fn eligible(surface: &Surface, view: &NshView) -> bool {
-    current(surface, view)
-        && crate::input::focusable(surface, view)
-        && !leaving(view)
-        && contains(&crate::navigation::focus_scope(surface), view)
+    returnable(surface, view) && contains(&crate::navigation::focus_scope(surface), view)
+}
+
+fn returnable(surface: &Surface, view: &NshView) -> bool {
+    current(surface, view) && crate::input::focusable(surface, view) && !leaving(view)
 }
 
 fn leaving(view: &NshView) -> bool {
@@ -91,7 +95,7 @@ fn popup_parent(surface: &Surface, view: &NshView) -> Option<NshView> {
     Some(parent)
 }
 
-fn owner<'a>(popups: &'a [Popup], view: &NshView) -> Option<&'a Popup> {
+fn owner<'a>(popups: &'a [FocusScope], view: &NshView) -> Option<&'a FocusScope> {
     let mut next = Some(view.clone());
     while let Some(view) = next {
         if let Some(popup) = popups.iter().find(|popup| popup.view == view) {
@@ -102,7 +106,7 @@ fn owner<'a>(popups: &'a [Popup], view: &NshView) -> Option<&'a Popup> {
     None
 }
 
-fn within(popups: &[Popup], parent: &NshView, view: &NshView) -> bool {
+fn within(popups: &[FocusScope], parent: &NshView, view: &NshView) -> bool {
     if contains(parent, view) {
         return true;
     }
@@ -118,9 +122,10 @@ fn within(popups: &[Popup], parent: &NshView, view: &NshView) -> bool {
 
 fn restore_target<'a>(
     surface: &Surface,
-    active: &[Popup],
-    closing: &'a [Popup],
-    mut returning: Option<&'a Popup>,
+    active: &[FocusScope],
+    closing: &'a [FocusScope],
+    mut returning: Option<&'a FocusScope>,
+    can_return: impl Fn(&Surface, &NshView) -> bool,
 ) -> Option<NshView> {
     while let Some(popup) = returning {
         if let Some(target) = &popup.restore {
@@ -128,7 +133,7 @@ fn restore_target<'a>(
                 returning = Some(parent);
                 continue;
             }
-            if eligible(surface, target) {
+            if can_return(surface, target) {
                 return Some(target.clone());
             }
         }
@@ -138,7 +143,7 @@ fn restore_target<'a>(
         if returning.is_none()
             && active.iter().any(|parent| parent.view == popup.parent)
             && let Some(target) = crate::input::first_focus_stop(surface, &popup.parent)
-            && eligible(surface, &target)
+            && can_return(surface, &target)
         {
             return Some(target);
         }
@@ -169,14 +174,52 @@ impl FocusReturns {
         }
         self.popups = retained;
 
+        let modals = crate::navigation::focus_returns(surface);
+        let mut active = self.popups.clone();
+        for modal in &before.modals {
+            if modals.iter().any(|(view, _)| *view == modal.view) {
+                active.push(modal.clone());
+            } else {
+                closing.push(modal.clone());
+            }
+        }
+
         let previous_owner = before
             .owner
             .as_ref()
             .and_then(|view| closing.iter().find(|popup| popup.view == *view));
         let restore = match previous_owner {
-            Some(owner) => restore_target(surface, &self.popups, &closing, Some(owner)),
+            // A new modal may cover this target. Inherit the live owner
+            // now; its modal scope only decides when focus can return.
+            Some(owner) => restore_target(surface, &active, &closing, Some(owner), returnable),
             None => before.focused.clone(),
         };
+
+        let blurred = batch.items.iter().rev().find_map(|item| match item {
+            MountItem::Command {
+                command: Command::Blur,
+                ..
+            } => Some(true),
+            MountItem::Command {
+                command: Command::Focus,
+                ..
+            } => Some(false),
+            _ => None,
+        }) == Some(true);
+        for (view, target) in modals {
+            let target = match before.modals.iter().find(|modal| modal.view == view) {
+                Some(modal) => restore_target(surface, &active, &closing, Some(modal), returnable),
+                None if target
+                    .as_ref()
+                    .is_some_and(|target| returnable(surface, target)) =>
+                {
+                    target
+                }
+                None if !blurred => restore.clone().filter(|target| !contains(&view, target)),
+                None => None,
+            };
+            crate::navigation::set_focus_return(surface, &view, target);
+        }
 
         let mut opened = Vec::new();
         for item in &batch.items {
@@ -189,7 +232,7 @@ impl FocusReturns {
             let Some(parent) = popup_parent(surface, &view) else {
                 continue;
             };
-            self.popups.push(Popup {
+            self.popups.push(FocusScope {
                 view: view.clone(),
                 parent,
                 restore: restore.clone().filter(|target| !contains(&view, target)),
@@ -222,15 +265,6 @@ impl FocusReturns {
                     crate::input::first_focus_stop(surface, &self.popups[index].parent);
             }
         }
-        let blurred = batch.items.iter().any(|item| {
-            matches!(
-                item,
-                MountItem::Command {
-                    command: Command::Blur,
-                    ..
-                }
-            )
-        });
         let explicit = blurred
             || batch.items.iter().any(|item| {
                 matches!(
@@ -269,7 +303,7 @@ impl FocusReturns {
             Some(view) => owner(&closing, view),
             None => previous_owner,
         };
-        restore_target(surface, &self.popups, &closing, returning)
+        restore_target(surface, &self.popups, &closing, returning, eligible)
     }
 }
 
@@ -280,10 +314,18 @@ pub(crate) fn before_batch(surface: &Surface, batch: &MountBatch) -> Option<Befo
     let state = surface.focus_returns.borrow();
     if !batch.items.iter().any(|item| {
         matches!(item, MountItem::ViewProps { props, .. } if props.focus_return_parent.is_some())
+            || matches!(
+                item,
+                MountItem::Create {
+                    kind: ViewKind::Modal,
+                    ..
+                }
+            )
             || candidate(item)
                 .and_then(|id| surface.view(id))
                 .is_some_and(|view| {
-                    view.state().props.focus_return_parent.is_some()
+                    view.kind() == ViewKind::Modal
+                        || view.state().props.focus_return_parent.is_some()
                         || state
                             .popups
                             .iter()
@@ -292,10 +334,11 @@ pub(crate) fn before_batch(surface: &Surface, batch: &MountBatch) -> Option<Befo
             || match item {
                 MountItem::Remove { id } | MountItem::Delete { id } => {
                     surface.view(*id).is_some_and(|view| {
-                        state
-                            .popups
-                            .iter()
-                            .any(|popup| contains(&view, &popup.view))
+                        view.kind() == ViewKind::Modal
+                            || state
+                                .popups
+                                .iter()
+                                .any(|popup| contains(&view, &popup.view))
                     })
                 }
                 _ => false,
@@ -303,12 +346,29 @@ pub(crate) fn before_batch(surface: &Surface, batch: &MountBatch) -> Option<Befo
     }) {
         return None;
     }
+    let mut modals = Vec::new();
+    for (view, restore) in crate::navigation::focus_returns(surface) {
+        let parent = restore
+            .as_ref()
+            .and_then(|target| owner(&state.popups, target).or_else(|| owner(&modals, target)))
+            .map(|scope| scope.view.clone())
+            .unwrap_or_else(|| surface.root.clone());
+        modals.push(FocusScope {
+            view,
+            parent,
+            restore,
+        });
+    }
     let focused = focused(surface);
     let owner = focused
         .as_ref()
-        .and_then(|view| owner(&state.popups, view))
+        .and_then(|view| owner(&state.popups, view).or_else(|| owner(&modals, view)))
         .map(|popup| popup.view.clone());
-    Some(BeforeBatch { focused, owner })
+    Some(BeforeBatch {
+        focused,
+        owner,
+        modals,
+    })
 }
 
 pub(crate) fn after_batch(surface: &Rc<Surface>, batch: &MountBatch, before: Option<BeforeBatch>) {
@@ -322,11 +382,30 @@ pub(crate) fn after_batch(surface: &Rc<Surface>, batch: &MountBatch, before: Opt
     }
 }
 
+/// A successful explicit blur also cancels the immediate return of a
+/// modal removed later in this batch. Capture still keeps its old chain
+/// for a later explicit focus command or replacement scope.
+pub(crate) fn after_blur(surface: &Surface, batch: &MountBatch) {
+    if focused(surface).is_some() {
+        return;
+    }
+    for (view, _) in crate::navigation::focus_returns(surface) {
+        if batch.items.iter().any(|item| match item {
+            MountItem::Remove { id } | MountItem::Delete { id } => surface
+                .view(*id)
+                .is_some_and(|removed| contains(&removed, &view)),
+            _ => false,
+        }) {
+            crate::navigation::set_focus_return(surface, &view, None);
+        }
+    }
+}
+
 /// Tab follows the popup that currently owns native focus. Pointer hit
 /// testing and explicit focus outside it remain unrestricted.
 pub(crate) fn scope(surface: &Surface) -> Option<NshView> {
     let state = surface.focus_returns.borrow();
-    let active = |popup: &&Popup| {
+    let active = |popup: &&FocusScope| {
         popup_parent(surface, &popup.view).as_ref() == Some(&popup.parent)
             && contains(&crate::navigation::focus_scope(surface), &popup.view)
     };

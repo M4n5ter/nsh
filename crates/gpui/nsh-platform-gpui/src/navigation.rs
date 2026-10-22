@@ -1314,6 +1314,30 @@ pub(crate) fn focus_scope(surface: &Surface) -> NshView {
     surface.nav.borrow().focus_scope(surface)
 }
 
+/// The presented modals' return owners, captured before a mount batch can
+/// remove a popup or modal they opened from.
+pub(crate) fn focus_returns(surface: &Surface) -> Vec<(NshView, Option<NshView>)> {
+    let nav = surface.nav.borrow();
+    nav.order
+        .iter()
+        .filter_map(|id| {
+            let modal = nav.modals.get(id)?;
+            Some((modal.view.clone()?, modal.restore.clone()))
+        })
+        .collect()
+}
+
+/// Inherit a retiring scope's surviving owner. Native modal dismissal
+/// still consumes this same return target, including outside mount batches.
+pub(crate) fn set_focus_return(surface: &Surface, view: &NshView, target: Option<NshView>) {
+    let mut nav = surface.nav.borrow_mut();
+    if let Some(modal) = nav.modals.get_mut(&view.id())
+        && modal.view.as_ref() == Some(view)
+    {
+        modal.restore = target;
+    }
+}
+
 /// A modal was removed: dismiss it.
 pub(crate) fn dismiss(surface: &Rc<Surface>, view: &NshView) {
     let mut nav = surface.nav.borrow_mut();

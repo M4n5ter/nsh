@@ -182,7 +182,7 @@ impl Surface {
         depth
     }
 
-    fn navigation_attached(&self, id: NodeId) -> bool {
+    pub(crate) fn navigation_attached(&self, id: NodeId) -> bool {
         let mut current = Some(id);
         while let Some(id) = current {
             if id == nsh_core::ROOT_ID {

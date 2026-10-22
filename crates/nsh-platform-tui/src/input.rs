@@ -20,10 +20,18 @@ use crate::surface::{Surface, SurfaceEvent};
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FocusTarget(NodeId, u64);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FocusScopeKind {
+    Popup,
+    Modal,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct FocusReturn {
     scope: FocusTarget,
     parent: FocusTarget,
     opener: Option<FocusTarget>,
+    kind: FocusScopeKind,
 }
 
 pub(crate) struct FocusReturnBatch {
@@ -31,6 +39,7 @@ pub(crate) struct FocusReturnBatch {
     owner: Option<FocusTarget>,
     candidates: Vec<NodeId>,
     explicit_focus: bool,
+    blurred: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +144,34 @@ impl Surface {
         })
     }
 
+    fn returnable_focus(&self, target: FocusTarget, shown: &[NodeId]) -> bool {
+        self.focus_target(target.0) == Some(target)
+            && shown.contains(&target.0)
+            && !self.is_dying(target.0)
+            && self.navigation_accepts(target.0)
+            && self.focusable(target.0)
+    }
+
+    /// Follow captured scope owners even after their controls were deleted.
+    /// The paint tree keeps a covered opener alive; the input scope decides
+    /// separately when focus can actually return to it.
+    fn inherited_focus(
+        &self,
+        scopes: &[FocusReturn],
+        mut owner: FocusTarget,
+        shown: &[NodeId],
+    ) -> Option<FocusTarget> {
+        while let Some(scope) = scopes.iter().find(|scope| scope.scope == owner) {
+            if let Some(opener) = scope.opener
+                && self.returnable_focus(opener, shown)
+            {
+                return Some(opener);
+            }
+            owner = scope.parent;
+        }
+        None
+    }
+
     /// Capture before a batch can autofocus a child or delete its owner.
     pub(crate) fn prepare_focus_return(
         &self,
@@ -143,23 +180,38 @@ impl Surface {
         use nsh_core::{Command, MountItem};
         let mut candidates = Vec::new();
         let mut explicit_focus = false;
+        let mut blurred = false;
         let mut changed = false;
         for item in &batch.items {
             match item {
+                MountItem::Create {
+                    id,
+                    kind: ViewKind::Modal,
+                } => candidates.push(*id),
                 MountItem::ViewProps { id, props } if props.focus_return_parent.is_some() => {
                     candidates.push(*id);
                 }
                 MountItem::Insert { child, .. } | MountItem::ViewStyle { id: child, .. }
-                    if self
-                        .node(*child)
-                        .is_some_and(|n| n.props.focus_return_parent.is_some()) =>
+                    if self.node(*child).is_some_and(|n| {
+                        n.kind == ViewKind::Modal || n.props.focus_return_parent.is_some()
+                    }) =>
                 {
                     candidates.push(*child);
                 }
                 MountItem::Command {
                     command: Command::Focus | Command::AccessibilityFocus,
                     ..
-                } => explicit_focus = true,
+                } => {
+                    explicit_focus = true;
+                    blurred = false;
+                }
+                MountItem::Command {
+                    command: Command::Blur,
+                    ..
+                } => {
+                    explicit_focus = true;
+                    blurred = true;
+                }
                 _ => {}
             }
             let changed_id = match item {
@@ -189,10 +241,11 @@ impl Surface {
             owner: self.current_popup_owner().map(|scope| scope.scope),
             candidates,
             explicit_focus,
+            blurred,
         })
     }
 
-    /// Only popup records participate: streamed content does not walk the
+    /// Only scope records participate: streamed content does not walk the
     /// whole surface to rediscover its scopes on every mount batch.
     pub(crate) fn reconcile_focus_return(
         &mut self,
@@ -205,27 +258,38 @@ impl Surface {
         // A modal covers background popups without ending their lifetime.
         let shown = self.paint_ids();
         let old = std::mem::take(&mut self.focus_returns);
+        let blurred = batch.blurred && self.focus.is_none();
         let active = |scope: &FocusReturn| {
             self.focus_target(scope.scope.0) == Some(scope.scope)
                 && shown.contains(&scope.scope.0)
-                && !self.is_dying(scope.scope.0)
-                && self.navigation_accepts(scope.scope.0)
-                && self.focus_target(scope.parent.0) == Some(scope.parent)
-                && self
-                    .node(scope.scope.0)
-                    .is_some_and(|n| n.props.focus_return_parent == Some(scope.parent.0))
+                && (scope.kind == FocusScopeKind::Modal
+                    || (!self.is_dying(scope.scope.0)
+                        && self.navigation_accepts(scope.scope.0)
+                        && self.focus_target(scope.parent.0) == Some(scope.parent)
+                        && self
+                            .node(scope.scope.0)
+                            .is_some_and(|n| n.props.focus_return_parent == Some(scope.parent.0))))
         };
         let mut retained = old
             .iter()
             .filter(|scope| active(scope))
-            .map(|scope| FocusReturn {
-                scope: scope.scope,
-                parent: scope.parent,
-                opener: scope.opener,
+            .map(|scope| {
+                let mut next = *scope;
+                if scope.kind == FocusScopeKind::Modal {
+                    if blurred && !self.navigation_accepts(scope.scope.0) {
+                        // An explicit blur also cancels a retiring modal's
+                        // later return after its animation completes.
+                        next.opener = None;
+                        next.parent = self.focus_target(ROOT_ID).unwrap();
+                    } else {
+                        next.opener = self.inherited_focus(&old, scope.scope, &shown);
+                    }
+                }
+                next
             })
             .collect::<Vec<_>>();
         let current = self.current_focus_target();
-        if current == batch.focus || current.is_none() {
+        if !blurred && (current == batch.focus || current.is_none()) {
             let mut owner = batch.owner;
             while let Some(target) = owner {
                 let Some(scope) = old.iter().find(|scope| scope.scope == target) else {
@@ -255,11 +319,15 @@ impl Surface {
                 owner = Some(scope.parent);
             }
         }
-        let opener = if batch
+        let opener = if blurred {
+            None
+        } else if batch
             .owner
             .is_some_and(|owner| !retained.iter().any(|scope| scope.scope == owner))
         {
-            self.current_focus_target()
+            batch
+                .owner
+                .and_then(|owner| self.inherited_focus(&old, owner, &shown))
         } else {
             batch.focus
         };
@@ -284,13 +352,23 @@ impl Surface {
             if retained.iter().any(|record| record.scope == scope) {
                 continue;
             }
-            let Some(parent) = self
-                .node(id)
-                .and_then(|n| n.props.focus_return_parent)
-                .and_then(|id| self.focus_target(id))
-            else {
-                continue;
+            let (kind, parent) = match self.node(id) {
+                Some(node) if node.kind == ViewKind::Modal => (
+                    FocusScopeKind::Modal,
+                    batch
+                        .owner
+                        .filter(|_| !blurred)
+                        .or_else(|| self.focus_target(ROOT_ID)),
+                ),
+                Some(node) => (
+                    FocusScopeKind::Popup,
+                    node.props
+                        .focus_return_parent
+                        .and_then(|id| self.focus_target(id)),
+                ),
+                None => continue,
             };
+            let Some(parent) = parent else { continue };
             let opener = if opened.contains(&parent.0) {
                 self.fresh_autofocus(parent.0, &visible)
                     .or_else(|| self.popup_focus_target(parent))
@@ -298,10 +376,7 @@ impl Surface {
             } else {
                 opener
                     .filter(|target| {
-                        self.focus_target(target.0) == Some(*target)
-                            && visible.contains(&target.0)
-                            && self.focusable(target.0)
-                            && !self.within_popup(target.0, id)
+                        self.returnable_focus(*target, &shown) && !self.within_popup(target.0, id)
                     })
                     .or_else(|| {
                         // A screen and its popup can mount in one batch. Its
@@ -311,16 +386,18 @@ impl Surface {
                         self.fresh_autofocus(parent.0, &visible)
                             .and_then(|id| self.focus_target(id))
                     })
-            };
+            }
+            .filter(|target| !self.within_popup(target.0, id));
             retained.push(FocusReturn {
                 scope,
                 parent,
                 opener,
+                kind,
             });
             opened.push(id);
         }
         self.focus_returns = retained;
-        if batch.explicit_focus && self.focus.is_some() {
+        if batch.explicit_focus && (self.focus.is_some() || blurred) {
             // Core sends explicit commands after the input configurations.
             // Their chosen owner wins over a just-mounted input's autoFocus.
             for id in &visible {
@@ -330,6 +407,12 @@ impl Surface {
                     && !self.autofocus_seen.contains(id)
                 {
                     self.autofocus_seen.push(*id);
+                }
+            }
+            if blurred {
+                self.focus_history.clear();
+                if !self.autofocus_seen.contains(&ROOT_ID) {
+                    self.autofocus_seen.push(ROOT_ID);
                 }
             }
             opened.clear();
@@ -610,6 +693,34 @@ impl Surface {
             }
             self.set_focus(None);
         }
+        // Animated modals retain their return scope while they paint out.
+        // Consume it when navigation finishes, even though their focused
+        // control became ineligible at the start of the animation.
+        let retired_modals = self
+            .focus_returns
+            .iter()
+            .filter(|scope| {
+                scope.kind == FocusScopeKind::Modal
+                    && (self.focus_target(scope.scope.0) != Some(scope.scope)
+                        || !(self.navigation_retains(scope.scope.0)
+                            || (self.navigation_attached(scope.scope.0)
+                                && self.navigation_accepts(scope.scope.0))))
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if self.focus.is_none()
+            && let Some(target) = retired_modals
+                .iter()
+                .rev()
+                .find_map(|scope| self.inherited_focus(&self.focus_returns, scope.scope, &visible))
+        {
+            self.set_focus(Some(target.0));
+        }
+        self.focus_returns.retain(|scope| {
+            !retired_modals
+                .iter()
+                .any(|retired| retired.scope == scope.scope)
+        });
         self.autofocus_seen.retain(|id| {
             *id == ROOT_ID || self.nodes.get(*id as usize).is_some_and(Option::is_some)
         });
@@ -2925,6 +3036,167 @@ mod tests {
             }),
         });
         items
+    }
+
+    fn modal_focus_return(id: NodeId, field: NodeId) -> Vec<nsh_core::MountItem> {
+        use nsh_core::{Command, InputConfig, ModalAnimation, ModalConfig, MountItem};
+        let mut items = create(id, ViewKind::Modal, ROOT_ID, 0.0);
+        items.push(MountItem::ModalConfig {
+            id,
+            config: ModalConfig {
+                animation: ModalAnimation::None,
+                ..Default::default()
+            },
+        });
+        items.extend(create(field, ViewKind::Input, id, 0.0));
+        items.push(MountItem::Input {
+            id: field,
+            config: Box::new(InputConfig {
+                auto_focus: true,
+                ..Default::default()
+            }),
+        });
+        items.push(MountItem::Command {
+            id: field,
+            command: Command::Focus,
+        });
+        items
+    }
+
+    #[test]
+    fn replacing_popups_and_modals_keeps_the_original_opener_and_caret() {
+        use nsh_core::{MountBatch, MountItem};
+        for back in [false, true] {
+            for insert_first in [false, true] {
+                let mut surface = form();
+                let original = surface.node(2).unwrap().generation;
+                surface.input_value(2, "abcdef".into(), 0);
+                surface.selection(2, 3, 3);
+                let mut items = vec![MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: 4,
+                    before: Some(2),
+                }];
+                items.extend(popup(6, 8, ROOT_ID, false));
+                surface.apply(MountBatch { items });
+                assert_eq!(surface.focused(), Some(8));
+
+                let remove = vec![MountItem::Delete { id: 8 }, MountItem::Delete { id: 6 }];
+                let modal = modal_focus_return(10, 12);
+                let items = if insert_first {
+                    modal.into_iter().chain(remove).collect()
+                } else {
+                    remove.into_iter().chain(modal).collect()
+                };
+                surface.apply(MountBatch { items });
+                assert_eq!(surface.focused(), Some(12));
+                surface.focus_history.clear();
+
+                let remove = vec![MountItem::Delete { id: 12 }, MountItem::Delete { id: 10 }];
+                if back {
+                    let popup = popup(14, 16, ROOT_ID, false);
+                    let items = if insert_first {
+                        popup.into_iter().chain(remove).collect()
+                    } else {
+                        remove.into_iter().chain(popup).collect()
+                    };
+                    surface.apply(MountBatch { items });
+                    assert_eq!(surface.focused(), Some(16));
+                    surface.focus_history.clear();
+                    surface.apply(MountBatch {
+                        items: vec![MountItem::Delete { id: 16 }, MountItem::Delete { id: 14 }],
+                    });
+                } else {
+                    surface.apply(MountBatch { items: remove });
+                }
+                assert_eq!(surface.focused(), Some(2));
+                assert_eq!(surface.node(2).unwrap().generation, original);
+                assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
+                key(&mut surface, KeyCode::Char('x'), KeyModifiers::NONE);
+                assert_eq!(surface.node(2).unwrap().editor.text(), "abcxdef");
+            }
+        }
+    }
+
+    #[test]
+    fn a_modal_inherits_a_removed_popup_owner_until_its_native_exit_finishes() {
+        use nsh_core::{ModalAnimation, ModalConfig, MountBatch, MountItem};
+        for animation in [ModalAnimation::None, ModalAnimation::Fade] {
+            let mut surface = form();
+            surface.input_value(2, "abcdef".into(), 0);
+            surface.selection(2, 3, 3);
+            surface.apply(MountBatch {
+                items: popup(6, 8, ROOT_ID, false),
+            });
+            let mut items = modal_focus_return(10, 12);
+            items.push(MountItem::ModalConfig {
+                id: 10,
+                config: ModalConfig {
+                    animation,
+                    ..Default::default()
+                },
+            });
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(12));
+            surface.tick(1.0);
+            surface.apply(MountBatch {
+                items: vec![MountItem::Delete { id: 8 }, MountItem::Delete { id: 6 }],
+            });
+            assert_eq!(surface.focused(), Some(12));
+            surface.focus_history.clear();
+            // Native Back consumes the same scope as an app's removal.
+            surface.apply(MountBatch {
+                items: vec![MountItem::Command {
+                    id: ROOT_ID,
+                    command: nsh_core::Command::Back,
+                }],
+            });
+            surface.focus_history.clear();
+            surface.tick(2.0);
+            assert_eq!(surface.focused(), Some(2));
+            assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
+            key(&mut surface, KeyCode::Char('x'), KeyModifiers::NONE);
+            assert_eq!(surface.node(2).unwrap().editor.text(), "abcxdef");
+        }
+    }
+
+    #[test]
+    fn closing_a_replacement_modal_keeps_an_explicit_blur() {
+        use nsh_core::{Command, ModalAnimation, ModalConfig, MountBatch, MountItem};
+        for animation in [ModalAnimation::None, ModalAnimation::Fade] {
+            for blur_first in [false, true] {
+                let mut surface = form();
+                surface.apply(MountBatch {
+                    items: popup(6, 8, ROOT_ID, false),
+                });
+                let mut items = vec![MountItem::Delete { id: 8 }, MountItem::Delete { id: 6 }];
+                items.extend(modal_focus_return(10, 12));
+                items.push(MountItem::ModalConfig {
+                    id: 10,
+                    config: ModalConfig {
+                        animation,
+                        ..Default::default()
+                    },
+                });
+                surface.apply(MountBatch { items });
+                assert_eq!(surface.focused(), Some(12));
+                surface.tick(1.0);
+                let blur = MountItem::Command {
+                    id: 12,
+                    command: Command::Blur,
+                };
+                let mut items = vec![MountItem::Delete { id: 12 }, MountItem::Delete { id: 10 }];
+                if blur_first {
+                    items.insert(0, blur);
+                } else {
+                    items.push(blur);
+                }
+                surface.apply(MountBatch { items });
+                assert_eq!(surface.focused(), None);
+                surface.tick(2.0);
+                assert_eq!(surface.focused(), None);
+            }
+        }
     }
 
     #[test]
