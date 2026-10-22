@@ -1,15 +1,15 @@
 ---
 title: nsh
-description: "The core module: signals, computed values, effects, context, mount and the element and style types."
+description: "The core module: signals, computed values, effects, context, mount, design tokens and the element and style types."
 order: 2
 ---
 
 # nsh
 
-`nsh` is the core module: the reactive API (signals, computed values, effects, context), `mount`, the host elements `View`, `Text`, `Scroll` and `Input`, and the TypeScript types of elements, styles and events. The reactive graph itself runs natively in Rust; reading a signal is a call into the runtime that costs a few nanoseconds, and only your own closures run in the JavaScript interpreter.
+`nsh` is the core module: the reactive API (signals, computed values, effects, context), `mount`, `token`, the host elements `View`, `Text`, `Scroll`, `Input` and `Overlay`, and the TypeScript types of elements, styles and events. The reactive graph itself runs natively in Rust; reading a signal is a call into the runtime that costs a few nanoseconds, and only your own closures run in the JavaScript interpreter.
 
 ```ts
-import { batch, cleanup, computed, context, effect, Input, mount, Scroll, signal, split, Text, untracked, View } from "nsh";
+import { batch, cleanup, computed, context, effect, Input, mount, Overlay, Scroll, signal, split, Text, token, untracked, View } from "nsh";
 ```
 
 NSH's reactivity follows the same model as SolidJS: a component function runs **once**, and the parts of the UI that read signals are updated in place when those signals change. There is no re-render of the component and no virtual DOM. See [Reactivity](../docs/reactivity.md) for the guide.
@@ -142,6 +142,34 @@ function Clock() {
 }
 ```
 
+## inputAction
+
+```ts
+function inputAction<A>(handler: (args: A) => unknown, args: A): () => void;
+```
+
+Captures JSON-compatible `args` and returns a callback that calls `handler` with that snapshot as its only
+argument. Pass the second argument explicitly; use `null` or `[]` for an action with no arguments. Capture
+evaluates getters and Proxy traps, copies the JSON value and deeply freezes its objects and arrays. It accepts
+up to 64 levels, 1,048,576 entries and 8 MiB of canonical UTF-8 JSON. Incoming event arguments and the handler's
+return value are ignored.
+
+```tsx
+import { inputAction, signal, Text } from "nsh";
+
+const selected = signal("");
+
+function Row(props: { id: string }) {
+  const choose = ({ id }: { id: string }) => selected.set(id);
+  return <Text onPress={inputAction(choose, { id: props.id })}>{props.id}</Text>;
+}
+```
+
+Choose the action and its target from captured arguments. Applications and host services may check current
+business state to reject stale work while keeping the captured target and arguments unchanged. Event handlers
+follow ordinary native input dispatch against the current UI. Argument capture does not prove which rendered
+frame the user saw or grant service authority.
+
 ## context
 
 ```ts
@@ -215,21 +243,42 @@ function LabeledInput(props: InputProps & { label: string }) {
 }
 ```
 
-## View, Text, Scroll, Input
+## token
+
+```ts
+function token<K extends keyof Tokens>(name: K): Tokens[K];
+```
+
+The design token `name` of the app's theme (`"theme"` in `nsh.json`, over shadcn/ui's tokens) in the appearance shown:
+a color as `#rrggbbaa`, a length as a number of points, a font as its family name. Names are the theme's CSS variables
+without `--` (`primary`, `muted-foreground`, `radius`, `font-mono`, and the app's own, such as `up`). Reading it is
+reactive: a component, memo or effect that reads a token runs again when the theme or the appearance changes.
+`Tokens` lists the app's tokens with their types; NSH writes it into `.nsh/types/nsh/tokens.d.ts` from the theme. For
+classes, name the tokens directly (`bg-primary`, `rounded-(--radius)`): [Theme tokens](../docs/tailwind.md#theme-tokens).
+
+```tsx
+import { effect, token } from "nsh";
+
+effect(() => console.log("primary is", token("primary"), "radius", token("radius")));
+```
+
+## View, Text, Scroll, Input, Overlay
 
 ```ts
 function View(props: ViewProps): YNode;
 function Text(props: TextProps): YNode;
 function Scroll(props: ScrollProps): YNode;
 function Input(props: InputProps): YNode;
+function Overlay(props: OverlayProps): YNode;
 ```
 
-The host elements `nsh` exports, written as tags: `<View>`, `<Text>`, `<Scroll>`, `<Input>`. The compiler makes the
+The host elements `nsh` exports, written as tags: `<View>`, `<Text>`, `<Scroll>`, `<Input>`, `<Overlay>` (its
+children on top of the window, placed against an anchor: [Overlay](../elements/overlay.md)). The compiler makes the
 native view in place for a tag that names one of them through its import (an alias too), so importing them costs
 nothing at run time. They are components like any other, so they can also be passed around (`const Tag = inline ? Text : View`).
-The other elements come from their own modules: `Image` from [`nsh/image`](./nsh-image.md), `List` from
-[`nsh/list`](./nsh-list.md), `Canvas`, `WebView` and `Video` from theirs. Their props are documented under
-[Elements](../elements/index.md).
+`nsh` exports the other primitives the same way: [`List`](./nsh-list.md), [`Image`](./nsh-image.md),
+[`Canvas`](./nsh-canvas.md), [`WebView`](./nsh-webview.md) and [`Video`](./nsh-video.md), each with its own reference
+page. Their props are documented under [Elements](../elements/index.md).
 
 ## Types
 
@@ -247,8 +296,9 @@ The other elements come from their own modules: `Image` from [`nsh/image`](./nsh
 | `ViewProps`, `TextProps`, `ImageProps`, `ScrollProps`, `InputProps`, `CommonProps`, `TouchProps` | Props of host elements |
 | `ViewStyle`, `TextStyle`, `ImageStyle`, `LayoutStyle`, `StyleProp<T>` | Style objects; see the [style reference](./style-reference.md) |
 | `ColorValue`, `DimensionValue`, `LengthValue`, `TransformStep` | Values inside styles |
-| `GestureResponderEvent`, `LayoutEvent`, `ScrollEvent`, `PanEvent`, `TouchPoint` | Event payloads |
-| `ImageAsset` | What importing an image file gives (`{ uri, width, height }`) |
+| `GestureResponderEvent`, `HoverEvent`, `ContextMenuEvent`, `ScrollEvent`, `PanEvent`, `TouchPoint` | Event payloads |
+| `Point`, `Size`, `Bounds`, `Edges`, `Modifiers` | The shapes payloads and props are made of, with GPUI's fields (`nsh_core::geometry`) |
+| `ImageAsset` | What importing an image file gives (`{ url, size: Size, scales? }`; `scales` lists its [pixel-density variants](../docs/images-and-assets.md#pixel-densities)) |
 | `OS` | `"ios" \| "android" \| "macos" \| "windows" \| "linux" \| "web"` |
 | `AccessibilityRole`, `AccessibilityState` | Accessibility props |
 

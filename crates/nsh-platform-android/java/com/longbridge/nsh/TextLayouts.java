@@ -135,13 +135,15 @@ final class TextLayouts {
     }
 
     // Span ints: start, end, weight, flags, color, decoration color, family,
-    // font variant bits, decoration style. Floats: size, line height, letter
-    // spacing, decoration thickness, underline offset.
-    private static final int SPAN_INTS = 9;
-    private static final int SPAN_FLOATS = 5;
+    // font variant bits, decoration style, background color, background
+    // node. Floats: size, line height, letter spacing, decoration thickness,
+    // underline offset, background radius.
+    private static final int SPAN_INTS = 11;
+    private static final int SPAN_FLOATS = 6;
     private static final int ITALIC = 1;
     private static final int UNDERLINE = 2;
     private static final int STRIKE = 4;
+    private static final int BACKGROUND = 16;
 
     static final class Prepared {
         final CharSequence text;
@@ -244,6 +246,11 @@ final class TextLayouts {
             paint.setShadowLayer(Math.max(0.01f, shadowRadius * density), shadowDx * density, shadowDy * density, shadowColor);
         }
         int spans = ints.length / SPAN_INTS;
+        // The span background being extended over neighboring runs.
+        Background background = null;
+        int backgroundStart = 0, backgroundEnd = 0;
+        android.graphics.Paint.FontMetrics metrics = new android.graphics.Paint.FontMetrics();
+        TextPaint measure = new TextPaint();
         for (int i = 0; i < spans; i++) {
             int o = i * SPAN_INTS;
             int start = ints[o], end = Math.min(ints[o + 1], text.length());
@@ -272,14 +279,30 @@ final class TextLayouts {
                 s.setSpan(new Decoration((flags & UNDERLINE) != 0, (flags & STRIKE) != 0, ints[o + 5], size,
                         ints[o + 8], thickness, offset), start, end, f);
             }
+            if ((flags & BACKGROUND) != 0) {
+                measure.setTypeface(typeface);
+                measure.setTextSize(size);
+                measure.getFontMetrics(metrics);
+                float radius = floats[i * SPAN_FLOATS + 5] * density;
+                if (background != null && background.same(ints[o + 9], ints[o + 10], radius) && backgroundEnd == start) {
+                    background.ascentPx = Math.max(background.ascentPx, -metrics.ascent);
+                    background.descentPx = Math.max(background.descentPx, metrics.descent);
+                } else {
+                    if (background != null) s.setSpan(background, backgroundStart, backgroundEnd, f);
+                    background = new Background(ints[o + 9], ints[o + 10], radius, -metrics.ascent, metrics.descent);
+                    backgroundStart = start;
+                }
+                backgroundEnd = end;
+            }
         }
-        // Attachments (offset, width, height in dp): placeholders of their
-        // size on the baseline.
-        for (int i = 0; i + 2 < attachments.length; i += 3) {
+        if (background != null) s.setSpan(background, backgroundStart, backgroundEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        // Attachments (offset, width, height in dp, vertical alignment):
+        // placeholders of their size, placed in their line.
+        for (int i = 0; i + 3 < attachments.length; i += 4) {
             int at = (int) attachments[i];
             if (at < 0 || at >= text.length()) continue;
-            s.setSpan(new Attachment(Math.round(attachments[i + 1] * density), Math.round(attachments[i + 2] * density)),
-                    at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            s.setSpan(new Attachment(Math.round(attachments[i + 1] * density), Math.round(attachments[i + 2] * density),
+                    (int) attachments[i + 3]), at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         // `encode` packs the writing direction and the layout direction in.
         int writing = (align >> 4) & 3;
@@ -431,28 +454,56 @@ final class TextLayouts {
             // Right to left, the placeholder extends left of its offset.
             if (l.isRtlCharAt(at)) x -= a.width;
             out[i * 2] = x / density;
-            out[i * 2 + 1] = (l.getLineBaseline(line) - a.height) / density;
+            out[i * 2 + 1] = (l.getLineBaseline(line) - a.ascent) / density;
         }
         return out;
     }
 
-    /** An attachment's placeholder: its size, all above the baseline; draws nothing. */
+    /**
+     * An attachment's placeholder: its size, placed in its line by its
+     * `verticalAlign` (as `TextAttachment::ascent` in nsh-core places it, with
+     * the run's font metrics); the line grows to hold it. Draws nothing.
+     */
     static final class Attachment extends android.text.style.ReplacementSpan {
-        final int width, height;
+        /** `verticalAlign`: on the baseline, at the font's top, at its bottom, in the middle. */
+        static final int BASELINE = 0, TEXT_TOP = 1, TEXT_BOTTOM = 2, MIDDLE = 3;
+        final int width, height, align;
+        /** How far its top is above the baseline (px; negative: below), set by {@link #getSize}. */
+        int ascent;
 
-        Attachment(int width, int height) {
+        Attachment(int width, int height, int align) {
             this.width = width;
             this.height = height;
+            this.align = align;
+            this.ascent = height;
         }
 
         @Override
         public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
+            if (align != BASELINE) {
+                // The font around it, unrounded (as the other platforms read it).
+                Paint.FontMetrics font = paint.getFontMetrics();
+                switch (align) {
+                    case TEXT_TOP:
+                        ascent = Math.round(-font.ascent);
+                        break;
+                    case TEXT_BOTTOM:
+                        ascent = Math.round(height - font.descent);
+                        break;
+                    default: {
+                        android.graphics.Rect x = new android.graphics.Rect();
+                        paint.getTextBounds("x", 0, 1, x);
+                        ascent = Math.round((height - x.top) / 2f);
+                        break;
+                    }
+                }
+            }
             if (fm != null) {
                 Paint.FontMetricsInt own = paint.getFontMetricsInt();
-                fm.ascent = Math.min(own.ascent, -height);
+                fm.ascent = Math.min(own.ascent, -Math.max(0, ascent));
                 fm.top = Math.min(own.top, fm.ascent);
-                fm.descent = own.descent;
-                fm.bottom = own.bottom;
+                fm.descent = Math.max(own.descent, height - ascent);
+                fm.bottom = Math.max(own.bottom, fm.descent);
                 fm.leading = own.leading;
             }
             return width;
@@ -485,6 +536,29 @@ final class TextLayouts {
             this.style = style;
             this.thicknessPx = thicknessPx;
             this.offsetPx = offsetPx;
+        }
+    }
+
+    /** A span background (`backgroundColor` on a nested text), drawn by
+     * {@code TextBox} behind each line's part of its characters, as tall as
+     * its fonts. One covers the neighboring runs of one span. */
+    static final class Background {
+        final int color;
+        /** The span that set it: neighbors that look the same stay apart. */
+        final int node;
+        final float radiusPx;
+        float ascentPx, descentPx;
+
+        Background(int color, int node, float radiusPx, float ascentPx, float descentPx) {
+            this.color = color;
+            this.node = node;
+            this.radiusPx = radiusPx;
+            this.ascentPx = ascentPx;
+            this.descentPx = descentPx;
+        }
+
+        boolean same(int color, int node, float radiusPx) {
+            return this.color == color && this.node == node && this.radiusPx == radiusPx;
         }
     }
 

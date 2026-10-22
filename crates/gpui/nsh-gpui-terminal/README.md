@@ -1,0 +1,74 @@
+# GPUI terminal transport
+
+This Linux transport embeds the existing NSH GPUI `AppView`, using the host's
+original `EngineConfig`. It renders the same scene with the production WGPU
+offscreen API. It supplies neither a second application runtime nor terminal IO.
+The transport uses the official GPUI Fast 0.1.10 core. Only the WGPU renderer
+is received under `third-party/gpui-wgpu`, where its own `offscreen` feature
+exposes production pixel readback. It requires no core patch or application
+repository, and `test-support` is not a production dependency.
+
+The host constructs `gpui_wgpu::WgpuHeadlessRenderer` and creates `TerminalPlatform`, uses `Application::with_platform` and
+`run_embedded`, and pumps foreground work when woken or a timer is due. One
+native window is supported. The shared background executor uses one fewer worker
+than the host's available parallelism, with at least one worker. The foreground
+pump runs at most 64 jobs. Frames are requested when dirty; there
+is no imposed 60 Hz timer. Drawing encodes and submits the scene on the native
+owner thread, then hands an owned GPU readback ticket to the host. The host's
+existing background executor waits for readback, copies RGBA pixels and encodes
+the terminal wire. This API does not establish a frame-rate or input latency result.
+`pump_with_draw(false)` still runs foreground and window lifecycle work while
+the output pipeline is full. It preserves the original dirty frame without
+re-waking just for that deferred draw; the host allows drawing once a candidate
+slot is available. `has_pending()` includes that dirty frame for scheduling.
+
+The sole terminal input and output owners remain in the embedding application.
+Use actual terminal pixel dimensions for resize and actual negotiated pixel
+mouse reports. Coordinates supplied to this platform are physical pixels at
+scale 1; it does not guess cell dimensions or synthesize pixel precision from
+cell reports. Keyboard callbacks run before the current native text handler
+commits a propagated printable character. A bracketed paste is one text commit.
+
+Each successful GPU submission produces a `SubmittedFrame` containing an
+issuer-bound `FrameToken`, viewport generation and its owned readback ticket.
+Complete the ticket on a background executor
+to obtain a `CandidateFrame` with the same token and tightly packed RGBA8 pixels;
+completion never samples application state again.
+Retain one output transaction in flight and one replaceable pending candidate.
+Once any wire byte is written, complete the entire transaction indivisibly.
+
+The renderer checks actual texture dimensions and readback-buffer limits before
+allocating pixels. Encoder output writers use fallible allocations without an
+additional per-frame byte quota.
+Only a successful, unmapped staging buffer returns to the renderer's single
+reuse cache. Dropping a pending ticket cancels mapping and discards its buffer.
+
+`KittyFrame::encode` compresses the complete GPU frame into PNG and chunks its
+base64 payload at the protocol's 4096-byte boundary. `KittyFrame::wire` contains
+the complete `q=1` upload into the alternate owned image slot followed by
+retirement of the previously fully written slot. The sole writer writes and
+flushes that complete wire before `mark_presented`; successful frame replies
+do not gate publication.
+The sole reader ends the graphics session on any negative reply for either
+owned slot, including a late error. The independent capability query still
+requires a positive reply, and its nonce must differ from both image slots.
+Restoration deletes only those owned slots.
+
+Resize immediately revokes the old viewport's output receipt. Discard its
+pending candidate, finish any already-started output indivisibly, and recreate
+the next frame at the new dimensions. A GPU completion is a candidate, not a
+terminal publication. The writer's completed flush receipt is the only caller
+of `mark_presented`; that receipt does not prove display vsync.
+
+Incoming events stay in physical order and use `dispatch_input` through GPUI's
+ordinary native handlers. Output receipts, pending draws and frame tokens do
+not authorize or delay input. `AppView::cancel_pointer` clears the current
+native mouse contact when the terminal loses it, without changing field focus.
+Native window handles, webview portals and OS path pickers are unsupported.
+Clipboard writes are returned to the host for its unique output owner.
+
+The GPUI workspace patches only `gpui-fast-wgpu` to that relative source
+directory; the main workspace excludes this renderer package. Build the GPUI workspace directly; no Maka
+checkout or absolute dependency path is needed. Renderer tests use
+`--features offscreen,test-support`; the production terminal dependency uses
+only `offscreen` and `font-kit`.

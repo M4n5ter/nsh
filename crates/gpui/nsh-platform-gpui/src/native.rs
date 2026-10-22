@@ -19,7 +19,9 @@
 //!   drawn above it covers it. A hitbox that blocks the mouse goes under
 //!   the element: the component's own hitboxes take the pointer and the
 //!   wheel over its box, nsh's input does not. Keys go to the component
-//!   while focus is inside it ([`focused`]); a component with a focus
+//!   first while focus is inside it ([`focused`]); those it lets through
+//!   reach the window's shortcuts, the app's bindings and the menu's
+//!   shortcuts as from a text field ([`crate::input::component_key`]); a component with a focus
 //!   handle ([`NativeComponent::focus_handle`]) is a Tab stop among the text
 //!   fields, at its container's place ([`crate::input`], [`apply_focus`]).
 //!   GPUI's content masks are rectangles: a rounded clipping ancestor cuts
@@ -50,7 +52,7 @@ use gpui::{
     ParentElement, Pixels, Styled, Window, px,
 };
 use nsh_core::{
-    Command, EventKind, EventPayload, NativeProps, NodeId, PayloadValue, Rect, Size, ViewKind,
+    Command, EventKind, EventPayload, NativeProps, NodeId, PayloadValue, Points, Size, ViewKind,
 };
 use nsh_engine::{Access, EngineControl};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -189,7 +191,7 @@ impl ComponentContext {
     /// dimension open.
     pub fn set_size(&self, width: f32, height: f32) {
         self.control
-            .set_component_size(self.id, Size::new(width, height));
+            .set_component_size(self.id, Size::new(Points(width), Points(height)));
     }
 
     /// What the component shows changed: the surface draws again, asking
@@ -265,8 +267,15 @@ pub(crate) struct NativeState {
     /// The focus handles inside components that the last prepaint found
     /// focused, with their nodes: keys go to them, not to nsh.
     focused: RefCell<Vec<(NodeId, FocusHandle)>>,
-    /// The component Tab moved to, focused by [`apply_focus`].
-    tab_to: std::cell::Cell<Option<NodeId>>,
+    /// An explicit focus transfer, resolved by [`apply_focus`].
+    tab_to: std::cell::Cell<Option<FocusTarget>>,
+}
+
+/// One explicit native focus transfer, consumed with the real window.
+#[derive(Clone, Copy)]
+enum FocusTarget {
+    Component(NodeId),
+    Surface,
 }
 
 impl NativeState {
@@ -375,7 +384,7 @@ pub(crate) fn deleted(surface: &Rc<Surface>, view: &NshView) {
 /// The view's frame changed: its item fills it again.
 pub(crate) fn resized(view: &NshView) {
     let mut s = view.state_mut();
-    let rect = bounds(s.frame.width, s.frame.height);
+    let rect = bounds(s.frame.size.width.0, s.frame.size.height.0);
     for native in &mut s.natives {
         native.rect = rect;
     }
@@ -498,11 +507,24 @@ pub(crate) fn prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &mut App)
             HostRef::Video(_) => {}
         }
     }
+    let changed = {
+        let old = surface.native.focused.borrow();
+        !old.iter()
+            .map(|(id, _)| id)
+            .eq(focused.iter().map(|(id, _)| id))
+    };
+    let has_native = !focused.is_empty();
     *surface.native.focused.borrow_mut() = focused;
+    if changed {
+        if has_native && !matches!(surface.native.tab_to.get(), Some(FocusTarget::Surface)) {
+            crate::text_input::blur_all(surface);
+        }
+        surface.sync_focus();
+    }
 }
 
 /// True when focus is inside one of the surface's components: keys go
-/// there, not to nsh.
+/// there first, and only the app's shortcuts see what it lets through.
 pub(crate) fn focused(surface: &Surface, window: &Window) -> bool {
     let in_frame = surface
         .native
@@ -541,45 +563,66 @@ pub(crate) fn focusable(surface: &Surface, id: NodeId) -> bool {
     })
 }
 
-/// The node of the component focus was inside at the last frame.
+/// The component focus was inside at the last frame, unless an explicit
+/// transfer to the surface has already revoked that native owner.
 pub(crate) fn focused_component(surface: &Surface) -> Option<NodeId> {
+    if matches!(surface.native.tab_to.get(), Some(FocusTarget::Surface)) {
+        return None;
+    }
     surface.native.focused.borrow().first().map(|(id, _)| *id)
+}
+
+/// The component awaiting the window's next focus application. This is
+/// the existing native focus intent, ahead of last frame's actual owner.
+pub(crate) fn requested_focus(surface: &Surface) -> Option<NodeId> {
+    match surface.native.tab_to.get() {
+        Some(FocusTarget::Component(id)) => Some(id),
+        _ => None,
+    }
 }
 
 /// Tab moved to the component in node `id`: [`apply_focus`] focuses it.
 pub(crate) fn tab_to(surface: &Surface, id: NodeId) {
-    surface.native.tab_to.set(Some(id));
+    surface.native.tab_to.set(Some(FocusTarget::Component(id)));
 }
 
-/// After nsh handled Tab (with the window, which focusing needs): focuses
-/// the component Tab moved to, if any; otherwise, when Tab moved from a
-/// component to one of nsh's text fields, gives the window's focus back to
-/// the surface (`own`).
+/// An explicit NSH focus request returns the window's focus to its surface.
+/// Retained focus alone never steals focus from a native component.
+pub(crate) fn focus_surface(surface: &Surface) {
+    surface.native.focused.borrow_mut().clear();
+    surface.native.tab_to.set(Some(FocusTarget::Surface));
+}
+
+/// Resolves the existing one-shot native focus intent with the window.
+/// Without an intent, a real component focus clears the NSH control owner.
 pub(crate) fn apply_focus(
     surface: &Rc<Surface>,
     own: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let handle = surface
-        .native
-        .tab_to
-        .take()
-        .and_then(|id| component_item(surface, id))
-        .and_then(|item| {
-            let c = item.component.try_borrow().ok()?;
-            c.as_ref()?.focus_handle()
-        });
-    match handle {
-        Some(handle) => {
-            crate::text_input::blur_all(surface);
-            window.focus(&handle, cx);
-            surface.invalidate();
+    match surface.native.tab_to.take() {
+        Some(FocusTarget::Component(id)) => {
+            let handle = component_item(surface, id).and_then(|item| {
+                let c = item.component.try_borrow().ok()?;
+                c.as_ref()?.focus_handle()
+            });
+            if let Some(handle) = handle {
+                surface.native.focused.borrow_mut().clear();
+                crate::text_input::blur_all(surface);
+                window.focus(&handle, cx);
+                surface.native.focused.borrow_mut().push((id, handle));
+                surface.sync_focus();
+                surface.invalidate();
+            }
         }
-        None if focused(surface, window) && crate::text_input::focused(surface).is_some() => {
+        Some(FocusTarget::Surface) => {
+            surface.native.focused.borrow_mut().clear();
             window.focus(own, cx);
+            surface.sync_focus();
             surface.invalidate();
         }
+        None if focused(surface, window) => crate::text_input::blur_all(surface),
         None => {}
     }
 }
@@ -606,7 +649,7 @@ impl Geometry {
 fn geometry(surface: &Surface, view: &NshView) -> Option<Geometry> {
     let (w, h) = {
         let s = view.try_state()?;
-        (s.frame.width, s.frame.height)
+        (s.frame.size.width.0, s.frame.size.height.0)
     };
     let (ox, oy) = surface.origin.get();
     let to_window = |v: &NshView, w: f32, h: f32| {
@@ -623,7 +666,7 @@ fn geometry(surface: &Surface, view: &NshView) -> Option<Geometry> {
             (
                 !s.style.hidden && !s.concealed && s.opacity() > 0.0,
                 s.clips(),
-                (s.frame.width, s.frame.height),
+                (s.frame.size.width.0, s.frame.size.height.0),
             )
         };
         if !shows {
@@ -655,15 +698,19 @@ fn component_item(surface: &Surface, id: NodeId) -> Option<Rc<ComponentItem>> {
 /// Hosts `item` in `view`, filling it ([`resized`] follows the frame).
 fn fill(view: &NshView, item: &Rc<dyn Hosted>) {
     let frame = view.state().frame;
-    view.set_native(item, bounds(frame.width, frame.height));
+    view.set_native(item, bounds(frame.size.width.0, frame.size.height.0));
 }
 
-fn bounds(width: f32, height: f32) -> Rect {
-    Rect {
-        x: 0.0,
-        y: 0.0,
-        width,
-        height,
+fn bounds(width: f32, height: f32) -> nsh_core::Bounds<Points> {
+    nsh_core::Bounds {
+        origin: nsh_core::Point {
+            x: Points(0.0),
+            y: Points(0.0),
+        },
+        size: nsh_core::Size {
+            width: Points(width),
+            height: Points(height),
+        },
     }
 }
 

@@ -1,8 +1,6 @@
-import { Input, Scroll, type ScrollEvent, signal, Text, View, type YNode } from "nsh";
+import { Canvas, Input, List, Scroll, type ScrollEvent, signal, Text, View, type YNode } from "nsh";
 import { createAnimatedValue } from "nsh/animated";
-import { Canvas } from "nsh/canvas";
 import { windowSize } from "nsh/device";
-import { List } from "nsh/list";
 import { Badge, Button, Caption, colors, DemoPage, Figure, finish, hint, isDark, Meter, mono, Press, radius, Section, Segmented, Toggle as Switch, type Tone, toneColor, toneTint } from "../ui";
 
 const tones: Tone[] = ["accent", "info", "warn", "up", "danger"];
@@ -38,10 +36,10 @@ function Backdrop(props: { tone: Tone; seed: number }) {
     <Canvas
       pointerEvents="none"
       style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}
-      draw={(ctx, { width, height }) => {
+      draw={(cx, { width, height }) => {
         const color = toneColor(props.tone);
-        ctx.fillStyle = colors.border;
-        for (let x = 10; x < width; x += 12) for (let y = 10; y < height; y += 12) ctx.fillRect(x, y, 1.5, 1.5);
+        cx.fillStyle = colors.border;
+        for (let x = 10; x < width; x += 12) for (let y = 10; y < height; y += 12) cx.fillRect(x, y, 1.5, 1.5);
         // A wave, filled faintly below.
         const points: [number, number][] = [];
         for (let i = 0; i <= 24; i++) {
@@ -49,25 +47,25 @@ function Backdrop(props: { tone: Tone; seed: number }) {
           const y = height * (0.62 - 0.18 * Math.sin(i * 0.5 + props.seed) - 0.06 * Math.sin(i * 1.3 + props.seed * 2));
           points.push([x, y]);
         }
-        ctx.beginPath();
-        ctx.moveTo(0, height);
-        for (const [x, y] of points) ctx.lineTo(x, y);
-        ctx.lineTo(width, height);
-        ctx.closePath();
-        ctx.fillStyle = toneTint(props.tone);
-        ctx.fill();
-        ctx.beginPath();
-        points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = colors.faint;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(0, height * 0.5);
-        ctx.lineTo(width, height * 0.5);
-        ctx.stroke();
+        cx.beginPath();
+        cx.moveTo(0, height);
+        for (const [x, y] of points) cx.lineTo(x, y);
+        cx.lineTo(width, height);
+        cx.closePath();
+        cx.fillStyle = toneTint(props.tone);
+        cx.fill();
+        cx.beginPath();
+        points.forEach(([x, y], i) => (i ? cx.lineTo(x, y) : cx.moveTo(x, y)));
+        cx.strokeStyle = color;
+        cx.lineWidth = 1.5;
+        cx.stroke();
+        cx.setLineDash([3, 4]);
+        cx.strokeStyle = colors.faint;
+        cx.lineWidth = 1;
+        cx.beginPath();
+        cx.moveTo(0, height * 0.5);
+        cx.lineTo(width, height * 0.5);
+        cx.stroke();
       }}
     />
   );
@@ -93,11 +91,11 @@ function Pager() {
       <Scroll
         horizontal
         pagingEnabled
-        showsIndicator={false}
+        scrollbar={false}
         scrollValue={x}
         style={{ height: 160, borderRadius: radius.control, backgroundColor: colors.surface, ...finish.card, borderWidth: 1, borderColor: colors.line }}
-        onLayout={(e) => width.set(e.width)}
-        onMomentumScrollEnd={(e) => page.set(Math.round(e.x / width()))}
+        onLayout={(e) => width.set(e.size.width)}
+        onMomentumEnd={(e) => page.set(Math.round(e.x / width()))}
         onScrollEnd={(e) => page.set(Math.round(e.x / width()))}
       >
         <View style={{ flexDirection: "row" }}>
@@ -166,9 +164,9 @@ function Cards() {
           snapToAlignment={align()}
           decelerationRate="fast"
           disableIntervalMomentum={oneStep()}
-          showsIndicator={false}
+          scrollbar={false}
           style={{ height: 128 }}
-          contentContainerStyle={{ gap, paddingHorizontal: 14 }}
+          contentStyle={{ gap, paddingHorizontal: 14 }}
         >
           {(i) => {
             const tone = () => tones[i() % tones.length];
@@ -209,7 +207,7 @@ function Cards() {
 
 type Logged = { name: string; y: number; tone: Tone };
 
-/** onScroll (throttled), drag and momentum events, scrollEnabled, bounces, contentInset. */
+/** onScroll (throttled), drag and momentum events, scrollable, bounces, contentInset. */
 function Events() {
   const offset = signal<ScrollEvent | null>(null);
   const log = signal<Logged[]>([]);
@@ -220,30 +218,30 @@ function Events() {
   const note = (name: string, tone: Tone) => (e: { y: number }) => log.update((l) => [{ name, y: Math.round(e.y), tone }, ...l].slice(0, 5));
   const progress = () => {
     const o = offset();
-    return o && o.contentHeight > o.height ? o.y / (o.contentHeight - o.height) : 0;
+    return o && o.contentSize.height > o.size.height ? o.offset.y / (o.contentSize.height - o.size.height) : 0;
   };
   return (
     <View style={{ gap: 12 }}>
       <View style={{ flexDirection: "row", alignItems: "flex-end" }}>
         <View style={{ flex: 1 }}>
-          <Figure value={offset() ? String(Math.round(offset()!.y)) : "0"} unit="pt" note={offset() ? `/ ${Math.round(offset()!.contentHeight)}` : "Scroll the box"} tone="info" />
+          <Figure value={offset() ? String(Math.round(offset()!.offset.y)) : "0"} unit="pt" note={offset() ? `/ ${Math.round(offset()!.contentSize.height)}` : "Scroll the box"} tone="info" />
         </View>
         <Text style={{ fontSize: 13, color: colors.faint, fontVariant: ["tabular-nums"], paddingBottom: 6 }}>
-          viewport {offset() ? Math.round(offset()!.height) : "—"} pt
+          viewport {offset() ? Math.round(offset()!.size.height) : "—"} pt
         </Text>
       </View>
       <Meter value={progress()} tone="info" />
       <Scroll
         style={{ height: 180, borderRadius: radius.control, backgroundColor: colors.surface, ...finish.card, borderWidth: 1, borderColor: colors.line }}
-        scrollEnabled={enabled()}
+        scrollable={enabled()}
         bounces={bounces()}
         contentInset={inset() ? { top: 40, bottom: 40 } : undefined}
         scrollEventThrottle={Number(throttle())}
         onScroll={(v) => offset.set(v)}
-        onScrollBeginDrag={note("begin drag", "accent")}
-        onScrollEndDrag={note("end drag", "warn")}
-        onMomentumScrollBegin={note("momentum begin", "info")}
-        onMomentumScrollEnd={note("momentum end", "up")}
+        onScrollDragStart={note("begin drag", "accent")}
+        onScrollDragEnd={note("end drag", "warn")}
+        onMomentumStart={note("momentum begin", "info")}
+        onMomentumEnd={note("momentum end", "up")}
       >
         <View style={{ paddingVertical: 6 }}>
           <Each of={Array.from({ length: 30 }, (_, i) => i + 1)}>
@@ -274,7 +272,7 @@ function Events() {
         <Segmented size="small" options={options(["0", "100", "500"] as const)} value={throttle()} onChange={(v) => throttle.set(v)} />
       </View>
       <View>
-        <Toggle label="Scroll enabled" code="scrollEnabled" value={enabled()} onChange={(v) => enabled.set(v)} />
+        <Toggle label="Scroll enabled" code="scrollable" value={enabled()} onChange={(v) => enabled.set(v)} />
         <Toggle label="Bounces" code="bounces" value={bounces()} onChange={(v) => bounces.set(v)} />
         <Toggle label="Content inset" note="40 pt at the top and bottom" value={inset()} onChange={(v) => inset.set(v)} />
       </View>
@@ -416,7 +414,7 @@ export function Scrolling() {
         ),
         () => (
           <Section title="Events and behavior">
-            <Api names="onScroll · onScrollBeginDrag · onMomentumScrollEnd" />
+            <Api names="onScroll · onScrollDragStart · onMomentumEnd" />
             <Events />
           </Section>
         ),
@@ -438,16 +436,16 @@ export function Scrolling() {
             </Text>
             <Input
               placeholder={hint("Type here, then tap the button", "Type here, then click the button")}
-              placeholderTextColor={colors.faint}
-              selectionColor={colors.accent}
               style={{
+                placeholderColor: colors.faint,
+                selectionColor: colors.accent,
                 height: 44,
                 fontSize: 15,
                 color: colors.text,
-                backgroundColor: colors.surface,
-                ...finish.inset,
+                backgroundColor: colors.field,
+                ...finish.field,
                 borderWidth: 1,
-                borderColor: colors.border,
+                borderColor: colors.fieldBorder,
                 borderRadius: radius.control,
                 paddingHorizontal: 14,
               }}

@@ -41,7 +41,7 @@ use crate::{
 
 /// How far beyond the viewport cells are kept rendered, in viewports.
 const OVERSCAN: f32 = 1.0;
-/// Default `onEndReachedThreshold`, in viewports.
+/// Default `loadMoreThreshold`, in viewports.
 const END_THRESHOLD: f32 = 1.0;
 
 /// A recycling slot: one cell node, bound to at most one item.
@@ -131,13 +131,20 @@ pub(super) enum PinTarget {
 /// A pinned scroll target and the offset the list was last sent to for
 /// it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Pin {
-    target: PinTarget,
-    at: f32,
-    /// An animated scroll the platform has not finished: the pin follows
-    /// by retargeting it, and the user moving away is only noticed once
-    /// it landed.
-    animating: bool,
+enum Pin {
+    WaitingForIdle {
+        target: PinTarget,
+        animated: bool,
+    },
+    Following {
+        target: PinTarget,
+        at: f32,
+        /// An animated scroll the platform has not finished: the pin follows
+        /// by retargeting it, and the user moving away is only noticed once
+        /// it landed.
+        animating: bool,
+        automatic: bool,
+    },
 }
 
 /// How a pinned list follows its target (`ListState::follow_pin`).
@@ -147,17 +154,18 @@ pub(super) enum Follow {
     Stay,
     /// Scroll by this much now (with the anchoring `ScrollBy`).
     By(f32),
-    /// Retarget the animated scroll to this offset.
-    To(f32),
+    /// Start or retarget a scroll to this offset.
+    To { offset: f32, animated: bool },
 }
 
 /// How far a reported offset may be from a pinned one and still count as
 /// the same (platforms round offsets to pixels).
 const PIN_SLACK: f32 = 1.0;
 
-/// A sticky cell's range of travel, in content coordinates along the main
-/// axis: it sits at `start` and is pushed down with the scroll offset
-/// until `end`.
+/// A sticky cell's range of travel, as scroll offsets along the main axis:
+/// from `start` it moves with the scroll offset, as far as `end` (by
+/// `clamp(offset - start, 0, end - start)` from where the cell is laid out;
+/// without a sticky offset, `start` is that position).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct StickyRange {
     pub(super) cell: u32,
@@ -179,8 +187,12 @@ pub(super) struct ListState {
     by_index: FxHashMap<u32, u32>,
     free: Vec<u32>,
     pub(super) extras: [Extra; 3],
-    /// `contentContainerStyle`: padding and gaps.
+    /// Padding and gaps: `contentStyle`, else `contentClass`'s.
     pub(super) content: ListContentStyle,
+    /// `contentStyle` as set.
+    content_style: ListContentStyle,
+    /// What `contentClass` sets.
+    content_class: ListContentStyle,
     pub(super) horizontal: bool,
     pub(super) inverted: bool,
     /// `maintainVisibleContentPosition`'s `autoscrollToBottomThreshold`:
@@ -189,12 +201,18 @@ pub(super) struct ListState {
     pub(super) follow_end: Option<f32>,
     /// `stickyHeaderIndices`, sorted.
     pub(super) sticky: Vec<u32>,
+    /// `stickyHeaderOffset`: sticky items stick this far from the
+    /// viewport's start.
+    sticky_offset: f32,
     /// Sticky ranges last sent to the platform.
     pub(super) sent_sticky: Vec<StickyRange>,
+    /// Ready cells attached to the native list, in logical content order.
+    /// Node ids, not reusable shadow-tree keys; JS keeps owning every cell.
+    pub(super) mounted_cells: Vec<crate::NodeId>,
     pub(super) viewability: Viewability,
     /// Last reported viewable items (`first..=last`).
     pub(super) viewable: Option<(u32, u32)>,
-    /// `onEndReachedThreshold`, in viewports.
+    /// `loadMoreThreshold`, in viewports.
     pub(super) end_threshold: f32,
     /// Main-axis scroll offset reported by the platform (content
     /// coordinates).
@@ -205,7 +223,7 @@ pub(super) struct ListState {
     pub(super) dirty: bool,
     /// Cross-axis size the cells were last laid out at.
     pub(super) cells_cross: f32,
-    end_reached_at: Option<u32>,
+    load_more_at: Option<u32>,
     /// `content_len - viewport` when the offset was last anchored
     /// (inverted lists and `follow_end`; NaN before the first layout).
     anchored_end: f32,
@@ -223,6 +241,10 @@ pub(super) struct ListState {
     /// The target of the last scroll command, until it is reached with
     /// measured cells or the user scrolls away.
     pin: Option<Pin>,
+    /// Native interaction tracking stays enabled after an automatic request.
+    pub(super) automatic: bool,
+    /// A direct native snapshot, unknown until the initial TrackStates report.
+    interaction: Option<u8>,
 }
 
 impl ListState {
@@ -238,11 +260,15 @@ impl ListState {
             free: Vec::new(),
             extras: [Extra::NONE; 3],
             content: ListContentStyle::default(),
+            content_style: ListContentStyle::default(),
+            content_class: ListContentStyle::default(),
             horizontal: false,
             inverted: false,
             follow_end: None,
             sticky: Vec::new(),
+            sticky_offset: 0.0,
             sent_sticky: Vec::new(),
+            mounted_cells: Vec::new(),
             viewability: Viewability::default(),
             viewable: None,
             end_threshold: END_THRESHOLD,
@@ -250,13 +276,15 @@ impl ListState {
             viewport: 0.0,
             dirty: true,
             cells_cross: f32::NAN,
-            end_reached_at: None,
+            load_more_at: None,
             anchored_end: f32::NAN,
             issued: 0,
             pending: Vec::new(),
             moved: Vec::new(),
             splice_anchor: 0.0,
             pin: None,
+            automatic: false,
+            interaction: None,
         }
     }
 
@@ -319,8 +347,8 @@ impl ListState {
         self.free.sort_unstable();
         self.free.dedup();
         self.rebuild_offsets();
-        if self.end_reached_at.is_some() {
-            self.end_reached_at = None;
+        if self.load_more_at.is_some() {
+            self.load_more_at = None;
         }
         if let Some((index, from_top)) = anchor
             && index >= at + removed
@@ -365,29 +393,45 @@ impl ListState {
             self.offset = at;
             self.dirty = true;
         }
-        if let Some(pin) = &mut self.pin
+        if let Some(Pin::Following {
+            target,
+            at: pinned,
+            animating,
+            automatic,
+        }) = &mut self.pin
             && self.pending.is_empty()
         {
-            if (at - pin.at).abs() <= PIN_SLACK {
-                if pin.animating {
+            if (at - *pinned).abs() <= PIN_SLACK {
+                if *animating {
                     // Landed: a correction may follow.
-                    pin.animating = false;
+                    *animating = false;
                     self.dirty = true;
                 }
-            } else if !pin.animating {
-                // The user scrolled away.
-                self.pin = None;
+            } else if !*animating {
+                // An automatic target remains the latest intent while the
+                // user operates the list; explicit pins end on user scroll.
+                self.pin = automatic.then_some(Pin::WaitingForIdle {
+                    target: *target,
+                    animated: false,
+                });
             }
         }
     }
 
     /// Keeps following `target` after a scroll command sent the list to
     /// `offset` (animated or not); `None` (a plain offset) ends the pin.
-    pub(super) fn pin(&mut self, target: Option<PinTarget>, offset: f32, animated: bool) {
-        self.pin = target.map(|target| Pin {
+    pub(super) fn pin(
+        &mut self,
+        target: Option<PinTarget>,
+        offset: f32,
+        animated: bool,
+        automatic: bool,
+    ) {
+        self.pin = target.map(|target| Pin::Following {
             target,
             at: offset,
             animating: animated,
+            automatic,
         });
     }
 
@@ -403,37 +447,95 @@ impl ListState {
         }
     }
 
-    /// After measurements: where a pinned list goes for its target, which
-    /// moved as estimated sizes became real ones. The pin ends once the
-    /// list is there and every item in the viewport is measured (nothing
-    /// visible can move it any more).
+    /// A new automatic request replaces the previous target without issuing a
+    /// native scroll while interaction is unknown or active.
+    pub(super) fn wait_for_idle(&mut self, target: PinTarget, animated: bool) {
+        self.pin = Some(Pin::WaitingForIdle { target, animated });
+        self.dirty = true;
+    }
+
+    pub(super) fn idle(&self) -> bool {
+        self.interaction == Some(0)
+    }
+
+    /// The platform reports the list's own hover and focus-within together.
+    /// Child focus style propagation cannot temporarily make this list idle.
+    pub(super) fn interaction(&mut self, states: u8) {
+        if !self.automatic {
+            return;
+        }
+        let states =
+            states & (crate::tailwind::state::HOVERED | crate::tailwind::state::FOCUS_WITHIN);
+        if self.interaction != Some(states) {
+            self.interaction = Some(states);
+            self.dirty = true;
+        }
+    }
+
+    /// After measurements, follows the one pending target with current sizes.
+    /// Automatic requests stay pending until native interaction is known idle.
     pub(super) fn follow_pin(&mut self, anchored: f32) -> Follow {
-        let Some(mut pin) = self.pin else {
+        let Some(pin) = self.pin else {
             return Follow::Stay;
         };
         if self.viewport <= 0.0 {
             return Follow::Stay;
         }
-        let target = self.target_offset(pin.target);
-        if pin.animating {
-            // The platform moves an animation in flight along with the
-            // anchoring scroll.
-            pin.at += anchored;
-            let follow = if (target - pin.at).abs() > PIN_SLACK {
-                pin.at = target;
-                Follow::To(target)
+        let (target, mut at, animating, automatic) = match pin {
+            Pin::WaitingForIdle { target, animated } => {
+                if self.interaction != Some(0) {
+                    return Follow::Stay;
+                }
+                let offset = self.target_offset(target);
+                self.pin(Some(target), offset, animated, true);
+                if !animated {
+                    self.jump(offset);
+                }
+                return Follow::To { offset, animated };
+            }
+            Pin::Following {
+                target,
+                at,
+                animating,
+                automatic,
+            } => {
+                if automatic && !self.idle() {
+                    self.wait_for_idle(target, animating);
+                    return Follow::Stay;
+                }
+                (target, at, animating, automatic)
+            }
+        };
+        let offset = self.target_offset(target);
+        if animating {
+            at += anchored;
+            let follow = if (offset - at).abs() > PIN_SLACK {
+                at = offset;
+                Follow::To {
+                    offset,
+                    animated: true,
+                }
             } else {
                 Follow::Stay
             };
-            self.pin = Some(pin);
+            self.pin = Some(Pin::Following {
+                target,
+                at,
+                animating,
+                automatic,
+            });
             return follow;
         }
-        let delta = target - self.offset;
+        let delta = offset - self.offset;
         if delta != 0.0 {
-            self.jump(target);
+            self.jump(offset);
         }
-        pin.at = target;
-        self.pin = (!self.viewport_measured()).then_some(pin);
+        self.pin = (automatic || !self.viewport_measured()).then_some(Pin::Following {
+            target,
+            at: offset,
+            animating,
+            automatic,
+        });
         if delta == 0.0 {
             Follow::Stay
         } else {
@@ -483,18 +585,18 @@ impl ListState {
     /// The gap between rows along the main axis.
     fn main_gap(&self) -> f32 {
         if self.horizontal {
-            self.content.column_gap
+            self.content.column_gap.0
         } else {
-            self.content.row_gap
+            self.content.row_gap.0
         }
     }
 
     /// The gap between columns.
     pub(super) fn cross_gap(&self) -> f32 {
         if self.horizontal {
-            self.content.row_gap
+            self.content.row_gap.0
         } else {
-            self.content.column_gap
+            self.content.column_gap.0
         }
     }
 
@@ -502,18 +604,18 @@ impl ListState {
     fn main_padding(&self) -> (f32, f32) {
         let p = &self.content.padding;
         if self.horizontal {
-            (p.left, p.right)
+            (p.left.0, p.right.0)
         } else {
-            (p.top, p.bottom)
+            (p.top.0, p.bottom.0)
         }
     }
 
     pub(super) fn cross_padding(&self) -> (f32, f32) {
         let p = &self.content.padding;
         if self.horizontal {
-            (p.top, p.bottom)
+            (p.top.0, p.bottom.0)
         } else {
-            (p.left, p.right)
+            (p.left.0, p.right.0)
         }
     }
 
@@ -640,8 +742,8 @@ impl ListState {
         self.count = count;
         self.sizes.resize(count as usize, f32::NAN);
         self.rebuild_offsets();
-        if self.end_reached_at.is_some_and(|c| c != count) {
-            self.end_reached_at = None;
+        if self.load_more_at.is_some_and(|c| c != count) {
+            self.load_more_at = None;
         }
     }
 
@@ -663,20 +765,37 @@ impl ListState {
         }
     }
 
+    /// `contentStyle`: it wins over `contentClass` when set.
     pub(super) fn set_content(&mut self, content: ListContentStyle) {
+        self.content_style = content;
+        self.apply_content();
+    }
+
+    /// What `contentClass` sets.
+    pub(super) fn set_class_content(&mut self, content: ListContentStyle) {
+        self.content_class = content;
+        self.apply_content();
+    }
+
+    fn apply_content(&mut self) {
+        let content = if self.content_style != ListContentStyle::default() {
+            self.content_style
+        } else {
+            self.content_class
+        };
         if content != self.content {
             let cross_changed = self.cross_padding() != {
                 let p = &content.padding;
                 if self.horizontal {
-                    (p.top, p.bottom)
+                    (p.top.0, p.bottom.0)
                 } else {
-                    (p.left, p.right)
+                    (p.left.0, p.right.0)
                 }
             } || self.cross_gap()
                 != if self.horizontal {
-                    content.row_gap
+                    content.row_gap.0
                 } else {
-                    content.column_gap
+                    content.column_gap.0
                 };
             self.content = content;
             if cross_changed {
@@ -715,6 +834,15 @@ impl ListState {
         sticky.dedup();
         if sticky != self.sticky {
             self.sticky = sticky;
+            self.dirty = true;
+        }
+    }
+
+    /// `stickyHeaderOffset`.
+    pub(super) fn set_sticky_offset(&mut self, offset: f32) {
+        let offset = if offset.is_finite() { offset } else { 0.0 };
+        if offset != self.sticky_offset {
+            self.sticky_offset = offset;
             self.dirty = true;
         }
     }
@@ -770,6 +898,15 @@ impl ListState {
             delta
         } else {
             0.0
+        }
+    }
+
+    /// Predicts the platform's upper clamp before its scroll report arrives.
+    /// Later relative corrections must start at the same clamped reported offset;
+    /// explicit pins supply their own correction before the viewport frame.
+    pub(super) fn predict_clamp(&mut self, maximum: f32) {
+        if !self.inverted && self.follow_end.is_some() && self.pin.is_none() {
+            self.offset = self.offset.min(maximum);
         }
     }
 
@@ -922,13 +1059,13 @@ impl ListState {
         )
     }
 
-    /// The sticky item currently pinned to the viewport's start: the last
-    /// one that starts before it.
+    /// The sticky item currently pinned to the viewport's start (or its
+    /// sticky offset from it): the last one that starts before that.
     pub(super) fn active_sticky(&self) -> Option<u32> {
         if !self.sticky_enabled() {
             return None;
         }
-        let at = self.natural_offset();
+        let at = self.natural_offset() + self.sticky_offset;
         let mut active = None;
         for &s in &self.sticky {
             if s >= self.count || self.item_at(s) > at {
@@ -945,20 +1082,21 @@ impl ListState {
         !self.sticky.is_empty() && self.columns == 1 && !self.inverted
     }
 
-    /// The travel range of sticky item `index`: from its position to where
-    /// the next sticky item pushes it out.
+    /// The travel range of sticky item `index`: from where it reaches the
+    /// sticky offset from the viewport's start to where the next sticky item
+    /// pushes it out.
     pub(super) fn sticky_range(&self, index: u32, cell: u32, size: f32) -> StickyRange {
-        let start = self.item_at(index);
+        let start = self.item_at(index) - self.sticky_offset;
         let next = self.sticky.iter().find(|&&s| s > index && s < self.count);
         let end = match next {
-            Some(&n) => (self.item_at(n) - size).max(start),
+            Some(&n) => (self.item_at(n) - size - self.sticky_offset).max(start),
             None => f32::INFINITY,
         };
         StickyRange { cell, start, end }
     }
 
     /// Recomputes the render window. New `(slot, index)` bindings are
-    /// pushed to `binds`. Returns true if `onEndReached` should fire.
+    /// pushed to `binds`. Returns true if `onLoadMore` should fire.
     pub(super) fn update_window(&mut self, binds: &mut Vec<(u32, u32)>) -> bool {
         self.dirty = false;
         if self.count == 0 || self.viewport <= 0.0 {
@@ -973,7 +1111,14 @@ impl ListState {
         let overscan = self.viewport * OVERSCAN;
         let range = self.items_in(at - overscan, at + self.viewport + overscan);
         let sticky = self.active_sticky();
-        let wanted = |i: u32| range.is_some_and(|(f, l)| (f..=l).contains(&i)) || sticky == Some(i);
+        // And the one before it: scrolled back, it shows at once, pushed by
+        // the pinned one, before a round of binding could render it.
+        let before = sticky.and_then(|s| self.sticky.iter().rev().find(|&&p| p < s).copied());
+        let wanted = |i: u32| {
+            range.is_some_and(|(f, l)| (f..=l).contains(&i))
+                || sticky == Some(i)
+                || before == Some(i)
+        };
 
         for slot in 0..self.slots.len() as u32 {
             if let Some(i) = self.slots[slot as usize].index
@@ -1006,14 +1151,14 @@ impl ListState {
                 bind(self, i);
             }
         }
-        if let Some(s) = sticky {
+        for s in [before, sticky].into_iter().flatten() {
             bind(self, s);
         }
 
         let total = self.blocks().total;
         let near_end = at + self.viewport >= total - self.viewport * self.end_threshold;
-        if near_end && self.end_reached_at != Some(self.count) {
-            self.end_reached_at = Some(self.count);
+        if near_end && self.load_more_at != Some(self.count) {
+            self.load_more_at = Some(self.count);
             return true;
         }
         false
@@ -1079,7 +1224,7 @@ impl ListState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::props::EdgeInsets;
+    use crate::{geometry::px, props::EdgeInsets};
 
     fn list(count: u32, estimated: f32, viewport: f32) -> ListState {
         let mut l = ListState::new();
@@ -1122,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn end_reached_fires_once_per_count() {
+    fn load_more_fires_once_per_count() {
         let mut l = list(10, 50.0, 400.0);
         let mut binds = Vec::new();
         assert!(
@@ -1168,13 +1313,13 @@ mod tests {
         let mut l = list(3, 50.0, 1000.0);
         l.set_content(ListContentStyle {
             padding: EdgeInsets {
-                top: 10.0,
-                right: 16.0,
-                bottom: 20.0,
-                left: 16.0,
+                top: px(10.0),
+                right: px(16.0),
+                bottom: px(20.0),
+                left: px(16.0),
             },
-            row_gap: 8.0,
-            column_gap: 0.0,
+            row_gap: px(8.0),
+            column_gap: px(0.0),
         });
         l.add_slot_cell(CellSlot::Header, 7);
         l.measured_extra(ExtraKind::Header, 30.0);
@@ -1243,6 +1388,37 @@ mod tests {
     }
 
     #[test]
+    fn sticky_items_stick_at_their_offset() {
+        let mut l = list(100, 50.0, 400.0);
+        l.set_sticky(vec![0, 30]);
+        l.set_sticky_offset(20.0);
+        // Ranges are scroll offsets: item 0 is pinned 20 from the top from
+        // the start (pushed down by 20), item 30 from 1480 on; 30 pushes 0
+        // out when it reaches 0's end, 50 below the offset.
+        assert_eq!(
+            l.sticky_range(0, 1, 50.0),
+            StickyRange {
+                cell: 1,
+                start: -20.0,
+                end: 1430.0
+            }
+        );
+        assert_eq!(l.sticky_range(30, 2, 50.0).start, 1480.0);
+        // The pinned item is the last one that reached the offset.
+        l.offset = 1470.0;
+        assert_eq!(l.active_sticky(), Some(0));
+        l.offset = 1480.0;
+        assert_eq!(l.active_sticky(), Some(30));
+        // Without it again: as before.
+        l.set_sticky_offset(0.0);
+        assert_eq!(l.sticky_range(0, 1, 50.0).start, 0.0);
+        assert_eq!(l.active_sticky(), Some(0));
+        // A negative offset sticks items partly out of view.
+        l.set_sticky_offset(-10.0);
+        assert_eq!(l.sticky_range(30, 2, 50.0).start, 1510.0);
+    }
+
+    #[test]
     fn sticky_items_stay_rendered_and_travel_until_the_next() {
         let mut l = list(100, 50.0, 400.0);
         l.set_sticky(vec![30, 0]);
@@ -1262,6 +1438,26 @@ mod tests {
         assert_eq!(l.sticky_range(30, 1, 50.0).end, f32::INFINITY);
         l.offset = 1600.0;
         assert_eq!(l.active_sticky(), Some(30));
+    }
+
+    #[test]
+    fn the_sticky_item_before_the_pinned_one_stays_rendered() {
+        let mut l = list(100, 50.0, 400.0);
+        l.set_sticky(vec![0, 30, 60]);
+        // 60 is pinned; 30 starts at 1500, far above the rendered window.
+        l.offset = 3200.0;
+        assert_eq!(l.active_sticky(), Some(60));
+        let mut binds = Vec::new();
+        l.update_window(&mut binds);
+        let bound = |l: &ListState, i: u32| l.slots.iter().any(|s| s.index == Some(i));
+        assert!(bound(&l, 60) && bound(&l, 30), "{binds:?}");
+        assert!(!bound(&l, 0));
+        // Scrolled back into 30's rows: 30 is pinned and 0 waits above it.
+        l.offset = 2000.0;
+        binds.clear();
+        l.update_window(&mut binds);
+        assert!(bound(&l, 30) && bound(&l, 0), "{binds:?}");
+        assert!(!bound(&l, 60));
     }
 
     #[test]
@@ -1344,10 +1540,16 @@ mod tests {
         let mut l = list(100, 50.0, 400.0);
         // An animated scroll to the end: retargeted when the end moves,
         // corrected once it landed.
-        l.pin(Some(PinTarget::End), 4600.0, true);
+        l.pin(Some(PinTarget::End), 4600.0, true, false);
         l.issue_scroll_to(4600.0);
         l.measured(99, 90.0);
-        assert_eq!(l.follow_pin(0.0), Follow::To(4640.0));
+        assert_eq!(
+            l.follow_pin(0.0),
+            Follow::To {
+                offset: 4640.0,
+                animated: true
+            }
+        );
         l.issue_scroll_to(4640.0);
         l.reported(3000.0, 2);
         assert!(l.pinned(), "in flight");
@@ -1360,7 +1562,7 @@ mod tests {
         l.reported(4000.0, 2);
         assert!(!l.pinned());
         // Splices end it too.
-        l.pin(Some(PinTarget::End), 4650.0, false);
+        l.pin(Some(PinTarget::End), 4650.0, false, false);
         l.splice(0, 1, 0);
         assert!(!l.pinned());
     }

@@ -1,15 +1,15 @@
 ---
-title: nsh/video
+title: Video
 description: Video, a native video player (AVPlayer, MediaPlayer), with its props, events and ref methods.
-order: 14
+order: 2.4
 ---
 
-# nsh/video
+# Video
 
-`nsh/video` exports `Video`: a video player built on the platform's player (`AVPlayer` on iOS and Mac Catalyst, `MediaPlayer` on Android). Playback is controlled with props, so pausing is a signal away.
+`nsh` exports `Video`: a video player built on the platform's player (`AVPlayer` on iOS and Mac Catalyst, `MediaPlayer` on Android). Playback is controlled with props, so pausing is a signal away.
 
 ```ts
-import { Video, type VideoProps } from "nsh/video";
+import { Video, type VideoProps } from "nsh";
 ```
 
 See [Web view and video](../docs/web-view-and-video.md) for the guide and [`<Video>`](../elements/video.md) for its props.
@@ -20,13 +20,12 @@ See [Web view and video](../docs/web-view-and-video.md) for the guide and [`<Vid
 const Video: (props: VideoProps) => YNode;
 
 interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  source: string | { uri: string };
+  src: string;
 }
 ```
 
 ```tsx
-import { mount, signal, Text, View, type YNode } from "nsh";
-import { Video } from "nsh/video";
+import { mount, signal, Text, Video, View, type YNode } from "nsh";
 
 function Player() {
   const paused = signal(true);
@@ -36,7 +35,7 @@ function Player() {
     <View style={{ flex: 1, padding: 16, gap: 12 }}>
       <Video
         ref={video}
-        source="https://example.com/clip.mp4"
+        src="https://example.com/clip.mp4"
         paused={paused()}
         muted
         repeat
@@ -62,7 +61,7 @@ mount(Player);
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `source` | `string \| { uri: string }` | (required) | The video's URL. |
+| `src` | `string` | (required) | The video's URL. |
 | `paused` | `boolean` | `false` | Playback is paused. |
 | `muted` | `boolean` | `false` | No sound. |
 | `volume` | `number` | `1` | 0..1. |
@@ -77,7 +76,7 @@ mount(Player);
 | Event | Payload | When |
 |---|---|---|
 | `onLoadStart` | | The video starts loading. |
-| `onLoad` | `{ duration: number; width: number; height: number }` | It is ready to play: its length in seconds and its size. |
+| `onLoad` | `{ duration: number; size: Size }` | It is ready to play: its length in seconds and its size. |
 | `onProgress` | `{ currentTime: number; duration: number }` | While playing, every `progressUpdateInterval` ms. Seconds. |
 | `onBuffer` | `{ isBuffering: boolean }` | Playback waits for data, or resumes. |
 | `onEnd` | | Playback reached the end. |
@@ -92,7 +91,7 @@ mount(Player);
 ```ts
 const aspect = signal(16 / 9);
 
-<Video source={url} onLoad={(e) => aspect.set(e.width / e.height)} style={{ width: "100%", aspectRatio: aspect() }} />;
+<Video src={url} onLoad={(e) => aspect.set(e.size.width / e.size.height)} style={{ width: "100%", aspectRatio: aspect() }} />;
 ```
 
 ## Capabilities

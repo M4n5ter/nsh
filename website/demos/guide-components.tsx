@@ -1,5 +1,5 @@
 import { Input, type InputProps, type JSX, mount, Scroll, signal, split, Text, View, type YNode } from "nsh";
-import { tint, ui } from "./palette";
+import { desktop, size, tint, ui, wide } from "./palette";
 
 /** A component: a function of its props, run once. */
 function Badge(props: { label: string; color?: string }) {
@@ -29,13 +29,22 @@ function Field(props: InputProps & { label: string }) {
     <View style={{ gap: 4 }}>
       <Text style={{ fontSize: 13, color: ui().muted }}>{own.label}</Text>
       <Input
-        style={{ ...ui().inset, fontSize: 16, color: ui().text, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8 }}
-        placeholderTextColor={ui().faint}
+        style={
+          wide()
+            ? { ...ui().inset, fontSize: size.label, color: ui().text, placeholderColor: ui().faint, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, minHeight: size.control }
+            : { ...ui().inset, fontSize: 16, color: ui().text, placeholderColor: ui().faint, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8 }
+        }
         {...input}
       />
     </View>
   );
 }
+
+/** A button's box: a desktop control in a wide window. */
+const button = () =>
+  wide()
+    ? { height: size.control, paddingHorizontal: 12, borderRadius: 8, justifyContent: "center" as const }
+    : { borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 };
 
 function App() {
   const name = signal("");
@@ -44,23 +53,34 @@ function App() {
 
   return (
     <Scroll style={{ flex: 1, backgroundColor: ui().page }}>
-      <View style={{ padding: 20, paddingTop: 24, gap: 16 }}>
+      <View
+        style={
+          wide()
+            ? { padding: 20, paddingTop: 24, gap: 16, display: "grid", gridTemplateColumns: "repeat(2, 1fr)", alignItems: "start" }
+            : { padding: 20, paddingTop: 24, gap: 16 }
+        }
+      >
         <Card title="Props are live">
-          <Badge label={`Tapped ${taps()} times`} color={taps() % 2 ? tint(ui().warn, 0.16) : tint(ui().accent, 0.14)} />
-          <View onPress={() => taps.update((n) => n + 1)} activeOpacity={0.6} style={{ ...ui().primary, borderRadius: 10, padding: 10 }}>
-            <Text style={{ color: ui().onPrimary, textAlign: "center", fontWeight: "600" }}>Tap</Text>
+          <Badge label={`${desktop ? "Clicked" : "Tapped"} ${taps()} times`} color={taps() % 2 ? tint(ui().warn, 0.16) : tint(ui().accent, 0.14)} />
+          <View onPress={() => taps.update((n) => n + 1)} activeStyle={{ opacity: 0.6 }} style={
+              wide()
+                ? { ...ui().primary, alignSelf: "flex-start", height: size.control, paddingHorizontal: 14, borderRadius: 8, justifyContent: "center" }
+                : { ...ui().primary, borderRadius: 10, padding: 10 }
+            }
+          >
+            <Text style={{ color: ui().onPrimary, textAlign: "center", fontWeight: "600", fontSize: wide() ? 13 : undefined }}>{desktop ? "Click" : "Tap"}</Text>
           </View>
         </Card>
 
         <Card title="split, spread and ref">
-          <Field label="Your name" placeholder="Type here" value={name()} onChangeText={(t) => name.set(t)} ref={(node) => (field = node)} />
+          <Field label="Your name" placeholder="Type here" value={name()} onChange={(t) => name.set(t)} ref={(node) => (field = node)} />
           <Text style={{ color: ui().text }}>{name() ? `Hello, ${name()}!` : "Nobody yet."}</Text>
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <View onPress={() => field?.focus()} activeOpacity={0.6} style={{ ...ui().accentFill, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 }}>
-              <Text style={{ color: ui().onAccent, fontWeight: "600" }}>Focus</Text>
+            <View onPress={() => field?.focus()} activeStyle={{ opacity: 0.6 }} style={{ ...ui().accentFill, ...button() }}>
+              <Text style={{ color: ui().onAccent, fontWeight: "600", fontSize: wide() ? 13 : undefined }}>Focus</Text>
             </View>
-            <View onPress={() => (name.set(""), field?.blur())} activeOpacity={0.6} style={{ ...ui().raised, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 }}>
-              <Text style={{ color: ui().text }}>Clear</Text>
+            <View onPress={() => (name.set(""), field?.blur())} activeStyle={{ opacity: 0.6 }} style={{ ...ui().raised, ...button() }}>
+              <Text style={{ color: ui().text, fontSize: wide() ? 13 : undefined }}>Clear</Text>
             </View>
           </View>
         </Card>

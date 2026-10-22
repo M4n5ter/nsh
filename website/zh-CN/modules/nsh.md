@@ -1,15 +1,15 @@
 ---
 title: nsh
-description: 核心模块：signal、computed、effect、context、mount，以及元素和样式的类型。
+description: 核心模块：signal、computed、effect、context、mount、设计令牌，以及元素和样式的类型。
 order: 2
 ---
 
 # nsh
 
-`nsh` 是核心模块：响应式 API（signal、computed、effect、context）、`mount`、宿主元素 `View`、`Text`、`Scroll` 和 `Input`，以及元素、样式和事件的 TypeScript 类型。响应式图本身以 Rust 原生运行；读取一个 signal 是一次对运行时的调用，只需几纳秒，只有你自己写的闭包会在 JavaScript 解释器中执行。
+`nsh` 是核心模块：响应式 API（signal、computed、effect、context）、`mount`、`token`、宿主元素 `View`、`Text`、`Scroll`、`Input` 和 `Overlay`，以及元素、样式和事件的 TypeScript 类型。响应式图本身以 Rust 原生运行；读取一个 signal 是一次对运行时的调用，只需几纳秒，只有你自己写的闭包会在 JavaScript 解释器中执行。
 
 ```ts
-import { batch, cleanup, computed, context, effect, Input, mount, Scroll, signal, split, Text, untracked, View } from "nsh";
+import { batch, cleanup, computed, context, effect, Input, mount, Overlay, Scroll, signal, split, Text, token, untracked, View } from "nsh";
 ```
 
 NSH 的响应式模型与 SolidJS 相同：组件函数只运行**一次**，界面中读取了 signal 的部分会在 signal 变化时就地更新。组件不会重新渲染，也没有虚拟 DOM。教程见[响应式](../docs/reactivity.md)。
@@ -142,6 +142,30 @@ function Clock() {
 }
 ```
 
+## inputAction
+
+```ts
+function inputAction<A>(handler: (args: A) => unknown, args: A): () => void;
+```
+
+捕获兼容 JSON 的 `args`，返回一个回调，调用时只将这份快照传给 `handler`。必须显式提供第二个参数；
+没有参数的操作使用 `null` 或 `[]`。捕获会求值 getter 和 Proxy trap，复制 JSON 值，并递归冻结其中的对象和数组。
+上限为 64 层、1,048,576 个条目以及 8 MiB 的规范 UTF-8 JSON。传入回调的事件参数和 handler 的返回值会被忽略。
+
+```tsx
+import { inputAction, signal, Text } from "nsh";
+
+const selected = signal("");
+
+function Row(props: { id: string }) {
+  const choose = ({ id }: { id: string }) => selected.set(id);
+  return <Text onPress={inputAction(choose, { id: props.id })}>{props.id}</Text>;
+}
+```
+
+操作及其目标由捕获参数决定。应用和宿主服务可以检查当前业务状态，拒绝已经过期的操作，同时保持捕获的目标和
+参数不变。事件处理函数通过当前界面的普通原生输入路径执行。参数捕获不能证明用户看到了哪一帧，也不授予服务权限。
+
 ## context
 
 ```ts
@@ -215,16 +239,35 @@ function LabeledInput(props: InputProps & { label: string }) {
 }
 ```
 
-## View、Text、Scroll、Input
+## token
+
+```ts
+function token<K extends keyof Tokens>(name: K): Tokens[K];
+```
+
+应用主题（`nsh.json` 的 `"theme"`，叠加在 shadcn/ui 的令牌之上）中名为 `name` 的设计令牌在当前外观下的值：颜色是 `#rrggbbaa`，
+长度是以点为单位的数值，字体是字体族名称。名称是主题中 CSS 变量去掉 `--` 后的名称（`primary`、`muted-foreground`、`radius`、
+`font-mono`，以及应用自己的令牌，如 `up`）。读取它是响应式的：读取令牌的组件、memo 或 effect 会在主题或外观变化时重新运行。
+`Tokens` 列出应用的令牌及其类型；NSH 根据主题把它写入 `.nsh/types/nsh/tokens.d.ts`。在类名中直接引用令牌（`bg-primary`、
+`rounded-(--radius)`）：见[主题 token](../docs/tailwind.md#主题-token)。
+
+```tsx
+import { effect, token } from "nsh";
+
+effect(() => console.log("primary is", token("primary"), "radius", token("radius")));
+```
+
+## View、Text、Scroll、Input、Overlay
 
 ```ts
 function View(props: ViewProps): YNode;
 function Text(props: TextProps): YNode;
 function Scroll(props: ScrollProps): YNode;
 function Input(props: InputProps): YNode;
+function Overlay(props: OverlayProps): YNode;
 ```
 
-`nsh` 导出的宿主元素，写作标签：`<View>`、`<Text>`、`<Scroll>`、`<Input>`。当标签通过导入（包括别名）指向它们之一时，编译器会就地创建原生视图，所以导入它们在运行时没有任何开销。它们也是普通的组件，可以作为值传递（`const Tag = inline ? Text : View`）。其他元素来自各自的模块：`Image` 来自 [`nsh/image`](./nsh-image.md)，`List` 来自 [`nsh/list`](./nsh-list.md)，`Canvas`、`WebView` 和 `Video` 来自各自的模块。它们的属性见[元素](../elements/index.md)。
+`nsh` 导出的宿主元素，写作标签：`<View>`、`<Text>`、`<Scroll>`、`<Input>`、`<Overlay>`（把子元素显示在窗口之上，相对锚点放置：[Overlay](../elements/overlay.md)）。当标签通过导入（包括别名）指向它们之一时，编译器会就地创建原生视图，所以导入它们在运行时没有任何开销。它们也是普通的组件，可以作为值传递（`const Tag = inline ? Text : View`）。`nsh` 以同样的方式导出其他原语：[`List`](./nsh-list.md)、[`Image`](./nsh-image.md)、[`Canvas`](./nsh-canvas.md)、[`WebView`](./nsh-webview.md) 和 [`Video`](./nsh-video.md)，各有自己的参考页面。它们的属性见[元素](../elements/index.md)。
 
 ## 类型
 
@@ -242,8 +285,9 @@ function Input(props: InputProps): YNode;
 | `ViewProps`、`TextProps`、`ImageProps`、`ScrollProps`、`InputProps`、`CommonProps`、`TouchProps` | 宿主元素的属性 |
 | `ViewStyle`、`TextStyle`、`ImageStyle`、`LayoutStyle`、`StyleProp<T>` | 样式对象；见[样式参考](./style-reference.md) |
 | `ColorValue`、`DimensionValue`、`LengthValue`、`TransformStep` | 样式中的值 |
-| `GestureResponderEvent`、`LayoutEvent`、`ScrollEvent`、`PanEvent`、`TouchPoint` | 事件数据 |
-| `ImageAsset` | 导入图片文件得到的对象（`{ uri, width, height }`） |
+| `GestureResponderEvent`、`HoverEvent`、`ContextMenuEvent`、`ScrollEvent`、`PanEvent`、`TouchPoint` | 事件数据 |
+| `Point`、`Size`、`Bounds`、`Edges`、`Modifiers` | 事件数据和属性所用的形状，字段与 GPUI 相同（`nsh_core::geometry`） |
+| `ImageAsset` | 导入图片文件得到的对象（`{ url, size: Size, scales? }`；`scales` 列出它的[像素密度变体](../docs/images-and-assets.md#像素密度)） |
 | `OS` | `"ios" \| "android" \| "macos" \| "windows" \| "linux" \| "web"` |
 | `AccessibilityRole`、`AccessibilityState` | 无障碍属性 |
 

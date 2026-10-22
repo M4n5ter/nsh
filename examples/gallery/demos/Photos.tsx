@@ -1,8 +1,6 @@
-import { computed, signal, Text, untracked, View } from "nsh";
+import { computed, Image, List, signal, Text, untracked, View } from "nsh";
 import { createAnimatedValue } from "nsh/animated";
-import { Platform } from "nsh/device";
-import { Image } from "nsh/image";
-import { List } from "nsh/list";
+import { platform } from "nsh/device";
 import logo from "../logo@2x.png";
 import { Icon } from "../icons";
 import { Badge, bindRefresh, Button, colors, columnsFor, desktop, finish, paneWidth, Press, radius, Stat, type Tone, toneColor } from "../ui";
@@ -69,7 +67,7 @@ function PhotoRow(props: { photo: Photo }) {
 function PhotoTile(props: { photo: Photo }) {
   return (
     <Press scale={0.97} accessibilityLabel={props.photo.title}>
-      <View class="hover:bg-paper-card dark:hover:bg-graphite-card" style={{ padding: 6, gap: 8, borderRadius: radius.card, borderCurve: "continuous", cursor: "pointer" }}>
+      <View class="hover:bg-card" style={{ padding: 6, gap: 8, borderRadius: radius.card, borderCurve: "continuous", cursor: "pointer" }}>
         <Image
           src={`https://picsum.photos/seed/${props.photo.id}/480/360`}
           style={{
@@ -188,7 +186,7 @@ export function Photos() {
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingTop: 12 }}>
         <Icon name="arrow-down" size={14} tint={colors.faint} />
-        {Platform.isDesktop ? (
+        {platform.idiom === "desktop" ? (
           <Text style={{ flex: 1, fontSize: 13, color: colors.faint }}>
             {refreshKey ? `${refreshKey} refreshes. ` : ""}Scrolling to the end loads {PAGE} more.
           </Text>
@@ -196,7 +194,7 @@ export function Photos() {
           <Text style={{ flex: 1, fontSize: 13, color: colors.faint }}>Pull to refresh. Scrolling to the end loads {PAGE} more.</Text>
         )}
         {/* The mouse does not pull scroll views down: desktops refresh here. */}
-        <If when={Platform.isDesktop}>
+        <If when={platform.idiom === "desktop"}>
           <Button label={refreshing() ? "Refreshing…" : "Refresh"} variant="secondary" disabled={refreshing()} onPress={refresh} />
         </If>
       </View>
@@ -213,16 +211,17 @@ export function Photos() {
         when={wide}
         else={
           <List
+            testID="photos"
             each={photos()}
             estimatedItemSize={76}
             style={{ flex: 1 }}
-            contentContainerStyle={{ paddingBottom: 24 }}
+            contentStyle={{ paddingBottom: 24 }}
             scrollValue={scrollY}
             refreshing={refreshing()}
             onRefresh={refresh}
-            onEndReached={loadMore}
-            ListHeaderComponent={phoneHero}
-            ListFooterComponent={footer()}
+            onLoadMore={loadMore}
+            header={phoneHero}
+            footer={footer()}
           >
             {(photo) => <PhotoRow photo={photo()} />}
           </List>
@@ -234,17 +233,18 @@ export function Photos() {
           const tile = untracked(() => ((paneWidth() - 48) / n) * 0.75 + 60);
           return (
             <List
+              testID="photos"
               each={photos()}
               numColumns={n}
               estimatedItemSize={tile}
               style={{ flex: 1 }}
-              contentContainerStyle={{ padding: 24, gap: 16 }}
+              contentStyle={{ padding: 24, gap: 16 }}
               scrollValue={scrollY}
               refreshing={refreshing()}
               onRefresh={refresh}
-              onEndReached={loadMore}
-              ListHeaderComponent={hero()}
-              ListFooterComponent={footer()}
+              onLoadMore={loadMore}
+              header={hero()}
+              footer={footer()}
             >
               {(photo) => <PhotoTile photo={photo()} />}
             </List>

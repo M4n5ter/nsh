@@ -97,6 +97,12 @@ impl Mounter {
     }
 
     pub(crate) fn apply(&mut self, surface: &Rc<Surface>, item: &MountItem) {
+        if let MountItem::Remove { id } | MountItem::Delete { id } = item
+            && let Some(view) = self.views.get(*id)
+        {
+            crate::focus_return::retiring(surface, &view);
+            crate::input::retire_focus_within(surface, &view);
+        }
         match item {
             MountItem::Create { id, kind } => {
                 let view = NshView::new(*id, *kind);
@@ -177,7 +183,7 @@ impl Mounter {
                     // Where a modal sits is the platform's (a sheet is a
                     // card inside the window): the core only sizes it.
                     let old = view.state().frame;
-                    (frame.x, frame.y) = (old.x, old.y);
+                    (frame.origin.x.0, frame.origin.y.0) = (old.origin.x.0, old.origin.y.0);
                 }
                 let frame = &frame;
                 // Compared with where a running layout animation is headed,
@@ -197,6 +203,7 @@ impl Mounter {
                 );
                 match view.kind() {
                     ViewKind::Stack => crate::navigation::stack_resized(surface, view),
+                    ViewKind::Scroll => crate::scroll::resized(surface, view),
                     ViewKind::Canvas => view.changed(),
                     ViewKind::WebView | ViewKind::Video | ViewKind::Native => {
                         crate::native::resized(view)
@@ -242,12 +249,18 @@ impl Mounter {
             MountItem::ScrollConfig {
                 id,
                 horizontal,
-                shows_indicator,
+                scrollbar_visible,
                 mirrored,
                 ..
             } => {
                 if let Some(view) = &self.get(*id) {
-                    crate::scroll::config(surface, view, *horizontal, *shows_indicator, *mirrored);
+                    crate::scroll::config(
+                        surface,
+                        view,
+                        *horizontal,
+                        *scrollbar_visible,
+                        *mirrored,
+                    );
                 }
             }
             MountItem::ScrollContent { id, size } => {
@@ -257,7 +270,7 @@ impl Mounter {
             }
             MountItem::ScrollBy { id, dx, dy } => {
                 if let Some(view) = &self.get(*id) {
-                    crate::scroll::scroll_by(surface, view, *dx, *dy);
+                    crate::scroll::scroll_by(surface, view, dx.0, dy.0);
                 }
             }
             MountItem::LayoutDirection { rtl } => self.rtl = *rtl,
@@ -377,9 +390,13 @@ impl Mounter {
         let view = self.views.get(id);
         let view = view.as_ref();
         match command {
-            Command::Focus => view.map_or((), crate::text_input::focus),
+            Command::Focus => {
+                if let Some(view) = view {
+                    crate::input::focus_view(surface, view);
+                }
+            }
             Command::Blur => match view {
-                Some(view) if view.kind() == ViewKind::Input => crate::text_input::blur(view),
+                Some(view) => crate::text_input::blur_view(surface, view),
                 _ => crate::text_input::blur_all(surface),
             },
             Command::SetSelection { start, end } => {

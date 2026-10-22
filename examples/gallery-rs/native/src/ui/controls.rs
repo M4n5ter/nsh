@@ -2,7 +2,7 @@
 //! [`Segmented`].
 
 use nsh_core::{
-    Rect,
+    Bounds, Points,
     ui::{JsObject, PropEnum, prelude::*},
 };
 
@@ -62,8 +62,8 @@ pub(crate) fn Toggle(props: ToggleProps, cx: Scope<ToggleEvent>) -> impl IntoEle
             }),
             ..AccessibilityState::default()
         })
-        .hit_slop(EdgeInsets::all(8.0))
-        .on_press(move |_: &()| {
+        .hit_slop(EdgeInsets::all(px(8.0)))
+        .on_press(move || {
             let next = !props.value.get_untracked();
             on.spring(knob(next), motion::SETTLE);
             cx.emit(ToggleEvent::Change(next));
@@ -95,35 +95,23 @@ pub(crate) fn Toggle(props: ToggleProps, cx: Scope<ToggleEvent>) -> impl IntoEle
                 .bg_linear_to_b()
                 .gradient_from(rgb_a(0xffffff, 0.3))
                 .gradient_to(rgb_a(0xffffff, 0.0))
-                .gradient_to_position(0.6)
+                .gradient_to_position(percentage(0.6))
                 .adaptive_shadow(
                     knob_light.iter().copied(),
                     [
                         inset_shadow(1.0, 0.0, rgb_a(0xffffff, 0.2)),
                         BoxShadow {
-                            offset_x: 0.0,
-                            offset_y: 1.0,
-                            blur: 3.0,
-                            spread: 0.0,
-                            color: rgb_a(0x000000, 0.4),
+                            offset_x: px(0.0),
+                            offset_y: px(1.0),
+                            blur: px(3.0),
+                            spread: px(0.0),
+                            color: rgb_a(0x000000, 0.4).to_packed(),
                             inset: false,
                         },
                     ],
                 )
                 .bind_translate_x(&on.interpolate(&[0.0, 1.0], &[0.0, 20.0])),
         )
-}
-
-/// A [`Toggle`] at `value` with accessibility label `label`; its owner
-/// handles [`ToggleEvent::Change`] with `.on_event(..)`.
-pub(crate) fn toggle(
-    value: impl Into<Prop<bool>>,
-    label: impl Into<SharedString>,
-) -> ComponentElement<Toggle> {
-    Toggle::element(ToggleProps {
-        value: value.into(),
-        label: Some(label.into()).into(),
-    })
 }
 
 /// A segment of [`Segmented`].
@@ -206,8 +194,6 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
     let small = props.size == SegmentedSize::Small;
     let height = if small { 32.0 } else { 40.0 };
     let (track_light, track_dark) = Finish::Track.shadows();
-    // The track's glass: the sunk shadow plus a lit lower rim.
-    let rim = |color| inset_shadow(-1.0, 0.0, color);
     let segments = dynamic(move || {
         props
             .options
@@ -228,7 +214,7 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
                         selected: selected.get(),
                         ..AccessibilityState::default()
                     })
-                    .on_press(move |_: &()| cx.emit(SegmentedEvent::Change(i)))
+                    .on_press(move || cx.emit(SegmentedEvent::Change(i)))
                     .child(
                         text(option.label)
                             .number_of_lines(1)
@@ -257,20 +243,11 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
         .p(px(3.0))
         .rounded(px(height / 2.0))
         .bg(colors::INSET)
-        .adaptive_shadow(
-            track_light
-                .iter()
-                .copied()
-                .chain([rim(rgb_a(0xffffff, 0.85))]),
-            track_dark
-                .iter()
-                .copied()
-                .chain([rim(rgb_a(0xffffff, 0.04))]),
-        )
+        .adaptive_shadow(track_light.iter().copied(), track_dark.iter().copied())
         .border_1()
         .border_color(colors::BORDER)
         .role(AccessibilityRole::Tablist)
-        .on_layout(move |frame: &Rect| width.set(frame.width))
+        .on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0))
         .child(
             view()
                 .absolute()
@@ -285,17 +262,4 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
                 .bind_translate_x(&x),
         )
         .child(segments)
-}
-
-/// A [`Segmented`] of `options` with `selected` selected; its owner
-/// handles [`SegmentedEvent::Change`] with `.on_event(..)`.
-pub(crate) fn segmented(
-    options: impl IntoIterator<Item = Segment>,
-    selected: impl Into<Prop<u32>>,
-) -> ComponentElement<Segmented> {
-    Segmented::element(SegmentedProps {
-        options: options.into_iter().collect::<Vec<_>>().into(),
-        selected: selected.into(),
-        size: SegmentedSize::Regular,
-    })
 }

@@ -8,6 +8,7 @@
 
 use std::{cell::Cell, ptr};
 
+use nsh_base::{nav_page, nav_stack};
 use nsh_core::{
     storage::Storage,
     ui::{AccessibilityRole, AccessibilityState, AnyElement, prelude::*},
@@ -48,14 +49,14 @@ struct WasDesktop(bool);
 /// pushed and gone when it is popped.
 fn pushed() -> AnyElement {
     let routes = nav::routes();
-    Each::new(
+    each(
         move || routes.with(|r| r.0.clone()),
         |route: &Route| route.key.clone(),
         |route, depth| {
             let route = route.get_untracked();
             (route.screen)()
                 // The user popped it natively: it and what is above it go.
-                .on_dismiss(move |_: &()| nav::truncate(depth.get_untracked()))
+                .on_dismiss(move || nav::truncate(depth.get_untracked()))
         },
     )
     .into_element()
@@ -90,7 +91,7 @@ pub(crate) fn restore() {
         // A window's first frame can come before its size (0 × 0, the
         // phone layout): which layout opens the demo, and what is open,
         // are known once it has one.
-        if window().width <= 0.0 {
+        if window().width.0 <= 0.0 {
             return;
         }
         if !restored.replace(true)
@@ -126,7 +127,7 @@ pub(crate) fn phone() -> AnyElement {
         let Selected(demo) = global::<Selected>().get_untracked();
         nav::reset(vec![demo.route()]);
     }
-    stack()
+    nav_stack()
         .flex_1()
         .child(demos::index())
         .child(pushed())
@@ -151,9 +152,14 @@ pub(crate) fn desktop_layout() -> AnyElement {
         .bg(colors::BACKGROUND)
         .child(sidebar())
         .child(
-            stack()
+            nav_stack()
                 .flex_1()
-                .child(screen().key("pane").header_shown(false).child(demo_pane()))
+                .child(
+                    nav_page()
+                        .key("pane")
+                        .header_visible(false)
+                        .child(demo_pane()),
+                )
                 .child(pushed()),
         )
         .into_element()
@@ -172,8 +178,8 @@ fn select(demo: &'static Demo) {
 fn sidebar_row(demo: &'static Demo) -> AnyElement {
     let selected = global::<Selected>();
     let active = move || selected.with(|s| ptr::eq(s.0, demo));
-    // TS: `bg-paper-border dark:bg-graphite-raised` when selected,
-    // `hover:bg-paper-card dark:hover:bg-graphite-line` otherwise.
+    // TS: `bg-accent` when selected, `hover:bg-hover active:bg-accent`
+    // otherwise (the gallery theme's tokens).
     let fill = AdaptiveColor::new(colors::BORDER.light, colors::RAISED.dark);
     let hover = AdaptiveColor::new(colors::SURFACE.light, colors::LINE.dark);
     view()
@@ -193,7 +199,7 @@ fn sidebar_row(demo: &'static Demo) -> AnyElement {
         .style_when(active, |s| s.bg(fill))
         .hover(|s| s.bg(move || if active() { fill } else { hover }))
         .active(|s| s.bg(fill))
-        .on_press(move |_: &()| select(demo))
+        .on_press(move || select(demo))
         .child(
             view()
                 .absolute()
@@ -205,7 +211,7 @@ fn sidebar_row(demo: &'static Demo) -> AnyElement {
                 .bg(colors::ACCENT)
                 .opacity(move || if active() { 1.0_f32 } else { 0.0 }),
         )
-        .child(icon(demo.icon, 17.0, move || {
+        .child(icon().name(demo.icon).size(17.0).tint(move || {
             if active() {
                 colors::ACCENT
             } else {
@@ -239,7 +245,7 @@ fn sidebar() -> AnyElement {
                     .text_size(px(11.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors::FAINT)
-                    .letter_spacing(0.6)
+                    .letter_spacing(px(0.6))
                     .px(px(10.0))
                     .pt_4()
                     .pb(px(6.0)),
@@ -292,7 +298,7 @@ fn sidebar() -> AnyElement {
                 .child(
                     text(move || {
                         let size = window();
-                        format!("{} × {} pt", size.width.round(), size.height.round())
+                        format!("{} × {} pt", size.width.0.round(), size.height.0.round())
                     })
                     .text_size(px(12.0))
                     .text_color(colors::MUTED)

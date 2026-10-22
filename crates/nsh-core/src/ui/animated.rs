@@ -29,20 +29,19 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use nsh_animation::{
-    AnimationId, AnimationOp, Composite, Driver, Easing, Extrapolate, MathOp, Operand, Output,
-};
-
 use super::{
     AdaptiveColor,
     reactive::{Kept, Owner},
     task::{Action, Answer, Executor},
 };
+use crate::animation::{
+    AnimationId, AnimationOp, Composite, Driver, Easing, Extrapolate, MathOp, Operand, Output,
+};
 
 /// A node of the graph, released when the last of what holds it goes
 /// (the owner of its handles, its bindings, the nodes derived from it).
 pub(crate) struct Node {
-    id: nsh_animation::NodeId,
+    id: crate::animation::NodeId,
     executor: Weak<Executor>,
     /// The nodes it derives from, alive while it is: a chain such as
     /// `v.mul(TAU).sub(1.0)` keeps no handle of its middle node.
@@ -52,7 +51,7 @@ pub(crate) struct Node {
 impl Node {
     fn new(
         executor: &Rc<Executor>,
-        op: impl FnOnce(nsh_animation::NodeId) -> AnimationOp,
+        op: impl FnOnce(crate::animation::NodeId) -> AnimationOp,
         inputs: Vec<Rc<Node>>,
     ) -> Rc<Self> {
         let id = executor.next_animation_id();
@@ -78,7 +77,7 @@ impl Drop for Node {
 }
 
 /// `op` (a node-making operation) making node `id`.
-fn with_node(mut op: AnimationOp, id: nsh_animation::NodeId) -> AnimationOp {
+fn with_node(mut op: AnimationOp, id: crate::animation::NodeId) -> AnimationOp {
     match &mut op {
         AnimationOp::CreateValue { node, .. }
         | AnimationOp::CreateInterpolate { node, .. }
@@ -136,7 +135,7 @@ pub trait Animated {
 pub(crate) struct LiveNode(Rc<Node>);
 
 impl LiveNode {
-    pub(crate) fn id(&self) -> nsh_animation::NodeId {
+    pub(crate) fn id(&self) -> crate::animation::NodeId {
         self.0.id
     }
 
@@ -169,7 +168,7 @@ pub struct AnimatedNode {
     node: Kept<Node>,
     /// The node's id, for what names it (styles, equality) without
     /// reaching it.
-    id: nsh_animation::NodeId,
+    id: crate::animation::NodeId,
 }
 
 impl AnimatedNode {
@@ -190,7 +189,7 @@ impl AnimatedNode {
         }
     }
 
-    pub(crate) fn id(&self) -> nsh_animation::NodeId {
+    pub(crate) fn id(&self) -> crate::animation::NodeId {
         self.id
     }
 
@@ -202,7 +201,7 @@ impl AnimatedNode {
 
     /// Sends `op` to the graph while the node is live (queuing it reaches
     /// only the executor, never the reactive graph).
-    fn act(&self, op: impl FnOnce(nsh_animation::NodeId) -> AnimationOp) {
+    fn act(&self, op: impl FnOnce(crate::animation::NodeId) -> AnimationOp) {
         let id = self.id;
         self.node.with(|node| node.act(op(id)));
     }
@@ -295,7 +294,7 @@ impl AnimatedNode {
                 Output::Colors(
                     colors
                         .iter()
-                        .map(|c| if dark { c.dark.0 } else { c.light.0 })
+                        .map(|c| crate::style::Color::from(if dark { c.dark } else { c.light }).0)
                         .collect(),
                 )
             }
@@ -583,13 +582,13 @@ impl Spring {
 /// `fps` (1 to 1000), until it ends: the exact curve the graph runs.
 fn sample(driver: Driver, from: f32, fps: f32) -> Vec<f32> {
     let step = 1.0 / f64::from(fps.clamp(1.0, 1000.0));
-    nsh_animation::sample_driver(driver, from, step, nsh_animation::MAX_SAMPLES)
+    crate::animation::sample_driver(driver, from, step, crate::animation::MAX_SAMPLES)
 }
 
 /// The values a spring moves a value through from `from` to `to`, one per
 /// frame at `fps` (60 on most screens) until it rests (TS:
 /// `Animated.sampleSpring`): its curve, to draw it. At most
-/// [`nsh_animation::MAX_SAMPLES`].
+/// [`crate::animation::MAX_SAMPLES`].
 pub fn sample_spring(from: f32, to: f32, spring: Spring, fps: f32) -> Vec<f32> {
     sample(spring.driver(to), from, fps)
 }
@@ -597,7 +596,7 @@ pub fn sample_spring(from: f32, to: f32, spring: Spring, fps: f32) -> Vec<f32> {
 /// The values a decay ([`AnimatedValue::decay`]) moves a value through from
 /// `from` at `velocity` (per second), one per frame at `fps` until it
 /// stops (TS: `Animated.sampleDecay`). At most
-/// [`nsh_animation::MAX_SAMPLES`].
+/// [`crate::animation::MAX_SAMPLES`].
 pub fn sample_decay(from: f32, velocity: f32, deceleration: f32, fps: f32) -> Vec<f32> {
     sample(
         Driver::Decay {
@@ -666,6 +665,16 @@ impl AnimatedValue {
     /// Sets the value at once, stopping its animation.
     pub fn set(&self, value: f32) {
         self.0.act(|node| AnimationOp::Set { node, value });
+    }
+
+    /// Adjusts the base value to `value * factor + offset` on the UI thread,
+    /// stopping its animation and retaining the offset from [`Self::set_offset`].
+    pub fn adjust(&self, factor: f32, offset: f32) {
+        self.0.act(|node| AnimationOp::Adjust {
+            node,
+            factor,
+            offset,
+        });
     }
 
     /// Stops its animation where it is ([`Self::value`] then reads where
@@ -852,7 +861,7 @@ impl Animated for AnimatedValue {
 ///     Animation::timing(&y, -36.0, Timing::new(220.0, Easing::EaseOut)),
 ///     Animation::spring(&y, 0.0, Spring::default()),
 /// ]);
-/// view().on_press(move |_: &()| {
+/// view().on_press(move || {
 ///     let end = jump.start();
 /// })
 /// ```
@@ -1160,14 +1169,16 @@ mod tests {
         let release = move || v.set_offset(2.0);
         press();
         release();
+        v.adjust(2.0, -3.0);
         let _ = v.timing(3.0, 100.0, Easing::Linear);
         assert!(matches!(
             &ops(&executor)[..],
             [
                 AnimationOp::Set { node: a, value: 1.0 },
                 AnimationOp::SetOffset { node: b, offset: 2.0 },
-                AnimationOp::Start { node: c, .. },
-            ] if [*a, *b, *c] == [node; 3]
+                AnimationOp::Adjust { node: c, factor: 2.0, offset: -3.0 },
+                AnimationOp::Start { node: d, .. },
+            ] if [*a, *b, *c, *d] == [node; 4]
         ));
         let copy = v;
         assert_eq!(copy, v);
@@ -1435,7 +1446,7 @@ mod tests {
         };
         assert_eq!(
             sample_spring(0.0, 1.0, undamped, 60.0).len(),
-            nsh_animation::MAX_SAMPLES
+            crate::animation::MAX_SAMPLES
         );
         // A fling glides on and slows down; within bounds it stops at one.
         let decay = sample_decay(0.0, 1000.0, 0.998, 60.0);

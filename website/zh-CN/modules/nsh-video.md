@@ -1,15 +1,15 @@
 ---
-title: nsh/video
+title: Video
 description: Video：原生视频播放器（AVPlayer、MediaPlayer），以及它的属性、事件和 ref 方法。
-order: 14
+order: 2.4
 ---
 
-# nsh/video
+# Video
 
-`nsh/video` 导出 `Video`：基于平台播放器构建的视频播放器（iOS 和 Mac Catalyst 上是 `AVPlayer`，Android 上是 `MediaPlayer`）。播放由属性控制，所以暂停只需改一个 signal。
+`nsh` 导出 `Video`：基于平台播放器构建的视频播放器（iOS 和 Mac Catalyst 上是 `AVPlayer`，Android 上是 `MediaPlayer`）。播放由属性控制，所以暂停只需改一个 signal。
 
 ```ts
-import { Video, type VideoProps } from "nsh/video";
+import { Video, type VideoProps } from "nsh";
 ```
 
 教程见[网页视图与视频](../docs/web-view-and-video.md)，属性见 [`<Video>`](../elements/video.md)。
@@ -20,13 +20,12 @@ import { Video, type VideoProps } from "nsh/video";
 const Video: (props: VideoProps) => YNode;
 
 interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  source: string | { uri: string };
+  src: string;
 }
 ```
 
 ```tsx
-import { mount, signal, Text, View, type YNode } from "nsh";
-import { Video } from "nsh/video";
+import { mount, signal, Text, Video, View, type YNode } from "nsh";
 
 function Player() {
   const paused = signal(true);
@@ -36,7 +35,7 @@ function Player() {
     <View style={{ flex: 1, padding: 16, gap: 12 }}>
       <Video
         ref={video}
-        source="https://example.com/clip.mp4"
+        src="https://example.com/clip.mp4"
         paused={paused()}
         muted
         repeat
@@ -62,7 +61,7 @@ mount(Player);
 
 | 属性 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `source` | `string \| { uri: string }` | （必填） | 视频的 URL。 |
+| `src` | `string` | （必填） | 视频的 URL。 |
 | `paused` | `boolean` | `false` | 暂停播放。 |
 | `muted` | `boolean` | `false` | 静音。 |
 | `volume` | `number` | `1` | 0..1。 |
@@ -77,7 +76,7 @@ mount(Player);
 | 事件 | 数据 | 时机 |
 |---|---|---|
 | `onLoadStart` | | 视频开始加载。 |
-| `onLoad` | `{ duration: number; width: number; height: number }` | 可以播放：时长（秒）和尺寸。 |
+| `onLoad` | `{ duration: number; size: Size }` | 可以播放：时长（秒）和尺寸。 |
 | `onProgress` | `{ currentTime: number; duration: number }` | 播放期间，每 `progressUpdateInterval` 毫秒一次。单位为秒。 |
 | `onBuffer` | `{ isBuffering: boolean }` | 播放在等待数据，或恢复播放。 |
 | `onEnd` | | 播放到达结尾。 |
@@ -92,7 +91,7 @@ mount(Player);
 ```ts
 const aspect = signal(16 / 9);
 
-<Video source={url} onLoad={(e) => aspect.set(e.width / e.height)} style={{ width: "100%", aspectRatio: aspect() }} />;
+<Video src={url} onLoad={(e) => aspect.set(e.size.width / e.size.height)} style={{ width: "100%", aspectRatio: aspect() }} />;
 ```
 
 ## 权限

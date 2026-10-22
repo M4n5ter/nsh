@@ -8,11 +8,11 @@ use std::{
 use rustc_hash::FxHashMap;
 
 use crate::{
-    geometry::Size,
+    geometry::{Point, Points, Size, point, px, size},
     ops::{EventMask, NodeId},
     style::{
         Color, DecorationStyle, EllipsizeMode, FontFamily, FontVariant, TextAlign, TextDecoration,
-        TextShadow, TextStyle, TextTransform,
+        TextShadow, TextStyle, TextTransform, VerticalAlign,
     },
 };
 
@@ -21,18 +21,18 @@ use crate::{
 pub struct ResolvedTextStyle {
     /// Foreground color.
     pub color: Color,
-    /// Font size in points.
-    pub font_size: f32,
+    /// Font size.
+    pub font_size: Points,
     /// Font weight, `100..=900`.
     pub font_weight: u16,
-    /// Line height in points; `0.0` means the font's natural line height.
-    pub line_height: f32,
+    /// Line height; zero means the font's natural line height.
+    pub line_height: Points,
     /// Font family; `None` is the system font.
     pub font_family: Option<FontFamily>,
     /// Italic.
     pub italic: bool,
-    /// Extra space between characters in points.
-    pub letter_spacing: f32,
+    /// Extra space between characters.
+    pub letter_spacing: Points,
     /// A line height set as a multiple of the font size (0: none), kept
     /// so nested text with another size gets its own line height.
     pub line_height_multiple: f32,
@@ -42,14 +42,123 @@ pub struct ResolvedTextStyle {
     pub decoration_color: Option<Color>,
     /// How the decoration lines are drawn.
     pub decoration_style: DecorationStyle,
-    /// Thickness of the decoration lines in points; `None` is the font's.
-    pub decoration_thickness: Option<f32>,
+    /// Thickness of the decoration lines; `None` is the font's.
+    pub decoration_thickness: Option<Points>,
     /// Distance of the underline below the baseline; `None` is the font's.
-    pub underline_offset: Option<f32>,
+    pub underline_offset: Option<Points>,
     /// Case transform (applied by the core when building the text).
     pub transform: TextTransform,
     /// OpenType features (`fontVariant`).
     pub font_variant: FontVariant,
+    /// The background of the nested text this run is in (drawing only).
+    pub background: Option<TextBackground>,
+}
+
+/// The background of a nested `<Text>` (`backgroundColor` and
+/// `borderRadius` on a span): drawing only, behind its characters and
+/// those of the spans inside it, on each line it reaches as the font's
+/// ascent to descent around the baseline (as CSS paints inline boxes),
+/// every line's box rounded alike (`box-decoration-break: clone`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBackground {
+    /// Fill color (never fully transparent).
+    pub color: Color,
+    /// Corner radius.
+    pub radius: Points,
+    /// The span that set it, so neighboring spans that look the same still
+    /// get a box each.
+    pub node: NodeId,
+}
+
+/// A piece of a laid out line, in visual order, for
+/// [`BackgroundBox::join`]: a cluster, glyph or run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinePiece {
+    /// Left edge.
+    pub x: Points,
+    /// Advance.
+    pub width: Points,
+    /// The background of its characters
+    /// ([`AttributedText::background_at`]).
+    pub background: Option<TextBackground>,
+    /// Its font's ascent above the baseline (0 for an attachment).
+    pub ascent: Points,
+    /// Its font's descent below the baseline.
+    pub descent: Points,
+}
+
+/// One box of a span's background on one line (see
+/// [`BackgroundBox::join`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackgroundBox {
+    /// Left edge, in the coordinates of the pieces.
+    pub x: Points,
+    /// Width.
+    pub width: Points,
+    /// Top, above the baseline: the tallest ascent of its pieces.
+    pub ascent: Points,
+    /// Bottom, below the baseline.
+    pub descent: Points,
+    /// What fills it.
+    pub background: TextBackground,
+}
+
+impl BackgroundBox {
+    /// Calls `f` with the boxes of span backgrounds on one line, given its
+    /// `pieces` in visual order: neighboring pieces of one background join
+    /// into one box, cut to `(left, right)` (whitespace hanging past the
+    /// line's end is not painted).
+    pub fn join(
+        pieces: impl IntoIterator<Item = LinePiece>,
+        (left, right): (Points, Points),
+        mut f: impl FnMut(BackgroundBox),
+    ) {
+        let mut current: Option<BackgroundBox> = None;
+        let mut emit = |b: Option<BackgroundBox>| {
+            if let Some(mut b) = b {
+                let x1 = (b.x + b.width).min(right);
+                b.x = b.x.max(left);
+                b.width = x1 - b.x;
+                if b.width > Points::ZERO && b.ascent + b.descent > Points::ZERO {
+                    f(b);
+                }
+            }
+        };
+        for p in pieces {
+            let Some(background) = p.background else {
+                emit(current.take());
+                continue;
+            };
+            match &mut current {
+                Some(b) if b.background == background => {
+                    b.width = (p.x + p.width).max(b.x + b.width) - b.x;
+                    b.ascent = b.ascent.max(p.ascent);
+                    b.descent = b.descent.max(p.descent);
+                }
+                _ => {
+                    emit(current.take());
+                    current = Some(BackgroundBox {
+                        x: p.x,
+                        width: p.width,
+                        ascent: p.ascent,
+                        descent: p.descent,
+                        background,
+                    });
+                }
+            }
+        }
+        emit(current);
+    }
+
+    /// The radius of its corners: the background's, at most half its
+    /// width or height.
+    pub fn radius(&self) -> Points {
+        self.background
+            .radius
+            .min(self.width / 2.0)
+            .min((self.ascent + self.descent) / 2.0)
+            .max(Points::ZERO)
+    }
 }
 
 impl Default for ResolvedTextStyle {
@@ -57,12 +166,12 @@ impl Default for ResolvedTextStyle {
     fn default() -> Self {
         Self {
             color: Color::BLACK,
-            font_size: 14.0,
+            font_size: px(14.0),
             font_weight: 400,
-            line_height: 0.0,
+            line_height: Points::ZERO,
             font_family: None,
             italic: false,
-            letter_spacing: 0.0,
+            letter_spacing: Points::ZERO,
             decoration: TextDecoration {
                 underline: false,
                 line_through: false,
@@ -74,6 +183,7 @@ impl Default for ResolvedTextStyle {
             line_height_multiple: 0.0,
             transform: TextTransform::None,
             font_variant: FontVariant(0),
+            background: None,
         }
     }
 }
@@ -115,6 +225,7 @@ impl ResolvedTextStyle {
             underline_offset: style.underline_offset.or(self.underline_offset),
             transform: style.transform.unwrap_or(self.transform),
             font_variant: style.font_variant.unwrap_or(self.font_variant),
+            background: self.background,
         }
     }
 
@@ -183,20 +294,140 @@ pub struct AttributedText {
     pub selection_color: Option<Color>,
     /// Inline views and images, in text order: each is an object
     /// replacement character (U+FFFC) the engine gives the attachment's
-    /// size, sitting on the baseline.
+    /// size. Their optional alignment is passed separately to
+    /// `TextEngine::prepare_aligned`; `prepare` places them on the baseline.
     pub attachments: Vec<TextAttachment>,
 }
 
 /// A view or image inside a text block (see
 /// [`AttributedText::attachments`]).
+///
+/// Optional placement is held by [`AttachmentAlignments`], leaving this
+/// struct's three-field construction compatible with existing engines.
+/// Every engine places it with the same rule: its top
+/// [`ascent`](Self::ascent) above the baseline, the line reserving its
+/// [`extent`](Self::extent) (so a line grows where the attachment reaches
+/// past the font around it). Only the font's metrics are the platform's.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextAttachment {
     /// Its placeholder character (UTF-16 offset).
     pub index: u32,
-    /// Width in points.
-    pub width: f32,
-    /// Height in points (all above the baseline).
-    pub height: f32,
+    /// Width.
+    pub width: Points,
+    /// Height.
+    pub height: Points,
+}
+
+/// The vertical metrics of the font around an attachment (the style of
+/// its placeholder), which [`TextAttachment::ascent`] places it against.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub struct FontExtent {
+    /// Above the baseline (positive).
+    pub ascent: Points,
+    /// Below the baseline (positive).
+    pub descent: Points,
+    /// Height of lowercase letters.
+    pub x_height: Points,
+}
+
+impl FontExtent {
+    /// A font's ascent, descent and x height.
+    pub fn new(ascent: Points, descent: Points, x_height: Points) -> Self {
+        Self {
+            ascent,
+            descent,
+            x_height,
+        }
+    }
+}
+
+impl TextAttachment {
+    /// The distance of its top above the baseline (negative: below it),
+    /// in a line of `font`: CSS `vertical-align` for a replaced inline
+    /// box. `baseline` needs no metrics (the height, whatever `font` is).
+    pub fn ascent(&self, font: FontExtent, align: VerticalAlign) -> Points {
+        let h = self.height;
+        match align {
+            VerticalAlign::Baseline => h,
+            VerticalAlign::TextTop => font.ascent,
+            VerticalAlign::TextBottom => h - font.descent,
+            VerticalAlign::Middle => (h + font.x_height) / 2.0,
+        }
+    }
+
+    /// What its line reserves for it above and below the baseline (each
+    /// at least 0): with the font's own, the line's extent, so the line
+    /// grows where the attachment reaches past the font. Engines give the
+    /// placeholder these metrics (a run delegate's ascent and descent, a
+    /// replacement span's font metrics) and draw its top
+    /// [`ascent`](Self::ascent) above the baseline.
+    pub fn extent(&self, font: FontExtent, align: VerticalAlign) -> (Points, Points) {
+        let ascent = self.ascent(font, align);
+        (
+            ascent.max(Points::ZERO),
+            (self.height - ascent).max(Points::ZERO),
+        )
+    }
+}
+
+/// Optional alignment of inline attachments, keyed by their UTF-16 offsets.
+/// Kept separately so existing `TextAttachment` and `AttributedText` literals
+/// and custom text engines remain source compatible.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub struct AttachmentAlignments {
+    values: Vec<(u32, VerticalAlign)>,
+}
+
+impl AttachmentAlignments {
+    /// The alignment at `index`; unspecified attachments stand on the baseline.
+    pub fn get(&self, index: u32) -> VerticalAlign {
+        self.values
+            .binary_search_by_key(&index, |v| v.0)
+            .map_or(VerticalAlign::Baseline, |i| self.values[i].1)
+    }
+
+    /// Sets an attachment's alignment. Baseline needs no stored entry.
+    pub fn set(&mut self, index: u32, align: VerticalAlign) {
+        match self.values.binary_search_by_key(&index, |v| v.0) {
+            Ok(i) if align == VerticalAlign::Baseline => {
+                self.values.remove(i);
+            }
+            Ok(i) => self.values[i].1 = align,
+            Err(i) if align != VerticalAlign::Baseline => self.values.insert(i, (index, align)),
+            Err(_) => {}
+        }
+    }
+
+    /// Appends an attachment and records its alignment.
+    pub fn push(
+        &mut self,
+        text: &mut AttributedText,
+        size: Size<Points>,
+        align: VerticalAlign,
+        style: ResolvedTextStyle,
+    ) {
+        self.set(text.len_utf16(), align);
+        text.push_attachment(size, style);
+    }
+
+    /// Whether all attachments use the default baseline alignment.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// The text's layout hash including attachment alignment.
+    pub fn layout_hash(&self, text: &AttributedText) -> u64 {
+        if self.is_empty() {
+            return text.layout_hash();
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.layout_hash().hash(&mut h);
+        self.hash(&mut h);
+        h.finish()
+    }
 }
 
 /// The character standing for an attachment.
@@ -222,6 +453,23 @@ impl AttributedText {
         self.selectable == Some(true)
     }
 
+    /// Whether a span has a background ([`TextBackground`]).
+    pub fn has_backgrounds(&self) -> bool {
+        self.spans.iter().any(|s| s.style.background.is_some())
+    }
+
+    /// The span containing the UTF-16 offset `index` (the last one past the
+    /// end).
+    pub fn span_at(&self, index: u32) -> Option<&TextSpan> {
+        let i = self.spans.partition_point(|s| s.end <= index);
+        self.spans.get(i.min(self.spans.len().saturating_sub(1)))
+    }
+
+    /// The background of the character at the UTF-16 offset `index`.
+    pub fn background_at(&self, index: u32) -> Option<TextBackground> {
+        self.span_at(index)?.style.background
+    }
+
     /// Length of the text so far, in UTF-16 units.
     pub fn len_utf16(&self) -> u32 {
         self.spans.last().map_or(0, |s| s.end)
@@ -235,15 +483,14 @@ impl AttributedText {
             .min_by_key(|l| l.end - l.start)
     }
 
-    /// Appends an attachment of `width` x `height` points: its
-    /// placeholder character in `style` (the line's font around it).
-    pub fn push_attachment(&mut self, width: f32, height: f32, style: ResolvedTextStyle) {
+    /// Appends an attachment of `size` on the baseline.
+    pub fn push_attachment(&mut self, size: Size<Points>, style: ResolvedTextStyle) {
         let index = self.len_utf16();
         self.push(ATTACHMENT_CHAR.encode_utf8(&mut [0; 3]), style);
         self.attachments.push(TextAttachment {
             index,
-            width,
-            height,
+            width: size.width,
+            height: size.height,
         });
     }
 
@@ -298,12 +545,12 @@ impl AttributedText {
         for s in &self.spans {
             (s.start, s.end, s.style.font_weight).hash(&mut h);
             (s.style.font_family, s.style.italic, s.style.font_variant).hash(&mut h);
-            s.style.font_size.to_bits().hash(&mut h);
-            s.style.line_height.to_bits().hash(&mut h);
-            s.style.letter_spacing.to_bits().hash(&mut h);
+            s.style.font_size.0.to_bits().hash(&mut h);
+            s.style.line_height.0.to_bits().hash(&mut h);
+            s.style.letter_spacing.0.to_bits().hash(&mut h);
         }
         for a in &self.attachments {
-            (a.index, a.width.to_bits(), a.height.to_bits()).hash(&mut h);
+            (a.index, a.width.0.to_bits(), a.height.0.to_bits()).hash(&mut h);
         }
         h.finish()
     }
@@ -342,11 +589,32 @@ pub trait TextEngine {
     /// Prepares `text` for measuring and layout.
     fn prepare(&self, text: &AttributedText) -> Self::Prepared;
 
+    /// Prepares text with optional inline alignment. Existing engines retain
+    /// baseline placement until they opt into this extension.
+    fn prepare_aligned(
+        &self,
+        text: &AttributedText,
+        alignments: &AttachmentAlignments,
+    ) -> Self::Prepared {
+        let _ = alignments;
+        self.prepare(text)
+    }
+
     /// Size of the prepared text with an optional maximum width.
-    fn measure(&self, prepared: &Self::Prepared, max_width: Option<f32>) -> Size;
+    fn measure(&self, prepared: &Self::Prepared, max_width: Option<Points>) -> Size<Points>;
 
     /// The final layout in a box of exactly `size`, for drawing.
-    fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout;
+    fn layout(&self, prepared: &Self::Prepared, size: Size<Points>) -> TextLayout;
+
+    /// An optional Canvas-specific line advance in points.
+    ///
+    /// Backends whose Canvas fonts differ from their regular text geometry can
+    /// measure with the same shaping used by Canvas drawing. Returning `None`
+    /// keeps the default path through [`Self::prepare`] and [`Self::measure`].
+    fn measure_canvas(&self, font: &crate::canvas::CanvasFont, text: &str) -> Option<Points> {
+        let _ = (font, text);
+        None
+    }
 
     /// The lines of a final layout (`onTextLayout`); `text` is left empty
     /// (the core fills it in).
@@ -356,10 +624,9 @@ pub trait TextEngine {
     }
 
     /// Where a final layout put the text's attachments, in order: the
-    /// top left `(x, y)` of each placeholder in the content box (y down,
-    /// points), or `None` when it was cut off (lines past the limit, an
-    /// ellipsis).
-    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+    /// top left of each placeholder in the content box (y down), or `None`
+    /// when it was cut off (lines past the limit, an ellipsis).
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<Point<Points>>> {
         let _ = layout;
         Vec::new()
     }
@@ -382,19 +649,31 @@ impl<T: TextEngine> TextEngine for std::rc::Rc<T> {
         (**self).prepare(text)
     }
 
-    fn measure(&self, prepared: &Self::Prepared, max_width: Option<f32>) -> Size {
+    fn prepare_aligned(
+        &self,
+        text: &AttributedText,
+        alignments: &AttachmentAlignments,
+    ) -> Self::Prepared {
+        (**self).prepare_aligned(text, alignments)
+    }
+
+    fn measure(&self, prepared: &Self::Prepared, max_width: Option<Points>) -> Size<Points> {
         (**self).measure(prepared, max_width)
     }
 
-    fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout {
+    fn layout(&self, prepared: &Self::Prepared, size: Size<Points>) -> TextLayout {
         (**self).layout(prepared, size)
+    }
+
+    fn measure_canvas(&self, font: &crate::canvas::CanvasFont, text: &str) -> Option<Points> {
+        (**self).measure_canvas(font, text)
     }
 
     fn lines(&self, layout: &TextLayout) -> Vec<TextLine> {
         (**self).lines(layout)
     }
 
-    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<Point<Points>>> {
         (**self).attachments(layout)
     }
 
@@ -414,74 +693,99 @@ pub struct TextLine {
     /// End offset (UTF-16 units, exclusive).
     pub end: u32,
     /// Left edge.
-    pub x: f32,
+    pub x: Points,
     /// Top edge.
-    pub y: f32,
+    pub y: Points,
     /// Typographic width.
-    pub width: f32,
+    pub width: Points,
     /// Height (ascender + descender + leading).
-    pub height: f32,
+    pub height: Points,
     /// Above the baseline.
-    pub ascender: f32,
+    pub ascender: Points,
     /// Below the baseline.
-    pub descender: f32,
+    pub descender: Points,
     /// Height of capitals.
-    pub cap_height: f32,
+    pub cap_height: Points,
     /// Height of lowercase letters.
-    pub x_height: f32,
+    pub x_height: Points,
 }
 
 /// A deterministic, platform-free [`TextEngine`] for headless runs and
 /// tests: every character is `0.55 × font size` wide and lines are
-/// `1.2 × font size` tall.
+/// `1.2 × font size` tall, their baseline at the bottom (the font's ascent
+/// is the line, its descent 0, its x height `0.5 × font size`), where
+/// attachments are placed by [`TextAttachment::ascent`] on the first line.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ApproxTextEngine;
 
 impl TextEngine for ApproxTextEngine {
     /// `(character count, font size, max lines, attachments)`.
-    type Prepared = (usize, f32, u32, Vec<TextAttachment>);
+    type Prepared = (usize, Points, u32, Vec<TextAttachment>);
 
     fn prepare(&self, text: &AttributedText) -> Self::Prepared {
-        let size = text.spans.first().map_or(14.0, |s| s.style.font_size);
+        self.prepare_aligned(text, &AttachmentAlignments::default())
+    }
+
+    fn prepare_aligned(
+        &self,
+        text: &AttributedText,
+        alignments: &AttachmentAlignments,
+    ) -> Self::Prepared {
+        let size = text.spans.first().map_or(px(14.0), |s| s.style.font_size);
         (
             text.text.chars().count(),
             size,
             text.max_lines,
-            text.attachments.clone(),
+            text.attachments
+                .iter()
+                .map(|a| {
+                    let metrics = FontExtent::new(size * 1.2, Points::ZERO, size * 0.5);
+                    TextAttachment {
+                        height: a.ascent(metrics, alignments.get(a.index)),
+                        ..*a
+                    }
+                })
+                .collect(),
         )
     }
 
     fn measure(
         &self,
-        &(chars, size, max_lines, _): &Self::Prepared,
-        max_width: Option<f32>,
-    ) -> Size {
-        let width = chars as f32 * size * 0.55;
-        let line = size * 1.2;
+        &(chars, font, max_lines, _): &Self::Prepared,
+        max_width: Option<Points>,
+    ) -> Size<Points> {
+        // The order of the products is kept: it decides the last bit.
+        let width = Points(chars as f32 * font.0 * 0.55);
+        let line = font * 1.2;
         let (width, mut lines) = match max_width {
-            Some(max) if width > max && max > 0.0 => (max, (width / max).ceil()),
+            Some(max) if width > max && max > Points::ZERO => (max, (width / max).ceil()),
             _ => (width, 1.0),
         };
         if max_lines > 0 {
             lines = lines.min(max_lines as f32);
         }
-        Size::new(width, lines * line)
+        size(width, line * lines)
     }
 
-    fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout {
+    fn layout(&self, prepared: &Self::Prepared, size: Size<Points>) -> TextLayout {
         // On one line, each character as wide as the others.
         let (_, font, _, attachments) = prepared;
-        let line = font * 1.2;
-        let points: Vec<Option<(f32, f32)>> = attachments
+        let line = *font * 1.2;
+        let points: Vec<Option<Point<Points>>> = attachments
             .iter()
-            .map(|a| Some((a.index as f32 * font * 0.55, (line - a.height).max(0.0))))
+            .map(|a| {
+                Some(point(
+                    Points(a.index as f32 * font.0 * 0.55),
+                    (line - a.height).max(Points::ZERO),
+                ))
+            })
             .collect();
         TextLayout(Arc::new((size, points)))
     }
 
-    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<Point<Points>>> {
         layout
-            .downcast::<(Size, Vec<Option<(f32, f32)>>)>()
+            .downcast::<(Size<Points>, Vec<Option<Point<Points>>>)>()
             .map_or_else(Vec::new, |(_, p)| p.clone())
     }
 
@@ -499,20 +803,24 @@ impl TextEngine for ApproxTextEngine {
 /// entries.
 #[derive(Default)]
 pub(crate) struct MeasureCache {
-    current: FxHashMap<(u64, u32), Size>,
-    previous: FxHashMap<(u64, u32), Size>,
+    current: FxHashMap<(u64, u32), Size<Points>>,
+    previous: FxHashMap<(u64, u32), Size<Points>>,
 }
 
 impl MeasureCache {
     const GENERATION: usize = 512;
 
     #[inline]
-    fn key(layout_hash: u64, max_width: Option<f32>) -> (u64, u32) {
+    fn key(layout_hash: u64, max_width: Option<Points>) -> (u64, u32) {
         // NaN never comes from taffy, so it can stand for "unconstrained".
-        (layout_hash, max_width.unwrap_or(f32::NAN).to_bits())
+        (layout_hash, max_width.map_or(f32::NAN, |w| w.0).to_bits())
     }
 
-    pub(crate) fn get(&mut self, layout_hash: u64, max_width: Option<f32>) -> Option<Size> {
+    pub(crate) fn get(
+        &mut self,
+        layout_hash: u64,
+        max_width: Option<Points>,
+    ) -> Option<Size<Points>> {
         let key = Self::key(layout_hash, max_width);
         if let Some(&size) = self.current.get(&key) {
             return Some(size);
@@ -522,11 +830,16 @@ impl MeasureCache {
         Some(size)
     }
 
-    pub(crate) fn insert(&mut self, layout_hash: u64, max_width: Option<f32>, size: Size) {
+    pub(crate) fn insert(
+        &mut self,
+        layout_hash: u64,
+        max_width: Option<Points>,
+        size: Size<Points>,
+    ) {
         self.insert_key(Self::key(layout_hash, max_width), size);
     }
 
-    fn insert_key(&mut self, key: (u64, u32), size: Size) {
+    fn insert_key(&mut self, key: (u64, u32), size: Size<Points>) {
         if self.current.len() >= Self::GENERATION {
             self.previous = std::mem::take(&mut self.current);
             self.current.reserve(Self::GENERATION);
@@ -578,7 +891,7 @@ mod tests {
         assert!(a.layout_eq(&b));
         assert_eq!(a.layout_hash(), b.layout_hash());
         let mut c = b.clone();
-        c.spans[0].style.font_size = 15.0;
+        c.spans[0].style.font_size = px(15.0);
         assert!(!a.layout_eq(&c));
         assert_ne!(a.layout_hash(), c.layout_hash());
     }
@@ -586,14 +899,92 @@ mod tests {
     #[test]
     fn measure_cache_is_bounded_and_promotes() {
         let mut cache = MeasureCache::default();
-        cache.insert(1, Some(100.0), Size::new(1.0, 1.0));
+        cache.insert(1, Some(px(100.0)), size(px(1.0), px(1.0)));
         for i in 0..10_000u64 {
             cache.insert(1000 + i, None, Size::default());
             // Keep entry 1 hot: every lookup promotes it.
-            assert!(cache.get(1, Some(100.0)).is_some());
+            assert!(cache.get(1, Some(px(100.0))).is_some());
             assert!(cache.len() <= 2 * MeasureCache::GENERATION);
         }
-        assert!(cache.get(1, Some(99.0)).is_none());
+        assert!(cache.get(1, Some(px(99.0))).is_none());
         assert!(cache.get(1000, None).is_none(), "cold entries are evicted");
+    }
+
+    #[test]
+    fn attachments_sit_in_their_line_by_vertical_align() {
+        // A font 10 above and 3 below the baseline, x height 5; a 20 pt
+        // tall attachment.
+        let font = FontExtent::new(px(10.0), px(3.0), px(5.0));
+        let at = || TextAttachment {
+            index: 0,
+            width: px(8.0),
+            height: px(20.0),
+        };
+        let place = |align| {
+            let a = at();
+            (a.ascent(font, align), a.extent(font, align))
+        };
+        // Bottom on the baseline: all of it above.
+        assert_eq!(
+            place(VerticalAlign::Baseline),
+            (px(20.0), (px(20.0), px(0.0)))
+        );
+        // Top at the font's top: 10 above, 10 below (the line grows down).
+        assert_eq!(
+            place(VerticalAlign::TextTop),
+            (px(10.0), (px(10.0), px(10.0)))
+        );
+        // Bottom at the font's bottom (Android's `ImageSpan` default).
+        assert_eq!(
+            place(VerticalAlign::TextBottom),
+            (px(17.0), (px(17.0), px(3.0)))
+        );
+        // Middle 2.5 above the baseline.
+        assert_eq!(
+            place(VerticalAlign::Middle),
+            (px(12.5), (px(12.5), px(7.5)))
+        );
+        // Smaller than the font: what it does not reach reserves nothing.
+        let small = TextAttachment {
+            height: px(4.0),
+            ..at()
+        };
+        assert_eq!(small.ascent(font, VerticalAlign::TextTop), px(10.0));
+        assert_eq!(
+            small.extent(font, VerticalAlign::TextTop),
+            (px(10.0), px(0.0))
+        );
+        let small = TextAttachment {
+            height: px(2.0),
+            ..at()
+        };
+        assert_eq!(small.ascent(font, VerticalAlign::TextBottom), px(-1.0));
+        assert_eq!(
+            small.extent(font, VerticalAlign::TextBottom),
+            (px(0.0), px(3.0))
+        );
+    }
+
+    #[test]
+    fn approx_engine_places_aligned_attachments() {
+        let engine = ApproxTextEngine;
+        let style = ResolvedTextStyle {
+            font_size: px(10.0),
+            ..ResolvedTextStyle::default()
+        };
+        let y = |align| {
+            let mut t = AttributedText::default();
+            t.push("ab", style);
+            let mut alignments = AttachmentAlignments::default();
+            alignments.push(&mut t, size(px(8.0), px(6.0)), align, style);
+            let prepared = engine.prepare_aligned(&t, &alignments);
+            let layout = engine.layout(&prepared, size(px(100.0), px(12.0)));
+            engine.attachments(&layout)[0].map(|p| (p.x, p.y))
+        };
+        // A 12 pt line with its baseline at the bottom, x height 5.
+        assert_eq!(y(VerticalAlign::Baseline), Some((px(11.0), px(6.0))));
+        assert_eq!(y(VerticalAlign::TextTop), Some((px(11.0), px(0.0))));
+        assert_eq!(y(VerticalAlign::TextBottom), Some((px(11.0), px(6.0))));
+        assert_eq!(y(VerticalAlign::Middle), Some((px(11.0), px(6.5))));
     }
 }

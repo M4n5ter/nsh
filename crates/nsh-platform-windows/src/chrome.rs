@@ -34,7 +34,7 @@ use nsh_core::{
         DesktopCommand, Key, MenuAction, MenuItem, MenuRole, Shortcut, TitleBarStyle, WindowFrame,
         WindowLevel,
     },
-    platform::Insets,
+    geometry::{Edges, Points},
 };
 use windows::{
     Win32::{
@@ -153,6 +153,62 @@ pub(crate) struct Chrome {
     entries: RefCell<Vec<Entry>>,
     /// The context menu to show once the batch is applied.
     popup: RefCell<Option<Popup>>,
+    /// The app's context menu tracking now, and the item a test chose
+    /// from it (`nsh test --target windows`), carried out once it closes.
+    #[cfg(feature = "dev")]
+    tracked_popup: RefCell<Option<Arc<[MenuItem]>>>,
+    #[cfg(feature = "dev")]
+    test_choice: Cell<Option<(u32, Option<MenuRole>)>>,
+}
+
+/// Chooses the item of the app's open context menu at the end of `path`
+/// (the labels of the submenus on the way, then its own), as a click on it
+/// does: the menu ends, then the item is carried out (`nsh test --target
+/// windows`).
+#[cfg(feature = "dev")]
+pub(crate) fn choose_open_menu(surface: &Surface, path: &[String]) -> Result<(), String> {
+    let items = surface
+        .chrome
+        .tracked_popup
+        .borrow()
+        .clone()
+        .ok_or("no context menu is open")?;
+    let mut level: &[MenuItem] = &items;
+    for (n, label) in path.iter().enumerate() {
+        let last = n + 1 == path.len();
+        let item = level
+            .iter()
+            .find(|item| match item {
+                MenuItem::Action(action) => last && action.label == *label,
+                MenuItem::Submenu { label: l, .. } => !last && l == label,
+                MenuItem::Separator => false,
+            })
+            .ok_or_else(|| format!("the menu has no item {label:?}"))?;
+        match item {
+            MenuItem::Action(action) => {
+                surface
+                    .chrome
+                    .test_choice
+                    .set(Some((action.id, action.role)));
+            }
+            MenuItem::Submenu { items, .. } => level = items,
+            MenuItem::Separator => {}
+        }
+    }
+    // SAFETY: ends the menu this thread tracks.
+    let _ = unsafe { EndMenu() };
+    Ok(())
+}
+
+/// Closes the app's open context menu with nothing chosen.
+#[cfg(feature = "dev")]
+pub(crate) fn close_open_menu(surface: &Surface) -> Result<(), String> {
+    if surface.chrome.tracked_popup.borrow().is_none() {
+        return Err("no context menu is open".into());
+    }
+    // SAFETY: ends the menu this thread tracks.
+    let _ = unsafe { EndMenu() };
+    Ok(())
 }
 
 fn top_level(hwnd: HWND) -> bool {
@@ -188,14 +244,14 @@ fn frame_thickness(hwnd: HWND) -> i32 {
 fn update_area(surface: &Surface) {
     let mut env = surface.environment.get();
     env.title_bar = if hidden(surface) {
-        Insets {
-            top: caption_height(surface),
-            right: 3.0 * BUTTON_WIDTH,
-            bottom: 0.0,
-            left: 0.0,
+        Edges {
+            top: Points(caption_height(surface)),
+            right: Points(3.0 * BUTTON_WIDTH),
+            bottom: Points(0.0),
+            left: Points(0.0),
         }
     } else {
-        Insets::default()
+        Edges::default()
     };
     surface.set_environment(env);
 }
@@ -235,7 +291,8 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             let _ = unsafe { SetWindowTextW(hwnd, &windows::core::HSTRING::from(title.as_str())) };
         }
         DesktopCommand::SetTitleBar { style, height } => {
-            let changed = c.height.replace(*height) != *height;
+            let height = height.map(|h| h.0);
+            let changed = c.height.replace(height) != height;
             if c.style.replace(*style) != *style || changed {
                 show_menu_bar(surface);
                 frame_changed(hwnd);
@@ -251,6 +308,17 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         DesktopCommand::ToggleFullScreen => toggle_fullscreen(surface),
         DesktopCommand::SetFrame(frame) => set_frame(surface, hwnd, frame),
         DesktopCommand::SetLevel(level) => set_level(hwnd, *level),
+        DesktopCommand::OrderFront => {
+            // Restoring an already maximized or snapped window would change
+            // its bounds when the caller only asked to focus it.
+            // SAFETY: hwnd is the surface's live top-level window.
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
         DesktopCommand::Close => close(hwnd),
         DesktopCommand::SetMenu(menu) => {
             *c.menu.borrow_mut() = menu.clone();
@@ -260,7 +328,7 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             surface,
             Popup {
                 items: items.clone(),
-                at: *at,
+                at: at.map(|p| (p.x.0, p.y.0)),
                 actions: Vec::new(),
             },
         ),
@@ -278,14 +346,14 @@ fn set_frame(surface: &Surface, hwnd: HWND, frame: &WindowFrame) {
         return;
     }
     let scale = surface.scale();
-    let x = frame.x.map_or(rect.left, |v| (v * scale).round() as i32);
-    let y = frame.y.map_or(rect.top, |v| (v * scale).round() as i32);
+    let x = frame.x.map_or(rect.left, |v| (v.0 * scale).round() as i32);
+    let y = frame.y.map_or(rect.top, |v| (v.0 * scale).round() as i32);
     let width = frame
         .width
-        .map_or(rect.right - rect.left, |v| (v * scale).round() as i32);
+        .map_or(rect.right - rect.left, |v| (v.0 * scale).round() as i32);
     let height = frame
         .height
-        .map_or(rect.bottom - rect.top, |v| (v * scale).round() as i32);
+        .map_or(rect.bottom - rect.top, |v| (v.0 * scale).round() as i32);
     // SAFETY: a plain call on a live window; SWP_NOZORDER keeps the level
     // `set_level` may have set.
     let _ = unsafe {
@@ -954,6 +1022,10 @@ pub(crate) fn show_popup(surface: &Rc<Surface>) {
         // The window must be in front for the menu to close when clicking
         // elsewhere.
         let _ = SetForegroundWindow(hwnd);
+        #[cfg(feature = "dev")]
+        if actions.is_empty() {
+            *surface.chrome.tracked_popup.borrow_mut() = Some(items.clone());
+        }
         let chosen = TrackPopupMenuEx(
             menu,
             (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN).0,
@@ -965,6 +1037,13 @@ pub(crate) fn show_popup(surface: &Rc<Surface>) {
         let _ = DestroyMenu(menu);
         chosen.0 as usize
     };
+    #[cfg(feature = "dev")]
+    {
+        surface.chrome.tracked_popup.borrow_mut().take();
+        if let Some((id, role)) = surface.chrome.test_choice.take() {
+            choose(surface, id, role);
+        }
+    }
     if let Some(entry) = entries.get(chosen.wrapping_sub(1)).copied() {
         match actions.get((entry.id as usize).wrapping_sub(1)) {
             Some(action) => action(surface),

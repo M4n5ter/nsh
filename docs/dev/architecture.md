@@ -50,6 +50,12 @@ Input                        native gestures -> EngineControl::dispatch_event ->
   element per surface with GPUI's primitives (`DrawCx` keeps the transform and opacity GPUI lacks); each commit is one
   closure on GPUI's main thread (`rt::invoke`), and every main-thread entry point ends with `rt::flush`, which
   notifies the views of changed surfaces; native animations run on the window's frames.
+- **Terminal** (`tui.md`): one retained `Surface` per engine, drawn into a Ratatui buffer. The engine typesets
+  terminal graphemes with `TerminalTextEngine`; the terminal loop applies each mount batch and handles focus,
+  editing, scrolling and native animation locally. Layout remains in points (8×16 per cell by default); one
+  per-surface worker rasterizes images and canvases and encodes supported terminal graphics protocols. Embedding hosts own terminal IO and event routing;
+  `run_app` supplies raw-mode lifecycle and a full-screen loop. `Renderer::Terminal` keeps the rendering medium
+  separate from the host OS.
 - **Web APIs** (TS apps only; Rust code uses crates of its choice): `fetch` with `Headers` / `Request` / `Response`, the
   Streams API (readable streams with byte streams and BYOB readers, writable and transform streams, `pipeTo` /
   `pipeThrough`, `TextEncoderStream` / `TextDecoderStream`), `Blob` / `File` / `FormData`, `URL` / `URLSearchParams`,
@@ -60,14 +66,43 @@ Input                        native gestures -> EngineControl::dispatch_event ->
   there too (`web/intl/`): formatted in Rust from hand-written tables of the common languages rather than CLDR (a few
   kilobytes instead of ICU4X's megabytes; trade-offs and limits in its module doc), in `Environment::locale` by
   default (the platform's region format: `NSLocale.currentLocale`, `Locale.getDefault()`).
+- **Time**: an engine runs on a `nsh_core::time::Clock` (`EngineConfig::clock`), its thread's while it runs
+  (`Clock::enter`): JS's timers, Rust tasks' timers, throttled scroll and hover events and the frames' time read it
+  through `nsh_core::time::now()`, `Intl` and `Date` through `unix_ms()`. The system's clock is the default. A manual
+  one (`Clock::manual`) moves only when told: the loop no longer wakes for timers, and `EngineControl::advance_clock`
+  steps it to each time something comes due on the way (timers, task timers, the clock's alarms such as a held-back
+  response), running it before going on, as Playwright's `clock.runFor` and Jest's fake timers do. A manual clock
+  that moves with frames (`Clock::with_frames`: a test's app on a real platform, `nsh test --target`) also moves to a
+  frame after the last (`time::FRAME`) with each display frame, and runs the frames the app waits for on the way
+  while it is moved. QuickJS reads the
+  system's time in C for `Date` and `performance`, so on a manual clock `nsh-js` replaces them (`clock.rs`: a native
+  `Date` constructor that hands the intrinsic the clock's time and shares its prototype, and a `performance` of the
+  same shape). The idle collection keeps the system's time.
 - **Networking**: requests go to the platform stack through `nsh_engine::Network`
-  (NSURLSession, HttpURLConnection; ureq on Linux, on Windows and for `nsh trace`), streaming both ways: the stack reports the response head,
+  (NSURLSession, HttpURLConnection; ureq on Linux, on Windows and for `nsh test`), streaming both ways: the stack reports the response head,
   then body chunks as they arrive (`FetchEvent`), and JS can pause reading (back pressure); a streamed request body is
   sent in chunks the stack asks for one at a time (`FetchEvent::BodyWanted`, chunked transfer encoding).
 
+## Layers
+
+NSH is layered as GPUI Kit is (an architecture rule, `AGENTS.md`):
+
+| NSH | GPUI Kit | What | JS |
+|---|---|---|---|
+| `nsh-core` (with `nsh-js`, the runtime) | `gpui` | Primitives, the environment, layout, rendering, the reactive graph | `nsh`, `nsh/<module>` |
+| `nsh-base` | `gpui-base` | Unstyled base components: behavior, state, focus, keyboard, accessibility; the look is the app's | `nsh/base` |
+| an app's own UI set, or a community crate | `gpui-component` | A styled component library | the crate's specifier (`app/native`) |
+
+`nsh-base` has `gpui-base`'s scope: navigation, popups (popovers, menus, tooltips, sheets, on the core's overlays),
+safe areas, system dialogs, the keyboard and the status bar today; controls (toggles, sliders, selects, ...) join as
+their behavior is written. Its
+components take the app's styles and children, expose their parts and report changes of state the app owns
+(`components.md`). The styled layer is never part of NSH: apps build their own on `nsh/base` and the primitives, or
+use one a third party publishes as a crate.
+
 ## Crates
 
-Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ← `nsh-ios-host` / `nsh-ios-app` / `nsh-linux-host` / `nsh-linux-app` / `nsh-macos-host` / `nsh-macos-app` / `nsh-windows-host` / `nsh-windows-app` / `nsh-gpui-host` / `nsh-gpui-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`; `nsh-ui-mobile` (the mobile components, `components.md`) depends on `nsh-core` only. `nsh-core` must not depend on any platform or JS crate.
+Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ← `nsh-ios-host` / `nsh-ios-app` / `nsh-linux-host` / `nsh-linux-app` / `nsh-macos-host` / `nsh-macos-app` / `nsh-windows-host` / `nsh-windows-app` / `nsh-gpui-host`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`; `nsh-base` depends on `nsh-core` only and is used by the bundler, the platforms and the CLI; an app's own crates (its UI sets, `components.md`) depend on `nsh-core` only. `nsh-core` must not depend on any platform or JS crate.
 
 The CoreText, StaticLayout, Pango, DirectWrite and GPUI text engines are documented in
 `crates/nsh-platform-ios/src/text.rs`, `crates/nsh-platform-android/src/text.rs`, `crates/nsh-platform-linux/src/text.rs`,

@@ -2,21 +2,21 @@
 //! user's settings ([`super::ambient::window`] and the like).
 
 use crate::{
-    EdgeInsets, Size,
-    platform::{Idiom, Locale, Os},
+    EdgeInsets, Points, Size,
+    platform::{Idiom, Locale, Os, Renderer},
 };
 
 /// The environment of a surface, as the platform reports it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Environment {
     /// The surface's size in points.
-    pub window: Size,
+    pub window: Size<Points>,
     /// The edges system UI covers.
     pub safe_area: EdgeInsets,
     /// Space reserved for system controls in a custom desktop title bar.
-    pub title_bar: crate::platform::Insets,
+    pub title_bar: crate::geometry::Edges<crate::geometry::Points>,
     /// The software keyboard's height, 0 when hidden.
-    pub keyboard_height: f32,
+    pub keyboard_height: Points,
     /// How long the keyboard's show / hide animation takes, in seconds.
     pub keyboard_duration: f32,
     /// Dark appearance.
@@ -33,6 +33,8 @@ pub struct Environment {
     pub pixel_ratio: f32,
     /// The operating system.
     pub os: Os,
+    /// How the surface presents its UI (native views, HTML or terminal cells).
+    pub renderer: Renderer,
     /// The OS version: major and minor (iOS), Android's API level and 0.
     pub os_version: (u16, u16),
     /// The kind of device.
@@ -40,18 +42,20 @@ pub struct Environment {
     /// The user's locale, for formatting numbers and dates.
     pub locale: Locale,
     /// In a browser, it runs on an Apple platform: shortcuts follow Apple's
-    /// conventions ([`crate::keymap::apple_keys`]); the other OSes imply
-    /// theirs.
+    /// conventions ([`crate::keymap::apple_keys`]); graphical native
+    /// backends infer theirs from the OS. Terminals use Control.
     pub apple_keyboard: bool,
+    /// The host receives terminal key sequences, even with graphical rendering.
+    pub terminal_keyboard: bool,
 }
 
 impl Default for Environment {
     fn default() -> Self {
         Self {
-            window: Size::new(0.0, 0.0),
+            window: crate::geometry::size_pt(0.0, 0.0),
             safe_area: EdgeInsets::default(),
-            title_bar: crate::platform::Insets::default(),
-            keyboard_height: 0.0,
+            title_bar: crate::geometry::Edges::default(),
+            keyboard_height: Points(0.0),
             keyboard_duration: 0.0,
             dark: false,
             font_scale: 1.0,
@@ -60,10 +64,19 @@ impl Default for Environment {
             rtl: false,
             pixel_ratio: 1.0,
             os: Os::default(),
+            renderer: Renderer::Native,
             os_version: (0, 0),
             idiom: Idiom::Phone,
             locale: Locale::EN_US,
             apple_keyboard: false,
+            terminal_keyboard: false,
         }
+    }
+}
+
+impl Environment {
+    /// Whether command shortcuts use terminal Control-key conventions.
+    pub fn uses_terminal_keyboard(&self) -> bool {
+        self.terminal_keyboard || self.renderer == Renderer::Terminal
     }
 }

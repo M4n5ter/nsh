@@ -379,6 +379,7 @@ pub(super) fn open(
             highlight,
         }],
     });
+    surface.sync_focus();
     surface.invalidate();
 }
 
@@ -386,6 +387,7 @@ pub(super) fn open(
 pub(super) fn close(surface: &Surface) {
     let open = surface.chrome.open.borrow_mut().take();
     if let Some(open) = open {
+        surface.sync_focus();
         if matches!(open.kind, Kind::App) {
             closed_event(surface);
         }
@@ -522,6 +524,34 @@ fn open_submenu(open: &mut Open, level: usize, row: usize, keyboard: bool) {
     });
 }
 
+/// Chooses the item of the open menu at the end of `path` (the labels of
+/// the submenus on the way, then its own), as clicks on them do (`nsh test
+/// --target gpui`).
+#[cfg(feature = "dev")]
+pub(crate) fn choose_path(surface: &Rc<Surface>, path: &[String]) -> Result<(), String> {
+    for (level, wanted) in path.iter().enumerate() {
+        let row = {
+            let open = surface.chrome.open.borrow();
+            let open = open.as_ref().ok_or("no context menu is open")?;
+            let items = &open
+                .levels
+                .get(level)
+                .ok_or_else(|| format!("{wanted:?}'s submenu did not open"))?
+                .items;
+            items
+                .iter()
+                .position(|item| match item {
+                    MenuItem::Action(action) => label(action) == *wanted,
+                    MenuItem::Submenu { label, .. } => label == wanted,
+                    MenuItem::Separator => false,
+                })
+                .ok_or_else(|| format!("the menu has no item {wanted:?}"))?
+        };
+        activate(surface, level, row, false);
+    }
+    Ok(())
+}
+
 /// Item (`level`, `row`) is chosen: a submenu opens, an action closes the
 /// menu and is carried out.
 fn activate(surface: &Rc<Surface>, level: usize, row: usize, keyboard: bool) {
@@ -544,6 +574,7 @@ fn activate(surface: &Rc<Surface>, level: usize, row: usize, keyboard: bool) {
             let Some(open) = surface.chrome.open.borrow_mut().take() else {
                 return;
             };
+            surface.sync_focus();
             surface.invalidate();
             match open.kind {
                 Kind::Local(actions) => {

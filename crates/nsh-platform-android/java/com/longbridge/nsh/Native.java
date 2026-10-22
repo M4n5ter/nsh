@@ -14,7 +14,7 @@ final class Native {
     static final int PAN_START = 2;
     static final int PAN_END = 3;
     static final int REFRESH = 4;
-    static final int END_REACHED = 5;
+    static final int LOAD_MORE = 5;
     static final int SCROLL_END = 6;
     static final int LOAD = 7;
     static final int ERROR = 8;
@@ -40,13 +40,13 @@ final class Native {
     static final int PROGRESS = 28;
     static final int END = 29;
     static final int BUFFER = 30;
-    static final int VIEWABLE_ITEMS_CHANGED = 31;
+    static final int VIEWABLE_ITEMS_CHANGE = 31;
     static final int BACK_PRESS = 32;
     static final int SCROLL = 33;
-    static final int SCROLL_BEGIN_DRAG = 34;
-    static final int SCROLL_END_DRAG = 35;
-    static final int MOMENTUM_SCROLL_BEGIN = 36;
-    static final int MOMENTUM_SCROLL_END = 37;
+    static final int SCROLL_DRAG_START = 34;
+    static final int SCROLL_DRAG_END = 35;
+    static final int MOMENTUM_START = 36;
+    static final int MOMENTUM_END = 37;
     static final int DIALOG = 38;
     static final int TOUCH = 39;
     static final int SELECTION_CHANGE = 40;
@@ -64,6 +64,22 @@ final class Native {
     static final int FILE_DRAG_ENTER = 53;
     static final int FILE_DRAG_LEAVE = 54;
     static final int FILE_DROP = 55;
+    static final int HOVER_MOVE = 56;
+    static final int CONTEXT_MENU = 57;
+    static final int COMPOSITION_CHANGE = 58;
+    static final int PRESS_OUTSIDE = 59;
+    static final int CANCEL = 60;
+    static final int POSITION = 61;
+    static final int MOUSE_MOVE = 62;
+
+    /**
+     * Draws the SVG {@code bytes} for a view {@code maxPx} pixels on its longer side, with its shorter side that long
+     * (0: its intrinsic size, {@code density} pixels per point), as premultiplied RGBA, setting {@code size} to the
+     * raster's width and height and the SVG's intrinsic size in whole points; {@code maxPx} below 0 only measures (an
+     * empty array). {@code intrinsic} receives its unrounded width and height in points. Null when the bytes are
+     * not a valid SVG. Any thread.
+     */
+    static native byte[] svg(byte[] bytes, int maxPx, float density, int[] size, float[] intrinsic);
 
     /** A host whose apps keep their data in {@code dataDir}, each in a directory named by its id. */
     static native long create(NshView view, float density, boolean trace, String dataDir);
@@ -75,6 +91,9 @@ final class Native {
 
     /** VM limits of the apps loaded next (0 keeps a default). */
     static native void setLimits(long handle, int memoryMb, int stackKb, int loadMs, int callMs, int maxNodes);
+
+    /** No VM limits for the apps loaded next: they run on their own. */
+    static native void setStandaloneLimits(long handle);
 
     /** The directory the storage of the apps loaded next is kept in (null: each app's own in the data directory). */
     static native void setStorage(long handle, String dir);
@@ -133,6 +152,13 @@ final class Native {
     static native void environment(long handle, float[] values, boolean dark, String locale);
 
     static native void event(long handle, int id, int kind, String text, int count, float x, float y);
+
+    /**
+     * {@code onHoverMove} of view {@code id}: the pointer at ({@code x}, {@code y}) in it and at
+     * ({@code pageX}, {@code pageY}) in its root view (dp); {@code modifiers}: 1 Ctrl, 2 Alt,
+     * 4 Shift, 8 Meta.
+     */
+    static native void hover(long handle, int id, float x, float y, float pageX, float pageY, int modifiers);
 
     /**
      * An event with an object payload ({@code Double}, {@code Boolean} or

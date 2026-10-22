@@ -1,7 +1,7 @@
 //! What components that run once read of the surface and ask of the
 //! platform, as free functions (TS: `nsh`'s accessors and modules).
 //!
-//! The environment, the theme, globals and screens' insets are signals the
+//! The environment, the design tokens, globals and screens' insets are signals the
 //! core writes: reading one in a binding subscribes it, so a change reaches
 //! only what read it. Services (dialogs, the clipboard, toasts) are actions
 //! for the core; tasks and timers belong to the current owner and end with
@@ -18,17 +18,16 @@ use std::{
 use rustc_hash::FxHashMap;
 
 use super::{
-    AdaptiveColor, Environment, Memo, Owner, Signal, SignalEquals, Theme, cleanup, computed,
+    AdaptiveColor, Environment, Memo, Owner, Signal, SignalEquals, Tokens, cleanup, computed,
     reactive::with_data,
     signal_with,
-    status_bar::{SharedStatusBars, StatusBarEntry, StatusBars},
-    task::{self, Action, Answer, DialogAnswer, Executor, ImageSize},
+    task::{self, Action, Answer, ClipboardImage, DialogAnswer, Executor, ImageSize},
 };
 use crate::{
-    Command, Dialog, EdgeInsets, LayoutAnimation, NodeId, Size, StatusBarSetting,
+    Command, Dialog, EdgeInsets, LayoutAnimation, NodeId, Points, Size,
     canvas::CanvasFont,
-    platform::{Appearance, Idiom, Locale, Os},
-    style::Color,
+    color::Hsla,
+    platform::{Appearance, Idiom, Locale, Os, Renderer},
     time::Instant,
 };
 
@@ -39,10 +38,8 @@ pub(crate) type MeasureFn = Rc<dyn Fn(&CanvasFont, &str) -> f32>;
 #[derive(Default)]
 pub(crate) struct Ambient {
     executor: Option<Rc<Executor>>,
-    /// The status bar's layers.
-    status_bars: Option<SharedStatusBars>,
     env: Option<EnvSignals>,
-    theme: Option<Signal<Arc<Theme>>>,
+    tokens: Option<Signal<Arc<Tokens>>>,
     globals: FxHashMap<TypeId, Box<dyn Any>>,
     /// The insets of the screens or modals components are on, by host.
     insets: FxHashMap<NodeId, Signal<EdgeInsets>>,
@@ -62,16 +59,15 @@ impl Ambient {
 /// the readers of the parts that changed).
 struct EnvSignals {
     env: Signal<Environment>,
-    window: Memo<Size>,
+    window: Memo<Size<Points>>,
     safe_area: Memo<EdgeInsets>,
-    title_bar: Memo<crate::platform::Insets>,
-    keyboard_height: Memo<f32>,
+    title_bar: Memo<crate::geometry::Edges<crate::geometry::Points>>,
+    keyboard_height: Memo<Points>,
     keyboard_duration: Memo<f32>,
     dark: Memo<bool>,
     font_scale: Memo<f32>,
     reduce_motion: Memo<bool>,
     screen_reader: Memo<bool>,
-    rtl: Memo<bool>,
     pixel_ratio: Memo<f32>,
     locale: Memo<Locale>,
 }
@@ -96,7 +92,6 @@ impl EnvSignals {
                 font_scale: part!(font_scale),
                 reduce_motion: part!(reduce_motion),
                 screen_reader: part!(screen_reader),
-                rtl: part!(rtl),
                 pixel_ratio: part!(pixel_ratio),
                 locale: part!(locale),
             }
@@ -107,13 +102,10 @@ impl EnvSignals {
 // --- What the core sets ------------------------------------------------------
 
 impl super::Runtime {
-    /// The executor of tasks and actions, and the status bar's layers.
-    pub(crate) fn set_services(&self, executor: Rc<Executor>, status_bars: SharedStatusBars) {
+    /// The executor of tasks and actions.
+    pub(crate) fn set_services(&self, executor: Rc<Executor>) {
         let _entered = self.enter();
-        with_data(|d| {
-            d.ambient.executor = Some(executor);
-            d.ambient.status_bars = Some(status_bars);
-        });
+        with_data(|d| d.ambient.executor = Some(executor));
     }
 
     /// Where the app's storage is kept.
@@ -141,15 +133,15 @@ impl super::Runtime {
         }
     }
 
-    /// The theme now: what read it runs again.
-    pub(crate) fn set_theme(&self, theme: Arc<Theme>) {
+    /// The design tokens now: what read them runs again.
+    pub(crate) fn set_tokens(&self, tokens: Arc<Tokens>) {
         let _entered = self.enter();
-        let signal = with_data(|d| d.ambient.theme);
+        let signal = with_data(|d| d.ambient.tokens);
         match signal {
-            Some(signal) => signal.set(theme),
+            Some(signal) => signal.set(tokens),
             None => {
-                let signal = Owner::detached().run(|| signal_with(theme, SignalEquals::Never));
-                with_data(|d| d.ambient.theme = Some(signal));
+                let signal = Owner::detached().run(|| signal_with(tokens, SignalEquals::Never));
+                with_data(|d| d.ambient.tokens = Some(signal));
             }
         }
     }
@@ -192,7 +184,7 @@ fn act(action: Action) {
 // --- The environment ---------------------------------------------------------
 
 /// The surface's size in points (TS: `windowSize()`).
-pub fn window() -> Size {
+pub fn window() -> Size<Points> {
     env(|e| e.window)
 }
 
@@ -202,8 +194,8 @@ pub fn safe_area() -> EdgeInsets {
 }
 
 /// The software keyboard's height over the surface, 0 when hidden (TS:
-/// `keyboard().height`).
-pub fn keyboard_height() -> f32 {
+/// `keyboardFrame().height`).
+pub fn keyboard_height() -> Points {
     env(|e| e.keyboard_height)
 }
 
@@ -218,9 +210,9 @@ pub fn dark() -> bool {
     env(|e| e.dark)
 }
 
-/// `color` for the appearance now (props that take a [`Color`], such as an
+/// `color` for the appearance now (props that take one color, such as an
 /// input's placeholder color; styles take theme colors as they are).
-pub fn color(color: impl Into<AdaptiveColor>) -> Color {
+pub fn color(color: impl Into<AdaptiveColor>) -> Hsla {
     let color = color.into();
     if dark() { color.dark } else { color.light }
 }
@@ -240,21 +232,16 @@ pub fn screen_reader() -> bool {
     env(|e| e.screen_reader)
 }
 
-/// The layout runs right to left (TS: `I18nManager.isRTL`).
-pub fn rtl() -> bool {
-    env(|e| e.rtl)
-}
-
-/// Device pixels per point (TS: `PixelRatio.get()`).
+/// Device pixels per point (TS: `pixelRatio()`).
 pub fn pixel_ratio() -> f32 {
     env(|e| e.pixel_ratio)
 }
 
 /// `points` rounded to whole device pixels (TS:
-/// `PixelRatio.roundToNearestPixel`).
-pub fn round_to_nearest_pixel(points: f32) -> f32 {
+/// `Math.round(x * pixelRatio()) / pixelRatio()`).
+pub fn round_to_nearest_pixel(points: Points) -> Points {
     let ratio = pixel_ratio().max(f32::MIN_POSITIVE);
-    (points * ratio).round() / ratio
+    Points((points.0 * ratio).round() / ratio)
 }
 
 /// The user's locale (TS: what `Intl` formats for by default).
@@ -262,7 +249,7 @@ pub fn locale() -> Locale {
     env(|e| e.locale)
 }
 
-/// The operating system (TS: `Platform.OS`); it does not change.
+/// The operating system (TS: `platform.os`); it does not change.
 pub fn os() -> Os {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
@@ -270,43 +257,55 @@ pub fn os() -> Os {
 }
 
 /// The OS version: major and minor on iOS, the API level and 0 on Android
-/// (TS: `Platform.Version`).
+/// (TS: `platform.version`).
 pub fn os_version() -> (u16, u16) {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
         .with_untracked(|e| e.os_version)
 }
 
-/// The kind of device (TS: `Platform.isPad`, `isTV`, `isMacCatalyst`).
+/// The kind of device (TS: `platform.idiom`, `platform.catalyst`).
 pub fn idiom() -> Idiom {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
         .with_untracked(|e| e.idiom)
 }
 
-/// Whether desktop behavior applies: a desktop OS, or a browser in the
-/// desktop idiom (TS: `Platform.isDesktop`); it does not change.
+/// How the surface presents its UI (TS: `platform.renderer`); it does not change.
+pub fn renderer() -> Renderer {
+    with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
+        .expect("the core sets the environment")
+        .with_untracked(|e| e.renderer)
+}
+
+/// Whether this surface renders in terminal cells (TS: `platform.isTerminal`).
+pub fn is_terminal() -> bool {
+    renderer() == Renderer::Terminal
+}
+
+/// Whether graphical desktop behavior applies: a desktop OS with a graphical
+/// renderer, or a browser in the desktop idiom.
 pub fn is_desktop() -> bool {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
-        .with_untracked(|e| e.idiom.desktop_on(e.os))
+        .with_untracked(|e| e.renderer != Renderer::Terminal && e.idiom.desktop_on(e.os))
 }
 
-/// The app's theme (reading it subscribes: a new theme reaches what read
-/// it).
-pub fn theme() -> Arc<Theme> {
-    with_data(|d| d.ambient.theme)
-        .expect("the core sets the theme")
+/// The design tokens the app is drawn with (reading them subscribes: new
+/// tokens reach what read them).
+pub fn tokens() -> Arc<Tokens> {
+    with_data(|d| d.ambient.tokens)
+        .expect("the core sets the tokens")
         .get()
 }
 
 /// The width of `text` on one line in `font` (the CSS `font` shorthand; an
 /// invalid one measures in `10px sans-serif`), by the platform's text engine
 /// (TS: a canvas's `measureText(text).width`).
-pub fn measure_text(font: &str, text: &str) -> f32 {
+pub fn measure_text(font: &str, text: &str) -> Points {
     let font = CanvasFont::parse(font).unwrap_or_default();
     let measure = with_data(|d| d.ambient.measure.clone()).expect("the core sets the text engine");
-    measure(&font, text)
+    Points(measure(&font, text))
 }
 
 /// The surface's `G`: one signal per type, made with `Default` the first
@@ -327,7 +326,7 @@ pub fn global<G: Default + 'static>() -> Signal<G> {
 }
 
 /// The insets of the screen or modal the component on `host` is on, below
-/// its header, else the safe area (TS: `useSafeAreaInsets()`).
+/// its header, else the safe area (TS: `safeAreaInsets()`).
 pub(crate) fn insets_of(host: NodeId) -> EdgeInsets {
     let existing = with_data(|d| d.ambient.insets.get(&host).copied());
     let signal = existing.unwrap_or_else(|| {
@@ -343,6 +342,7 @@ pub(crate) fn insets_of(host: NodeId) -> EdgeInsets {
 
 /// Shows `dialog` (an alert, or with `sheet` an action sheet); await the
 /// answer in a task.
+#[deprecated(note = "use nsh_base::alert_dialog, as TSX's `AlertDialog.show` of `nsh/base`")]
 pub fn dialog(dialog: Dialog) -> DialogAnswer {
     let (answer, slot) = DialogAnswer::new();
     act(Action::Dialog(dialog, slot));
@@ -364,7 +364,7 @@ pub fn animate_layout(animation: LayoutAnimation) {
 }
 
 /// The screen reader reads `message` (TS:
-/// `AccessibilityInfo.announceForAccessibility`).
+/// `announce`).
 pub fn announce_for_accessibility(message: impl Into<String>) {
     act(super::services::announce(message.into()));
 }
@@ -381,22 +381,52 @@ pub(crate) fn with_storage<R>(f: impl FnOnce(&crate::storage::Store) -> R) -> R 
     f(&storage)
 }
 
-/// Puts `text` on the system clipboard (TS: `Clipboard.setString`).
+/// Puts `text` on the system clipboard (TS: `Clipboard.writeText`).
 pub fn set_clipboard(text: impl Into<String>) {
     act(super::services::set_clipboard(text.into()));
 }
 
 /// The text on the system clipboard, `""` when it holds none (TS:
-/// `Clipboard.getString`), to await in a task.
+/// `Clipboard.readText`), to await in a task.
 pub fn clipboard_string() -> Answer<String> {
     let (answer, action) = super::services::clipboard_string();
     act(action);
     answer
 }
 
-/// Whether the system clipboard holds text (TS: `Clipboard.hasString`).
+/// Whether the system clipboard holds text (TS: `Clipboard.hasText`).
 pub fn clipboard_has_string() -> Answer<bool> {
     let (answer, action) = super::services::clipboard_has_string();
+    act(action);
+    answer
+}
+
+/// Puts the image of a `data:` URI (as [`clipboard_image`] gives) on the
+/// system clipboard (TS: `Clipboard.writeImage`).
+pub fn set_clipboard_image(uri: impl Into<String>) {
+    act(super::services::set_clipboard_image(uri.into()));
+}
+
+/// The image on the system clipboard, `None` when it holds none (TS:
+/// `Clipboard.readImage`), to await in a task.
+pub fn clipboard_image() -> Answer<Option<ClipboardImage>> {
+    let (answer, action) = super::services::clipboard_image();
+    act(action);
+    answer
+}
+
+/// Whether the system clipboard holds an image, without reading it (TS:
+/// `Clipboard.hasImage`).
+pub fn clipboard_has_image() -> Answer<bool> {
+    let (answer, action) = super::services::clipboard_has_image();
+    act(action);
+    answer
+}
+
+/// The `file:` URLs of the local files on the system clipboard (files
+/// copied in a file manager; TS: `Clipboard.readFiles`), to await in a task.
+pub fn clipboard_files() -> Answer<Vec<String>> {
+    let (answer, action) = super::services::clipboard_files();
     act(action);
     answer
 }
@@ -407,16 +437,16 @@ pub fn toast(message: impl Into<String>, duration: super::ToastDuration) {
     act(super::services::toast(message.into(), duration));
 }
 
-/// The size in pixels of the image at `uri` (TS: `Image.getSize`).
-pub fn image_size(uri: impl Into<String>) -> Answer<Result<ImageSize, String>> {
-    let (answer, action) = super::services::image_size(uri.into());
+/// The size in pixels of the image at `src` (TS: `Image.getSize`).
+pub fn image_size(src: impl Into<String>) -> Answer<Result<ImageSize, String>> {
+    let (answer, action) = super::services::image_size(src.into());
     act(action);
     answer
 }
 
-/// Loads the image at `uri` ahead of showing it (TS: `Image.prefetch`).
-pub fn prefetch_image(uri: impl Into<String>) -> super::Prefetch {
-    let (answer, action) = super::services::prefetch(uri.into());
+/// Loads the image at `src` ahead of showing it (TS: `Image.prefetch`).
+pub fn prefetch_image(src: impl Into<String>) -> super::Prefetch {
+    let (answer, action) = super::services::prefetch(src.into());
     act(action);
     answer
 }
@@ -437,36 +467,6 @@ pub fn fetch(request: impl Into<crate::platform::HttpRequest>) -> super::Fetch {
 /// `setColorScheme`).
 pub fn set_color_scheme(appearance: Appearance) {
     act(Action::Appearance(appearance));
-}
-
-/// Lays the surface out right to left whatever the user's language (TS:
-/// `I18nManager.forceRTL`).
-pub fn force_rtl(force: bool) {
-    act(Action::Direction(super::services::Direction::Force(force)));
-}
-
-/// Whether a right-to-left language lays the surface out right to left
-/// (TS: `I18nManager.allowRTL`).
-pub fn allow_rtl(allow: bool) {
-    act(Action::Direction(super::services::Direction::Allow(allow)));
-}
-
-/// Adds `setting` over the status bar's other settings while the current
-/// owner lives (the most recently added wins, field by field): the entry,
-/// to change it.
-pub fn add_status_bar(setting: StatusBarSetting) -> StatusBarEntry {
-    let globals =
-        with_data(|d| d.ambient.status_bars.clone()).expect("the core sets the status bars");
-    let entry = StatusBars::update(&globals, |bars| bars.add(setting));
-    cleanup(move || StatusBars::update(&globals, |bars| bars.remove(entry)));
-    entry
-}
-
-/// Changes a setting [`add_status_bar`] added.
-pub fn update_status_bar(entry: StatusBarEntry, setting: StatusBarSetting) {
-    let globals =
-        with_data(|d| d.ambient.status_bars.clone()).expect("the core sets the status bars");
-    StatusBars::update(&globals, |bars| bars.set(entry, setting));
 }
 
 // --- Tasks and timers --------------------------------------------------------
@@ -544,10 +544,10 @@ pub fn set_timeout(delay: Duration, f: impl FnOnce() + 'static) -> Spawned<()> {
 pub fn set_interval(period: Duration, f: impl Fn() + 'static) -> Spawned<()> {
     let owner = Owner::current();
     spawn(async move {
-        let mut next = Instant::now() + period;
+        let mut next = crate::time::now() + period;
         loop {
             timer_until(next).await;
-            next = (next + period).max(Instant::now());
+            next = (next + period).max(crate::time::now());
             owner.run(&f);
         }
     })
@@ -565,7 +565,7 @@ pub fn request_animation_frame(f: impl FnOnce(Instant) + 'static) -> Spawned<()>
 
 /// Waits `delay` (in a task; TS: what `setTimeout` waits for).
 pub fn timer(delay: Duration) -> Delay {
-    timer_until(Instant::now() + delay)
+    timer_until(crate::time::now() + delay)
 }
 
 /// Waits until `at` (in a task).
@@ -602,7 +602,7 @@ impl Future for Delay {
         if let Some(sleep) = &mut self.elsewhere {
             return sleep.as_mut().poll(cx);
         }
-        if Instant::now() >= self.at {
+        if crate::time::now() >= self.at {
             return std::task::Poll::Ready(());
         }
         if self.registered {
@@ -699,19 +699,20 @@ pub struct KeyOptions {
 }
 
 /// Whether shortcuts follow Apple's conventions here (`mod` is Command):
-/// the OS, or for a browser the platform it runs on.
+/// the OS, or for a browser the platform it runs on. Terminals use Control.
 fn apple_keys() -> bool {
-    let (os, apple) = with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
+    let (os, apple, terminal) = with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
-        .with_untracked(|e| (e.os, e.apple_keyboard));
-    crate::keymap::apple_keys(os, apple)
+        .with_untracked(|e| (e.os, e.apple_keyboard, e.uses_terminal_keyboard()));
+    !terminal && crate::keymap::apple_keys(os, apple)
 }
 
 /// Runs `handler` when `keystroke` is pressed while the current owner
 /// lives (TS: `keymap.bind`): `"mod+k"` (`mod` is Command on Apple
-/// platforms, Control elsewhere), `"shift+mod+l"`, `"escape"`, ... (the
-/// keystrokes of `nsh/keymap`). The handler gets the keystroke as written.
-/// Desktop platforms fire them; elsewhere they are kept but no key does.
+/// graphical platforms, Control in terminals and elsewhere),
+/// `"shift+mod+l"`, `"escape"`, ... (the keystrokes of `nsh/keymap`). The
+/// handler gets the keystroke as written.
+/// Desktop and terminal backends fire them.
 ///
 /// # Panics
 ///
@@ -732,7 +733,11 @@ pub fn on_key_with(keystroke: &str, options: KeyOptions, handler: impl Fn(&str) 
     let os = os();
     let parsed = crate::keymap::Keystroke::parse_with(keystroke, apple_keys())
         .unwrap_or_else(|e| panic!("on_key: {e}"));
-    if let Some(why) = parsed.reserved(os) {
+    let terminal_keyboard = with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
+        .expect("the core sets the environment")
+        .with_untracked(|e| e.uses_terminal_keyboard());
+    // A terminal uses the Control-based host shortcuts on every OS.
+    if let Some(why) = parsed.reserved(if terminal_keyboard { Os::Linux } else { os }) {
         panic!("on_key: {keystroke:?} cannot be bound: {why}");
     }
     let owner = Owner::current();
@@ -768,7 +773,7 @@ pub fn key_label(keystroke: &str) -> String {
 }
 
 /// Listens to the Android back button while the current owner lives (TS:
-/// `BackHandler.addEventListener("hardwareBackPress", f)`): when no modal is
+/// `BackHandler.onBackPress(f)`): when no modal is
 /// shown, `f` runs before the stack pops, newest listener first, and returns
 /// true when it handled the press. While one listens, a back gesture does
 /// not preview the pop.
@@ -781,7 +786,7 @@ pub fn on_back_press(f: impl Fn() -> bool + 'static) {
     cleanup(move || drop(subscription));
 }
 
-pub(crate) fn title_bar() -> crate::platform::Insets {
+pub(crate) fn title_bar() -> crate::geometry::Edges<crate::geometry::Points> {
     env(|e| e.title_bar)
 }
 

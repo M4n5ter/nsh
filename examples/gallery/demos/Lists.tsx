@@ -1,10 +1,9 @@
-import { computed, Input, Scroll, signal, Text, View, type YNode } from "nsh";
+import { computed, Input, List, Scroll, signal, Text, View, type YNode } from "nsh";
 import { LayoutAnimation } from "nsh/animated";
-import { Platform } from "nsh/device";
-import { List } from "nsh/list";
-import { keyboard, KeyboardAvoidingView, useSafeAreaInsets } from "nsh/ui/mobile";
+import { platform } from "nsh/device";
+import { keyboardFrame, KeyboardAvoidingView, safeAreaInsets, Tab, Tabs } from "nsh/base";
 import { Icon, type IconName } from "../icons";
-import { Appear, Badge, bindRefresh, Button, colors, columnsFor, desktop, finish, hint, IconTile, Meter, mono, Press, radius, RoundButton, Section, Segmented, type Tone, toneColor, toneTint } from "../ui";
+import { Appear, Badge, bindRefresh, Button, colors, columnsFor, desktop, finish, hint, IconTile, Meter, mono, Press, radius, RoundButton, Section, Segmented, tabPress, type Tone, toneColor, toneTint } from "../ui";
 
 const tones: Tone[] = ["accent", "info", "warn", "up", "danger", "neutral"];
 
@@ -48,13 +47,13 @@ function Grid() {
       numColumns={columns}
       estimatedItemSize={110}
       style={{ flex: 1 }}
-      contentContainerStyle={wide ? { padding: 24, gap: 12 } : { padding: 16, gap: 8 }}
+      contentStyle={wide ? { padding: 24, gap: 12 } : { padding: 16, gap: 8 }}
       viewabilityConfig={{ itemVisiblePercentThreshold: 50 }}
-      onViewableItemsChanged={({ viewableItems }) => {
+      onViewableItemsChange={({ viewableItems }) => {
         first.set(viewableItems.length ? viewableItems[0].index : -1);
         last.set(viewableItems.length ? viewableItems[viewableItems.length - 1].index : -1);
       }}
-      ListHeaderComponent={
+      header={
         <View
           style={{
             backgroundColor: colors.surface,
@@ -87,7 +86,7 @@ function Grid() {
           </View>
         </View>
       }
-      ListFooterComponent={
+      footer={
         <Text style={{ textAlign: "center", color: colors.faint, fontSize: 13, padding: 16 }}>End of the list</Text>
       }
     >
@@ -153,7 +152,7 @@ function Contacts() {
     );
   }
   return (
-    <List each={rows} stickyHeaderIndices={headers} estimatedItemSize={60} style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }}>
+    <List each={rows} stickyHeaderIndices={headers} estimatedItemSize={60} style={{ flex: 1 }} contentStyle={{ paddingBottom: 24 }}>
       {(row) => {
         const header = () => row() as { header: string; count: number };
         const person = () => row() as { first: string; last: string; note: string; tone: Tone; end: boolean };
@@ -163,7 +162,7 @@ function Contacts() {
             else={
               <View
                 onPress={() => {}}
-                underlayColor={colors.raised}
+                activeStyle={{ backgroundColor: colors.raised }}
                 style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 16, height: 60 }}
               >
                 <View
@@ -240,7 +239,7 @@ const lines = [
 
 /** An inverted list: starts at the newest message, keeps its place as older ones load. */
 function Chat() {
-  const insets = useSafeAreaInsets();
+  const insets = safeAreaInsets();
   let next = 0;
   const stamp = (n: number) => `${String(9 + Math.floor(n / 60) % 12).padStart(2, "0")}:${String(n % 60).padStart(2, "0")}`;
   const message = (text: string, mine: boolean): Message => ({ id: next, text, mine, time: stamp(next++) });
@@ -272,10 +271,10 @@ function Chat() {
         inverted
         estimatedItemSize={52}
         style={{ flex: 1 }}
-        contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 12, gap: 6 }}
+        contentStyle={{ paddingHorizontal: 16, paddingVertical: 12, gap: 6 }}
         keyboardDismissMode="interactive"
-        onEndReached={loadOlder}
-        onEndReachedThreshold={0.5}
+        onLoadMore={loadOlder}
+        loadMoreThreshold={0.5}
       >
         {(m) => (
           <View style={{ alignSelf: m().mine ? "flex-end" : "flex-start", maxWidth: "78%", gap: 3, alignItems: m().mine ? "flex-end" : "flex-start" }}>
@@ -306,7 +305,7 @@ function Chat() {
           gap: 8,
           paddingHorizontal: 16,
           paddingTop: 8,
-          paddingBottom: 8 + (keyboard().height > 0 ? 0 : insets().bottom),
+          paddingBottom: 8 + (keyboardFrame().height > 0 ? 0 : insets().bottom),
           backgroundColor: colors.surface,
           borderTopWidth: 1,
           borderTopColor: colors.border,
@@ -314,22 +313,22 @@ function Chat() {
       >
         <Input
           value={draft()}
-          onChangeText={(v) => draft.set(v)}
-          onSubmitEditing={send}
-          blurOnSubmit={false}
+          onChange={(v) => draft.set(v)}
+          onSubmit={send}
+          submitBehavior="submit"
           placeholder="Message"
-          placeholderTextColor={colors.faint}
-          selectionColor={colors.accent}
           returnKeyType="send"
           style={{
+            placeholderColor: colors.faint,
+            selectionColor: colors.accent,
             flex: 1,
             height: 44,
             fontSize: 15,
             color: colors.text,
-            backgroundColor: colors.inset,
-            ...finish.inset,
+            backgroundColor: colors.field,
+            ...finish.field,
             borderWidth: 1,
-            borderColor: colors.border,
+            borderColor: colors.fieldBorder,
             borderRadius: 22,
             paddingHorizontal: 16,
           }}
@@ -377,18 +376,18 @@ function More() {
             </View>
           </View>
           {/* The mouse does not pull scroll views down: desktops refresh here. */}
-          <If when={Platform.isDesktop}>
+          <If when={platform.idiom === "desktop"}>
             <Button label="Refresh" variant="secondary" disabled={refreshing()} onPress={refresh} />
           </If>
         </Section>
 
         <Section title="Horizontal scroll view" note={range()}>
           <View style={{ marginHorizontal: -14 }}>
-            <Scroll horizontal showsIndicator={false}>
-              <View style={{ flexDirection: "row", gap: 8, paddingHorizontal: 14 }}>
+            <Scroll horizontal scrollbar={false}>
+              <Tabs style={{ flexDirection: "row", gap: 8, paddingHorizontal: 14 }}>
                 <Each of={ranges}>
                   {(label) => (
-                    <Press onPress={() => range.set(label())} hitSlop={4} accessibilityRole="tab" accessibilityState={{ selected: range() === label() }}>
+                    <Tab selected={range() === label()} onPress={() => range.set(label())} style={tabPress.style} activeStyle={tabPress.activeStyle}>
                       <View
                         style={{
                           height: 36,
@@ -403,17 +402,17 @@ function More() {
                       >
                         <Text style={{ fontSize: 13, fontWeight: "600", color: range() === label() ? colors.onLight : colors.muted }}>{label()}</Text>
                       </View>
-                    </Press>
+                    </Tab>
                   )}
                 </Each>
-              </View>
+              </Tabs>
             </Scroll>
           </View>
         </Section>
 
         <Section title="Horizontal list" note="1,000 recycled cards">
           <View style={{ marginHorizontal: -14 }}>
-            <List each={cards} horizontal estimatedItemSize={130} showsIndicator={false} style={{ height: 124 }} contentContainerStyle={{ paddingHorizontal: 14, gap: 10 }}>
+            <List each={cards} horizontal estimatedItemSize={130} scrollbar={false} style={{ height: 124 }} contentStyle={{ paddingHorizontal: 14, gap: 10 }}>
               {(i) => {
                 const tone = () => tones[i() % (tones.length - 1)];
                 const load = () => ((i() * 37) % 100) / 100;
@@ -462,13 +461,13 @@ function More() {
             each={items()}
             estimatedItemSize={48}
             style={{ height: 196, borderRadius: radius.control, backgroundColor: colors.surface, ...finish.card, borderWidth: 1, borderColor: colors.line }}
-            ListEmptyComponent={
+            empty={
               <View style={{ alignItems: "center", justifyContent: "center", gap: 10, height: 194 }}>
                 <IconTile name="lists" tint={colors.faint} />
                 <Text style={{ fontSize: 13, color: colors.muted }}>{hint("Nothing here yet: tap Add", "Nothing here yet: click Add")}</Text>
               </View>
             }
-            ItemSeparatorComponent={() => <View style={{ height: 1, marginLeft: 14, backgroundColor: colors.line }} />}
+            separator={() => <View style={{ height: 1, marginLeft: 14, backgroundColor: colors.line }} />}
           >
             {(item) => (
               <View style={{ height: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14 }}>
@@ -488,7 +487,7 @@ function More() {
   );
 }
 
-type Tab = "grid" | "sections" | "chat" | "more";
+type ListTab = "grid" | "sections" | "chat" | "more";
 
 const tabs = [
   { value: "grid", label: "Grid" },
@@ -498,7 +497,7 @@ const tabs = [
 ] as const;
 
 export function Lists() {
-  const tab = signal<Tab>("grid");
+  const tab = signal<ListTab>("grid");
   return (
     <View style={{ flex: 1, backgroundColor: colors.background }}>
       <View style={desktop() ? { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 4, width: "100%", maxWidth: 600 } : { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8 }}>
