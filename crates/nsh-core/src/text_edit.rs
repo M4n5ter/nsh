@@ -812,6 +812,34 @@ mod tests {
     }
 
     #[test]
+    fn multiline_file_bytes_and_crlf_caret_boundaries() {
+        let original = "  \t中\r\na\rb\n\n";
+        assert_eq!(pasted(original, true), original);
+        let mut m = model("a\r\nb");
+        m.move_to(2, false);
+        assert_eq!(m.caret(), 1);
+        m.step(Unit::Char, true, false);
+        assert_eq!(m.caret(), 3);
+        assert_eq!(m.line_at(3), (3, 4));
+        assert_eq!(m.line_at(1), (0, 1));
+        assert!(m.delete(Unit::Char, false));
+        assert_eq!(m.text(), "ab");
+        assert!(m.undo());
+        assert_eq!(m.text(), "a\r\nb");
+        m.move_to(1, false);
+        assert!(m.delete(Unit::Char, true));
+        assert_eq!(m.text(), "ab");
+        let mut limited = model("");
+        assert_eq!(limited.insert("a\r\nb", Some(2)).as_deref(), Some("a"));
+        assert_eq!(limited.text(), "a");
+        let mut joined = model("\nb");
+        joined.move_to(0, false);
+        joined.insert("\r", None);
+        assert_eq!(joined.text(), "\r\nb");
+        assert_eq!(joined.caret(), 2);
+    }
+
+    #[test]
     fn paste_normalization() {
         assert_eq!(pasted("a\r\nb\r\n", true), "a\nb\n");
         assert_eq!(pasted("a\r\nb\r\n", false), "a b");

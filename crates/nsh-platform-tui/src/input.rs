@@ -4717,6 +4717,69 @@ mod tests {
     }
 
     #[test]
+    fn multiline_files_keep_raw_values_paste_and_return_line_endings() {
+        let mut surface = form();
+        surface.node_mut(2).unwrap().input = nsh_core::InputConfig {
+            multiline: true,
+            submit_behavior: Some(SubmitBehavior::Newline),
+            ..Default::default()
+        };
+        let original = "  A\t中\x1b\0\r\nB \r\n\r\n";
+        surface.input_value(2, original.into(), 0);
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(original)
+        );
+        assert_eq!(surface.input_context().unwrap().event_count, 0);
+        assert!(
+            !surface
+                .events
+                .iter()
+                .any(|event| matches!(event, SurfaceEvent::Event(2, EventKind::ChangeText, _)))
+        );
+        // Raw editing data is never emitted as terminal control sequences.
+        surface.focus = None;
+        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 12));
+        surface.render(buffer.area, &mut buffer);
+        assert_eq!(buffer[(4, 0)].symbol(), "A");
+        assert_eq!(buffer[(0, 1)].symbol(), "B");
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|cell| !cell.symbol().contains(char::is_control))
+        );
+        surface.focus = Some(2);
+        key(&mut surface, KeyCode::Char('x'), KeyModifiers::NONE);
+        key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(format!("{original}x\r\n").as_str())
+        );
+        let pasted = "\tP\rQ\nR\r\n \n";
+        surface.handle_event(Event::Paste(pasted.into()));
+        let edited = format!("{original}x\r\n{pasted}");
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(edited.as_str())
+        );
+        for _ in 0..3 {
+            key(&mut surface, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        }
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(original)
+        );
+        for _ in 0..3 {
+            key(&mut surface, KeyCode::Char('y'), KeyModifiers::CONTROL);
+        }
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some(edited.as_str())
+        );
+    }
+
+    #[test]
     fn input_return_obeys_submit_and_multiline_rules() {
         let mut surface = form();
         let mut config = nsh_core::InputConfig {

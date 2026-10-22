@@ -367,6 +367,33 @@ fn windows(cx: &mut TestAppContext) {
     configured_assets_stay_with_their_original_load(cx);
     buttons_keep_native_focus_and_live_key_scopes(cx);
     native_keys_keep_their_owner_across_redraws(cx);
+    multiline_fields_keep_file_bytes_and_enter_line_endings(cx);
+}
+
+fn multiline_fields_keep_file_bytes_and_enter_line_endings(cx: &mut TestAppContext) {
+    let source = r#"
+import { Input, mount, signal } from "nsh";
+const value = signal("  A\t中\r\nB\rC\n\n");
+mount(() => <Input autoFocus multiline submitBehavior="newline" value={value()}
+  onChange={(text) => value.set(text)} style={{ height: 160 }} />);
+"#;
+    let code = nsh_bundler::compile_module("App.tsx", source, &[]).unwrap();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    wait_for(&view, cx, "  A\t中\r\nB\rC\n\n");
+    let pasted = "\tP\r\nQ\rR\n \n";
+    ime(&view, cx, |surface| {
+        let field = crate::text_input::focused(surface).unwrap();
+        assert!(crate::text_input::set_accessible_value(
+            surface, &field, pasted
+        ));
+    });
+    wait_for(&view, cx, pasted);
+    cx.simulate_keystrokes("enter");
+    wait_for(&view, cx, "\tP\r\nQ\rR\n \n\r\n");
+    view.update(cx, |view, _| view.stop());
 }
 
 fn find_test_view(view: &crate::view::NshView, id: &str) -> Option<crate::view::NshView> {
