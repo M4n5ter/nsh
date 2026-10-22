@@ -1377,6 +1377,65 @@ mod tests {
     }
 
     #[test]
+    fn array_splices_keep_surviving_keyed_row_owners() {
+        let host = Host::new().unwrap();
+        host.eval_source(
+            r#"
+            import { mount, signal, cleanup } from "nsh";
+            import { each, text } from "nsh:rt";
+            import { List } from "nsh/list";
+            const rows = signal(["summary", "final"]);
+            let finalMade = 0, finalCleaned = 0;
+            globalThis.expand = () => rows.set(["summary", "process", "final"]);
+            globalThis.collapse = () => rows.set(["summary", "final"]);
+            globalThis.replaceFinal = () => rows.set(["summary", "replacement"]);
+            globalThis.check = (made, cleaned) => {
+                if (finalMade !== made || finalCleaned !== cleaned)
+                    throw Error(`final owner ${finalMade}/${finalCleaned}, expected ${made}/${cleaned}`);
+            };
+            mount(() => List({
+                get each() { return rows(); },
+                children: (item) => each(() => [item()], (owned) => {
+                    const key = owned();
+                    if (key === "final") finalMade++;
+                    cleanup(() => { if (key === "final") finalCleaned++; });
+                    return text(key);
+                }, (key) => key),
+            }));
+            "#,
+        )
+        .unwrap();
+        let initial = take_ops(&host);
+        let list = initial
+            .iter()
+            .find_map(|op| match op {
+                Op::Create { id, tag: Tag::List } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        host.bind_list(list, &[(0, 0), (1, 1)]);
+        created_text(&take_ops(&host), "final");
+        host.eval_script("expand.js", "expand(); check(1, 0)")
+            .unwrap();
+        // The core preserves the final item's slot and moves its index.
+        // The JS row must keep that same owner before and after the bind.
+        host.bind_list(list, &[(1, 2), (2, 1)]);
+        host.eval_script("expanded.js", "check(1, 0)").unwrap();
+        take_ops(&host);
+        host.eval_script("collapse.js", "collapse(); check(1, 0)")
+            .unwrap();
+        host.bind_list(list, &[(1, 1)]);
+        host.eval_script("collapsed.js", "check(1, 0)").unwrap();
+        take_ops(&host);
+        // A genuine same-index replacement still reaches its keyed child
+        // without waiting for a core rebind.
+        host.eval_script("replace.js", "replaceFinal(); check(1, 1)")
+            .unwrap();
+        created_text(&take_ops(&host), "replacement");
+        assert!(!host.has_exception());
+    }
+
+    #[test]
     fn indexed_snapshots_render_requested_rows_and_keep_cell_owners() {
         let host = Host::new().unwrap();
         host.eval_source(
