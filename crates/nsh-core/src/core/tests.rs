@@ -1742,7 +1742,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
             },
             Op::CreateText {
                 id: 11,
-                text: "R".repeat(2000).into(),
+                text: "R".repeat(2000),
             },
             Op::Insert {
                 parent: 10,
@@ -1780,7 +1780,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
             },
             Op::SetText {
                 id: 11,
-                text: format!("{prefix}{}", "R".repeat(2000)).into(),
+                text: format!("{prefix}{}", "R".repeat(2000)),
             },
         ],
     );
@@ -1805,7 +1805,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
             },
             Op::SetText {
                 id: 11,
-                text: format!("{prefix}{prefix}{}", "R".repeat(2000)).into(),
+                text: format!("{prefix}{prefix}{}", "R".repeat(2000)),
             },
         ],
     );
@@ -1869,7 +1869,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
             },
             Op::CreateText {
                 id: 21,
-                text: "R".repeat(2000).into(),
+                text: "R".repeat(2000),
             },
             Op::Insert {
                 parent: 20,
@@ -1904,7 +1904,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
     assert_eq!(shift(c.commit()), 0.0);
     c.apply(Op::SetText {
         id: 21,
-        text: "R".repeat(2640).into(),
+        text: "R".repeat(2640),
     })
     .unwrap();
     assert_eq!(shift(c.commit()), 0.0);
@@ -1924,7 +1924,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
             },
             Op::SetText {
                 id: 21,
-                text: "R".repeat(3280).into(),
+                text: "R".repeat(3280),
             },
         ],
     );
@@ -1946,7 +1946,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
             },
             Op::SetText {
                 id: 21,
-                text: format!("{}{}", "*".repeat(640), "R".repeat(3280)).into(),
+                text: format!("{}{}", "*".repeat(640), "R".repeat(3280)),
             },
         ],
     );
@@ -1977,7 +1977,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
     c.commit();
     c.apply(Op::SetText {
         id: 21,
-        text: format!("{}{}", "*".repeat(640), "R".repeat(3320)).into(),
+        text: format!("{}{}", "*".repeat(640), "R".repeat(3320)),
     })
     .unwrap();
     assert_eq!(shift(c.commit()), 32.0);
@@ -1994,7 +1994,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
             },
             Op::SetText {
                 id: 21,
-                text: format!("{}{}", "*".repeat(1280), "R".repeat(3320)).into(),
+                text: format!("{}{}", "*".repeat(1280), "R".repeat(3320)),
             },
         ],
     );
@@ -15623,7 +15623,7 @@ fn a_page_list_in_a_cell_of_a_list_follows_that_list() {
             },
             Op::CreateText {
                 id: 1001,
-                text: "R".repeat(80).into(),
+                text: "R".repeat(80),
             },
             Op::Insert {
                 parent: 1000,
