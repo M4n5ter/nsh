@@ -1412,6 +1412,7 @@ fn selectable_items(id: NodeId, value: &str) -> Vec<MountItem> {
 #[test]
 fn a_presented_label_retains_native_focus_unicode_selection_and_copy() {
     let mut surface = editor_surface();
+    surface.set_host_services_enabled(true);
     surface.apply(MountBatch {
         items: selectable_items(20, "A中文😀 tail"),
     });
