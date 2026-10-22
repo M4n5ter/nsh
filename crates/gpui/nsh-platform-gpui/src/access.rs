@@ -394,15 +394,6 @@ const STANDARD_ACTIONS: [&str; 8] = [
     "escape",
 ];
 
-/// True when the view declares the accessibility action `name`.
-fn declares(s: &ViewState, name: &str) -> bool {
-    s.props
-        .accessibility
-        .actions
-        .iter()
-        .any(|a| &*a.name == name)
-}
-
 /// The AccessKit id of the view `id` of the surface `key`: stable across
 /// frames, and apart from every other surface's.
 pub(crate) fn node_id(key: u64, id: NodeId) -> accesskit::NodeId {
