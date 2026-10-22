@@ -5872,8 +5872,10 @@ mod tests {
         text.push("中😀", style);
         text.push_attachment(Size::new(px(16.0), px(32.0)), style);
         text.push("!", style);
-        let mut props = nsh_core::ViewProps::default();
-        props.focusable = Some(true);
+        let mut props = nsh_core::ViewProps {
+            focusable: Some(true),
+            ..Default::default()
+        };
         props.accessibility.role = nsh_core::AccessibilityRole::Link;
         props.accessibility.label = Some("Photo".into());
         text.links.push(TextLink {
@@ -5901,11 +5903,12 @@ mod tests {
             id: 4,
             frame: Bounds::new(Point::new(px(8.0), px(32.0)), Size::new(px(16.0), px(32.0))),
         });
-        let mut props = nsh_core::ViewProps::default();
-        props.pointer_events = PointerEvents::None;
         items.push(MountItem::ViewProps {
             id: 4,
-            props: Box::new(props),
+            props: Box::new(nsh_core::ViewProps {
+                pointer_events: PointerEvents::None,
+                ..Default::default()
+            }),
         });
         items.extend(create(6, ViewKind::Image, 4, 0.0));
         items.push(MountItem::Frame {
