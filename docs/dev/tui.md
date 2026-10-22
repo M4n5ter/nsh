@@ -420,6 +420,7 @@ runners remain console applications.
 | `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
 | `Surface::handle_event(Event)`; `drain_events()` | Accept input and forward ordered `SurfaceEvent`s |
 | `Surface::cancel_pointer()` | Cancel native pointer capture while retaining keyboard focus |
+| `Surface::pointer_left()` | Clear hover and native capture when the pointer leaves the input region, preserving focus and selection |
 | `Surface::handle_wheel(MouseEvent, u16) -> u16` | Apply consecutive identical wheel detents to one live hit-tested owner and report consumed detents |
 | `Surface::set_host_services_enabled(bool)` | Route service requests to the embedding host without terminal IO |
 | `Surface::complete_clipboard(u32, bool, Result<ClipboardContent, String>)` | Complete a host clipboard read with the current capability check |

@@ -2554,6 +2554,13 @@ impl Surface {
         }
     }
 
+    /// Clears hover and native capture when the pointer leaves the input region.
+    /// Keyboard focus and the editor's selection remain active.
+    pub fn pointer_left(&mut self) {
+        self.set_hover(None);
+        self.cancel_pointer();
+    }
+
     /// Cancels native pointer capture while retaining keyboard focus.
     /// Hosts call this when their input region changes, then forward the
     /// resulting events before delivering more pointer input.
@@ -2732,6 +2739,131 @@ mod tests {
 
     fn key(surface: &mut Surface, code: KeyCode, modifiers: KeyModifiers) {
         surface.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+
+    #[test]
+    fn pointer_leave_clears_hover_and_capture_without_losing_the_editor() {
+        use nsh_core::{MountBatch, MountItem};
+
+        let mut surface = form();
+        surface.handle_event(Event::Paste("abcdef".into()));
+        key(&mut surface, KeyCode::Home, KeyModifiers::NONE);
+        key(&mut surface, KeyCode::Right, KeyModifiers::NONE);
+        key(&mut surface, KeyCode::Right, KeyModifiers::NONE);
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Events {
+                    id: 2,
+                    events: mask(&[
+                        EventKind::HoverIn,
+                        EventKind::HoverOut,
+                        EventKind::PressDown,
+                        EventKind::PressUp,
+                        EventKind::Press,
+                        EventKind::Focus,
+                        EventKind::Blur,
+                        EventKind::SelectionChange,
+                    ]),
+                },
+                MountItem::TrackStates {
+                    id: 2,
+                    states: state::HOVERED | state::PRESSED | state::FOCUSED,
+                },
+            ],
+        });
+        surface.events.clear();
+        let mouse = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 2,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert!(surface.handle_event(mouse(MouseEventKind::Moved)));
+        assert!(surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left))));
+        let entered: Vec<_> = surface
+            .drain_events()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(id, kind, payload) => Some((id, kind, payload)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            entered,
+            [
+                (2, EventKind::HoverIn, EventPayload::None),
+                (2, EventKind::PressDown, EventPayload::None),
+            ]
+        );
+        assert_eq!(surface.focused(), Some(2));
+        assert_eq!(surface.input_context().unwrap().selection, 2..2);
+
+        surface.pointer_left();
+        assert_eq!(surface.focused(), Some(2));
+        assert_eq!(surface.input_context().unwrap().selection, 2..2);
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some("abcdef")
+        );
+        let states: Vec<_> = surface
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SurfaceEvent::States(2, states) => Some(*states),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states, [state::FOCUSED | state::PRESSED, state::FOCUSED]);
+        let left: Vec<_> = surface
+            .drain_events()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(id, kind, payload) => Some((id, kind, payload)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            left,
+            [
+                (2, EventKind::HoverOut, EventPayload::None),
+                (2, EventKind::PressUp, EventPayload::None),
+            ]
+        );
+
+        // A real Up can restore hover, but cannot complete the cancelled press.
+        assert!(!surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left))));
+        let released: Vec<_> = surface
+            .drain_events()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(id, kind, payload) => Some((id, kind, payload)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(released, [(2, EventKind::HoverIn, EventPayload::None)]);
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert!(surface.handle_event(mouse(kind)));
+        }
+        let resumed: Vec<_> = surface
+            .drain_events()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(id, kind, payload) => Some((id, kind, payload)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resumed,
+            [
+                (2, EventKind::PressDown, EventPayload::None),
+                (2, EventKind::PressUp, EventPayload::None),
+                (2, EventKind::Press, EventPayload::None),
+            ]
+        );
+        assert_eq!(surface.focused(), Some(2));
+        assert_eq!(surface.input_context().unwrap().selection, 2..2);
     }
 
     #[test]
