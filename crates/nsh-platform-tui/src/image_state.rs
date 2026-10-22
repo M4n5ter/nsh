@@ -147,6 +147,10 @@ impl ImageState {
         self.mode
     }
 
+    pub(crate) fn position(&self) -> nsh_core::ObjectPosition {
+        self.options.position
+    }
+
     /// Updates mounted props and returns only currently needed asynchronous
     /// requests. The main source always precedes its default source.
     pub(crate) fn update(
@@ -490,6 +494,7 @@ mod tests {
         ImageSource {
             uri: uri.into(),
             scales: nsh_core::ImageScales::NONE,
+            data: None,
             size: None,
         }
     }

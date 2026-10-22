@@ -5,8 +5,8 @@
 
 use nsh_core::{
     AccessibilityRole, BlendMode, BorderStyle, Bounds, Color, Dialog, DialogButtonStyle, EventKind,
-    Gradient, GradientKind, GradientSize, NodeId, Point, Points, ResizeMode, Size, TextAlign,
-    ViewKind, ViewStyle,
+    Gradient, GradientKind, GradientSize, NodeId, ObjectPosition, Point, Points, ResizeMode, Size,
+    TextAlign, ViewKind, ViewStyle,
     geometry::{Percentage, px},
 };
 use ratatui::{
@@ -179,7 +179,9 @@ impl Surface {
                         let raster = layer.raster;
                         let (image_frame, image_clip, mode) = image_geometry(
                             layer.source,
+                            raster,
                             node.image.mode(),
+                            node.image.position(),
                             node.frame.size,
                             frame,
                             clip,
@@ -703,8 +705,15 @@ impl Surface {
         if node.kind == ViewKind::Image {
             let images = node.image.presentation(self.now);
             for image in images.placeholder.into_iter().chain(images.main) {
-                let (frame, _, mode) =
-                    image_geometry(image.source, node.image.mode(), size, local, local);
+                let (frame, _, mode) = image_geometry(
+                    image.source,
+                    image.raster,
+                    node.image.mode(),
+                    node.image.position(),
+                    size,
+                    local,
+                    local,
+                );
                 layer.images.push(crate::composite::Image {
                     raster: image.raster.clone(),
                     frame,
@@ -1533,12 +1542,14 @@ fn capture_border_text(
 
 fn image_geometry(
     source: &nsh_core::ImageSource,
+    raster: &crate::image::Raster,
     mode: ResizeMode,
+    position: ObjectPosition,
     size: Size<Points>,
     frame: Bounds<Points>,
     clip: Bounds<Points>,
 ) -> (Bounds<Points>, Bounds<Points>, ResizeMode) {
-    if mode == ResizeMode::Center
+    let content = if mode == ResizeMode::Center
         && let Some(Size { width, height }) = source.size
         && width.is_finite()
         && height.is_finite()
@@ -1557,21 +1568,42 @@ fn image_geometry(
             } else {
                 1.0
             };
-        let image = Bounds::new(
-            Point::new(
-                frame.origin.x + (frame.size.width - width) * 0.5,
-                frame.origin.y + (frame.size.height - height) * 0.5,
-            ),
-            Size::new(width, height),
-        );
-        (
-            image,
-            crate::surface::intersect(frame, clip),
-            ResizeMode::Stretch,
-        )
+        Size::new(width, height)
     } else {
-        (frame, clip, mode)
-    }
+        // Keep the terminal's natural-size Center semantics. The shared
+        // ResizeMode::fit shrinks Center images, unlike this backend.
+        crate::image::fitted_frame(raster, frame, mode).size
+    };
+    let scale = |drawn: Points, local: Points| {
+        if local > Points::ZERO && drawn > Points::ZERO {
+            drawn / local
+        } else {
+            1.0
+        }
+    };
+    let sx = scale(frame.size.width, size.width);
+    let sy = scale(frame.size.height, size.height);
+    // Length offsets are local points, so zoom/presentation scaling applies
+    // to them just as it does to the image. Percentages use the free space.
+    let origin = if mode == ResizeMode::Stretch {
+        Point::default()
+    } else {
+        Point::new(
+            position.x.resolve((frame.size.width - content.width) / sx) * sx,
+            position
+                .y
+                .resolve((frame.size.height - content.height) / sy)
+                * sy,
+        )
+    };
+    (
+        Bounds::new(
+            Point::new(frame.origin.x + origin.x, frame.origin.y + origin.y),
+            content,
+        ),
+        crate::surface::intersect(frame, clip),
+        ResizeMode::Stretch,
+    )
 }
 
 fn finite_rect(rect: Bounds<Points>) -> bool {
@@ -2887,6 +2919,7 @@ mod tests {
                 Some(nsh_core::ImageSource {
                     uri: Arc::from("asset:/test.png"),
                     scales: nsh_core::ImageScales::NONE,
+                    data: None,
                     size: None,
                 }),
                 ResizeMode::Stretch,
@@ -4239,12 +4272,19 @@ mod tests {
         let source = nsh_core::ImageSource {
             uri: Arc::from("asset:/photo@2x.png"),
             scales: nsh_core::ImageScales::NONE,
+            data: None,
             size: Some(Size::new(px(16.0), px(32.0))),
         };
         let frame = Bounds::new(Point::new(px(8.0), px(0.0)), Size::new(px(64.0), px(64.0)));
         let (image, clip, mode) = image_geometry(
             &source,
+            &crate::image::Raster {
+                width: 32,
+                height: 64,
+                rgba: Vec::new(),
+            },
             ResizeMode::Center,
+            ObjectPosition::CENTER,
             Size::new(px(64.0), px(64.0)),
             frame,
             Bounds::new(Point::new(px(0.0), px(0.0)), Size::new(px(80.0), px(64.0))),
@@ -4258,6 +4298,197 @@ mod tests {
         );
         assert_eq!(clip, frame);
         assert_eq!(mode, ResizeMode::Stretch);
+    }
+
+    #[test]
+    fn image_positions_keep_default_fits_and_crop_covering_pixels() {
+        let source = nsh_core::ImageSource::default();
+        let raster = Arc::new(crate::image::Raster {
+            width: 8,
+            height: 32,
+            rgba: (0..32)
+                .flat_map(|y| {
+                    std::iter::repeat_n(
+                        if y < 16 {
+                            [255, 0, 0, 255]
+                        } else {
+                            [0, 0, 255, 255]
+                        },
+                        8,
+                    )
+                    .flatten()
+                })
+                .collect(),
+        });
+        let frame = Bounds::new(Point::default(), Size::new(px(8.0), px(16.0)));
+        for mode in [
+            ResizeMode::Cover,
+            ResizeMode::Contain,
+            ResizeMode::Center,
+            ResizeMode::Stretch,
+        ] {
+            let (image, clip, fitted) = image_geometry(
+                &source,
+                &raster,
+                mode,
+                ObjectPosition::CENTER,
+                frame.size,
+                frame,
+                frame,
+            );
+            assert_eq!(image, crate::image::fitted_frame(&raster, frame, mode));
+            assert_eq!(clip, frame);
+            assert_eq!(fitted, ResizeMode::Stretch);
+        }
+        let area = CellRect::new(0, 0, 1, 1);
+        let buffer = Buffer::empty(area);
+        let mut requests = Vec::new();
+        for (position, y, color) in [("top", 0.0, [255, 0, 0]), ("bottom", -16.0, [0, 0, 255])] {
+            let (image, clip, mode) = image_geometry(
+                &source,
+                &raster,
+                ResizeMode::Cover,
+                ObjectPosition::parse(position).unwrap(),
+                frame.size,
+                frame,
+                frame,
+            );
+            assert_eq!(image.origin.y, px(y));
+            assert_eq!(clip, frame);
+            let mut painted = buffer.clone();
+            crate::image::paint(
+                &raster,
+                image,
+                clip,
+                mode,
+                None,
+                1.0,
+                CellMetrics::default(),
+                area,
+                &mut painted,
+            );
+            let pixels = crate::text::rasterize_cells(
+                &painted,
+                CellMetrics::default(),
+                &crate::fonts::FontCatalog::default(),
+            )
+            .unwrap();
+            assert!(
+                pixels
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel[..3] == color)
+            );
+            requests.push(
+                crate::protocol::Request::capture(
+                    raster.clone(),
+                    crate::ImageProtocol::new(crate::ProtocolType::Kitty, 8, 16).unwrap(),
+                    image,
+                    clip,
+                    mode,
+                    None,
+                    1.0,
+                    CellMetrics::default(),
+                    area,
+                    &buffer,
+                )
+                .unwrap(),
+            );
+        }
+        // Both crops cover the same cells but must produce different cached encodings.
+        assert!(requests[0] != requests[1]);
+        let frame = Bounds::new(Point::default(), Size::new(px(32.0), px(32.0)));
+        for (position, x) in [("left", 0.0), ("right", 24.0)] {
+            let (image, clip, _) = image_geometry(
+                &source,
+                &raster,
+                ResizeMode::Contain,
+                ObjectPosition::parse(position).unwrap(),
+                frame.size,
+                frame,
+                frame,
+            );
+            assert_eq!(image.origin.x, px(x));
+            assert_eq!(image.size, Size::new(px(8.0), px(32.0)));
+            assert_eq!(clip, frame);
+        }
+        let zoomed = Bounds::new(Point::default(), Size::new(px(64.0), px(64.0)));
+        let (image, clip, _) = image_geometry(
+            &source,
+            &raster,
+            ResizeMode::Contain,
+            ObjectPosition::parse("right 2px bottom 0px").unwrap(),
+            frame.size,
+            zoomed,
+            zoomed,
+        );
+        assert_eq!(image.origin.x, px(44.0));
+        assert_eq!(clip, zoomed);
+    }
+
+    #[test]
+    fn image_position_updates_reuse_loaded_layers_and_reposition_composite_snapshots() {
+        let mut surface = Surface::new(10, 4, CellMetrics::default());
+        let frame = Bounds::new(Point::default(), Size::new(px(32.0), px(32.0)));
+        surface.apply(MountBatch {
+            items: mount_node(2, ViewKind::Image, ROOT_ID, frame),
+        });
+        let source = nsh_core::ImageSource {
+            uri: "asset:/main".into(),
+            ..Default::default()
+        };
+        let mut options = nsh_core::ImageOptions {
+            placeholder: Some(nsh_core::ImageSource {
+                uri: "asset:/placeholder".into(),
+                ..Default::default()
+            }),
+            fade_ms: Some(200.0),
+            ..Default::default()
+        };
+        let state = &mut surface.node_mut(2).unwrap().image;
+        let requests = state.update(
+            Some(source.clone()),
+            ResizeMode::Contain,
+            options.clone(),
+            0.0,
+        );
+        for request in requests.iter().rev() {
+            assert!(state.install(
+                request,
+                Arc::new(crate::image::AnimatedRaster {
+                    frames: vec![Arc::new(crate::image::Raster {
+                        width: 8,
+                        height: 32,
+                        rgba: vec![255; 8 * 32 * 4],
+                    })],
+                    delays: Vec::new(),
+                    plays: 1,
+                }),
+                0.0
+            ));
+        }
+        let before = surface.composite_layer(2, &[2], 0).unwrap();
+        assert_eq!(before.images.len(), 2);
+        options.position = ObjectPosition::parse("right").unwrap();
+        assert!(
+            surface
+                .node_mut(2)
+                .unwrap()
+                .image
+                .update(Some(source), ResizeMode::Contain, options, 0.1,)
+                .is_empty()
+        );
+        let after = surface.composite_layer(2, &[2], 0).unwrap();
+        assert_eq!(after.images.len(), 2);
+        assert!(after.style.overflow_hidden);
+        for (before, after) in before.images.iter().zip(&after.images) {
+            assert_eq!(before.frame.origin.x, px(12.0));
+            assert_eq!(after.frame.origin.x, px(24.0));
+            assert!(Arc::ptr_eq(&before.raster, &after.raster));
+            assert!(before != after);
+        }
     }
 
     #[test]

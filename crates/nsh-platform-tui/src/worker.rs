@@ -1,9 +1,13 @@
-//! Graphics work stays off the terminal loop and the engine thread.
+//! Graphics work stays off the terminal loop and the engine thread. In-memory
+//! image sources keep their shared bytes through the queue; digest URIs remain
+//! cache keys rather than locations to read.
 
 use std::{collections::HashMap, sync::Arc};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use nsh_core::{NodeId, access::Access, animation::AnimationValue, canvas::Drawing};
+use nsh_core::{
+    NodeId, access::Access, animation::AnimationValue, canvas::Drawing, image::ImageData,
+};
 
 use crate::image::{AnimatedRaster, Raster};
 
@@ -18,7 +22,12 @@ enum Job {
     Composite(NodeId, u64, Arc<crate::composite::Scene>),
 }
 
-type ImageJob = (String, Option<Arc<dyn nsh_engine::Assets>>, Access);
+type ImageJob = (
+    String,
+    Option<ImageData>,
+    Option<Arc<dyn nsh_engine::Assets>>,
+    Access,
+);
 
 pub(crate) struct CanvasRequest {
     pub(crate) id: NodeId,
@@ -62,13 +71,19 @@ impl Graphics {
             std::thread::Builder::new()
                 .name(format!("nsh-tui-image-{index}"))
                 .spawn(move || {
-                    while let Ok((uri, assets, access)) = jobs.recv() {
+                    while let Ok((uri, data, assets, access)) = jobs.recv() {
                         let mut progress = |loaded, total| {
                             let _ =
                                 results.send(GraphicsResult::Progress(uri.clone(), loaded, total));
                         };
                         let result = if !access.allows_media(&uri) {
                             Err("Image access was denied".to_owned())
+                        } else if let Some(data) = data {
+                            // The core normalizes data:/blob: sources to a
+                            // digest URI. Their shared bytes travel with the
+                            // request and take the same bounded decoder path.
+                            progress(data.len() as u64, data.len() as u64);
+                            crate::image::decode_animation(&data)
                         } else if uri.starts_with("asset:/") {
                             assets
                                 .ok_or_else(|| "This app has no asset reader".to_owned())
@@ -146,10 +161,11 @@ impl Graphics {
     pub(crate) fn image(
         &self,
         uri: String,
+        data: Option<ImageData>,
         assets: Option<Arc<dyn nsh_engine::Assets>>,
         access: Access,
     ) {
-        let _ = self.image_tx.send((uri, assets, access));
+        let _ = self.image_tx.send((uri, data, assets, access));
     }
     pub(crate) fn canvas(&self, request: CanvasRequest) {
         let _ = self.tx.send(Job::Canvas(request));

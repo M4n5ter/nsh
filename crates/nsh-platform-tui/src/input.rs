@@ -5392,6 +5392,7 @@ mod tests {
                 Some(nsh_core::ImageSource {
                     uri: Arc::from("asset:/pinch.png"),
                     scales: nsh_core::ImageScales::NONE,
+                    data: None,
                     size: None,
                 }),
                 ResizeMode::Stretch,

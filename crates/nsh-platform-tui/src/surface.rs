@@ -1614,7 +1614,7 @@ impl Surface {
         }
         if !loading {
             self.graphics
-                .image(uri, self.assets.clone(), self.access.clone());
+                .image(uri, None, self.assets.clone(), self.access.clone());
         }
     }
 
@@ -1648,13 +1648,14 @@ impl Surface {
             .views
             .retain(|(node, old)| *node != id || old.role != request.role);
         let main = request.role == crate::image_state::ImageRole::Main;
+        let data = request.source.data.clone();
         pending.views.push((id, request));
         if main {
             self.emit(id, EventKind::LoadStart, EventPayload::None);
         }
         if !loading {
             self.graphics
-                .image(uri, self.assets.clone(), self.access.clone());
+                .image(uri, data, self.assets.clone(), self.access.clone());
         }
     }
 
@@ -2534,6 +2535,113 @@ mod image_ownership_tests {
     }
 
     #[test]
+    fn inline_sources_share_decodes_and_revoked_blobs_keep_their_placeholder() {
+        use ::image::ImageEncoder as _;
+        use base64::Engine as _;
+
+        let png = |pixel: [u8; 4]| {
+            let mut bytes = Vec::new();
+            ::image::codecs::png::PngEncoder::new(&mut bytes)
+                .write_image(&pixel, 1, 1, ::image::ExtendedColorType::Rgba8)
+                .unwrap();
+            bytes
+        };
+        let red = png([255, 0, 0, 255]);
+        let inline = ImageSource {
+            uri: format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&red)
+            )
+            .into(),
+            ..Default::default()
+        }
+        .inline();
+        let blob = ImageSource {
+            uri: "blob:main".into(),
+            ..Default::default()
+        }
+        .with_bytes("image/png", red.into());
+        let placeholder = ImageSource {
+            uri: "blob:placeholder".into(),
+            ..Default::default()
+        }
+        .with_bytes("image/png", png([0, 0, 255, 255]).into());
+        assert_eq!(inline.uri, blob.uri);
+        assert!(inline.uri.starts_with("data:image/png;nsh-key="));
+        assert_ne!(inline.data, blob.data);
+
+        // No asset provider: neither source may fall back to reading its key.
+        let mut surface = Surface::new(10, 5, CellMetrics::default());
+        let mut items = Vec::new();
+        for (id, source, placeholder) in [
+            (2, inline, None),
+            (4, blob, None),
+            (
+                6,
+                ImageSource {
+                    uri: "blob:revoked".into(),
+                    ..Default::default()
+                },
+                Some(placeholder),
+            ),
+        ] {
+            items.extend([
+                MountItem::Create {
+                    id,
+                    kind: ViewKind::Image,
+                },
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child: id,
+                    before: None,
+                },
+                MountItem::Image {
+                    id,
+                    source: Some(source),
+                    resize_mode: ResizeMode::Contain,
+                    options: nsh_core::ImageOptions {
+                        placeholder,
+                        ..Default::default()
+                    },
+                },
+            ]);
+        }
+        surface.apply(MountBatch { items });
+        let end = Instant::now() + Duration::from_secs(3);
+        while !surface.pending_images.is_empty() {
+            assert!(Instant::now() < end, "inline images did not finish");
+            surface.tick(0.0);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for id in [2, 4] {
+            let layers = surface.node(id).unwrap().image.presentation(surface.now);
+            assert_eq!(layers.main.unwrap().raster.rgba, [255, 0, 0, 255]);
+            assert!(surface.events.iter().any(|event| matches!(
+                event,
+                SurfaceEvent::Event(node, EventKind::Load, _) if *node == id
+            )));
+        }
+        let layers = surface.node(6).unwrap().image.presentation(surface.now);
+        assert!(layers.main.is_none());
+        assert_eq!(layers.placeholder.unwrap().raster.rgba, [0, 0, 255, 255]);
+        assert!(
+            surface
+                .events
+                .iter()
+                .any(|event| matches!(event, SurfaceEvent::Event(6, EventKind::Error, _)))
+        );
+        assert_eq!(surface.image_cache.len(), 2);
+        assert_eq!(
+            surface
+                .events
+                .iter()
+                .filter(|event| matches!(event, SurfaceEvent::Event(_, EventKind::LoadEnd, _)))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
     fn placeholder_paints_while_main_read_waits_then_main_reports_progress_and_fades() {
         use ::image::ImageEncoder as _;
         struct DelayedAssets {
@@ -2587,6 +2695,7 @@ mod image_ownership_tests {
                     source: Some(ImageSource {
                         uri: Arc::from("asset:/main"),
                         scales: nsh_core::ImageScales::NONE,
+                        data: None,
                         size: None,
                     }),
                     resize_mode: ResizeMode::Contain,
@@ -2594,6 +2703,7 @@ mod image_ownership_tests {
                         placeholder: Some(ImageSource {
                             uri: Arc::from("asset:/placeholder"),
                             scales: nsh_core::ImageScales::NONE,
+                            data: None,
                             size: None,
                         }),
                         fade_ms: Some(500.0),
@@ -2688,6 +2798,7 @@ mod image_ownership_tests {
                     source: Some(ImageSource {
                         uri: Arc::from("asset:/old"),
                         scales: nsh_core::ImageScales::NONE,
+                        data: None,
                         size: None,
                     }),
                     resize_mode: ResizeMode::Contain,
@@ -2698,6 +2809,7 @@ mod image_ownership_tests {
                     source: Some(ImageSource {
                         uri: Arc::from("asset:/new"),
                         scales: nsh_core::ImageScales::NONE,
+                        data: None,
                         size: None,
                     }),
                     resize_mode: ResizeMode::Contain,
