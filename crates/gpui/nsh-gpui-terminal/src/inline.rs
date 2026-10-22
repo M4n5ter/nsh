@@ -70,7 +70,12 @@ impl InlineFrame {
         output.write_all(b"\x1b[H")?;
         if protocol != InlineProtocol::Sixel
             || !same_viewport_flushed
-            || !frame.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255)
+            || !frame
+                .pixels()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
         {
             output.write_all(b"\x1b[2J")?;
         }
