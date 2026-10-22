@@ -404,7 +404,9 @@ impl Mounter {
             }
             Command::Blur => match view {
                 Some(view) => crate::text_input::blur_view(surface, view),
-                _ if id == nsh_core::ROOT_ID
+                // Keep the existing blur after Delete semantics; only a
+                // still-mounted span can distinguish its own focus.
+                _ if crate::text_input::link_target(surface, id).is_none()
                     || crate::text_input::focused_target(surface)
                         .is_some_and(|target| target.id() == id) =>
                 {

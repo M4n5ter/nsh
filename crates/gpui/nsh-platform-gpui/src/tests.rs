@@ -573,7 +573,7 @@ keymap.bind("f4", () => first.focus(), { when: "always" });
 keymap.bind("f5", () => second.focus(), { when: "always" });
 keymap.bind("f6", () => record(`${keymap.focusedWithin(first)}:${keymap.focusedWithin(second)}`), { when: "always" });
 keymap.bind("f8", () => reader.focus(), { when: "always" });
-keymap.bind("f11", () => { shown.set(false); record("removed"); }, { when: "always" });
+keymap.bind("f7", () => { shown.set(false); record("removed"); }, { when: "always" });
 mount(() => <View>
   <Input testID="report" autoFocus readonly value={events()} style={{height: 30}} />
   <Scroll ref={(node) => reader = node} testID="reader" style={{width: 90, height: 200}} onScrollIntent={({intent}) => record(`intent:${intent}`)} onScrollDragStart={() => record("drag-start")} onScrollDragEnd={() => record("drag-end")}>
@@ -659,7 +659,7 @@ mount(() => <View>
             Some("打开跨行中文文档".into())
         )
     });
-    cx.simulate_keystrokes("f11");
+    cx.simulate_keystrokes("f7");
     wait_for_report(
         &view,
         cx,
