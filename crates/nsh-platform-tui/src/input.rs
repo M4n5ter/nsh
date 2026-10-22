@@ -838,7 +838,10 @@ impl Surface {
         };
         let id = stops[next];
         self.set_focus(Some(id));
-        if self.node(id).is_some_and(|n| n.kind == ViewKind::Input) {
+        if self
+            .node(id)
+            .is_some_and(|n| n.kind == ViewKind::Input && !n.input.multiline)
+        {
             self.edit_input(id, |editor, _| {
                 editor.select_all();
                 false
@@ -2722,6 +2725,29 @@ mod tests {
         );
         key(&mut surface, KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(surface.node(2).unwrap().editor.selected(), "中文😀");
+        let generation = surface.node(2).unwrap().generation;
+        for multiline in [false, true] {
+            surface.node_mut(2).unwrap().input.multiline = multiline;
+            for selection in [(2, 2), (1, 4)] {
+                for (code, modifiers) in [
+                    (KeyCode::Tab, KeyModifiers::NONE),
+                    (KeyCode::BackTab, KeyModifiers::SHIFT),
+                ] {
+                    surface.selection(2, selection.0, selection.1);
+                    key(&mut surface, code, modifiers);
+                    assert_eq!(surface.focused(), Some(4));
+                    key(&mut surface, code, modifiers);
+                    assert_eq!(surface.focused(), Some(2));
+                    let node = surface.node(2).unwrap();
+                    assert_eq!(node.generation, generation);
+                    assert_eq!(node.editor.text(), "中文😀");
+                    assert_eq!(
+                        node.editor.selection(),
+                        if multiline { selection } else { (0, 4) }
+                    );
+                }
+            }
+        }
     }
 
     #[test]
