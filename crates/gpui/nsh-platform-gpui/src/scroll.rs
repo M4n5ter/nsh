@@ -550,7 +550,7 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, x: f32, y: f32) -> bo
     }) else {
         if let Some(origin) = origin {
             let target = nsh_core::input::scroll_target(
-                std::iter::successors(Some(origin), NshView::parent_view),
+                std::iter::successors(Some(origin), NshView::parent_view).collect(),
                 Points(if horizontal { m.sign() } else { 0.0 }),
                 Points(if horizontal { 0.0 } else { m.sign() }),
                 |view| view.state().scroll.as_ref().map(|scroll| scroll.horizontal),
