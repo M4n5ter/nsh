@@ -413,11 +413,11 @@ runners remain console applications.
 | `Surface::metrics`, `viewport`, `resize`, `snapshot`, `focused`, `should_quit` | Geometry and interaction inspection |
 | `Surface::focus_path() -> Vec<NodeId>` | Focused node followed by its mounted ancestors, or an empty path when no node has focus |
 | `EngineControl::set_focus_path(Vec<NodeId>)` | Queue the native focus snapshot before input events or environment updates |
-| `LocalEngine::set_focus_path_now(&[NodeId])` | Replace the VM's focus snapshot synchronously without entering JS, pumping the engine or advancing timers |
 | `Surface::set_assets`, `set_access`, `set_dark`, `set_components`, `set_reduce_motion(bool)` | Engine resources, capability access and host components |
 | `Surface::input_context() -> Option<InputContext>` | Snapshot editing hints and generation; secure text is omitted |
 | `Surface::apply_input_edit(InputEdit) -> bool`; `type_text(&str) -> bool` | Validate host-keyboard edits or enter text with mounted capitalization policy |
 | `Surface::handle_event(Event)`; `drain_events()` | Accept input and forward ordered `SurfaceEvent`s |
+| `Surface::cancel_pointer()` | Cancel native pointer capture while retaining keyboard focus |
 | `Surface::handle_wheel(MouseEvent, u16) -> u16` | Apply consecutive identical wheel detents to one live hit-tested owner and report consumed detents |
 | `Surface::set_host_services_enabled(bool)` | Route service requests to the embedding host without terminal IO |
 | `Surface::complete_clipboard(u32, bool, Result<ClipboardContent, String>)` | Complete a host clipboard read with the current capability check |
@@ -454,19 +454,16 @@ Hosts driving a `Surface` with `nsh_engine::LocalEngine` route input through
 scene. The surface owns native pointer capture, selection, gestures and focus.
 They forward each resulting `SurfaceEvent` in order through the engine's
 `EngineControl`, using `dispatch_event(NodeId, EventKind, EventPayload)` for
-application events before `pump()`, then apply every produced mount batch in order. Engine work
-and native input continue while terminal output completes. During idle probes,
+application events before `pump()`, then apply every produced mount batch in
+order. Engine work and native input continue while terminal output completes. During idle probes,
 `LocalEngine::needs_pump() -> bool` reads queued messages and due deadlines
-without running app code; native input and synchronous dispatch still
-require a pump.
+without running app code; queued native input requires a pump.
 
 Keep keymap focus snapshots in the same input order. After native focus changes,
 take `Surface::focus_path()` and pass it to `EngineControl::set_focus_path`
 before enqueueing events or environment updates that can run JS; those messages
-are handled in FIFO order. A host driving a `LocalEngine` uses
-`set_focus_path_now(&path)` before synchronous dispatch or resize work and
-before a pump that can enter JS. The setter only replaces the snapshot:
-it runs no JS, pumps no work and advances no timers. `AppView` forwards the
+are handled in FIFO order, including when a host drives a `LocalEngine` and
+pumps it explicitly after enqueueing work. `AppView` forwards the
 surface's path automatically. Empty paths clear the snapshot, so no focus
 and removed scopes cannot keep a terminal binding eligible.
 

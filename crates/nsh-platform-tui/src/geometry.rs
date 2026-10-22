@@ -161,7 +161,6 @@ impl HitSnapshot {
                 && crate::surface::contains(node.clip, x, y)
         })
     }
-
 }
 
 impl Surface {

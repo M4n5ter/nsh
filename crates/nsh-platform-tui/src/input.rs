@@ -2498,7 +2498,10 @@ impl Surface {
         }
     }
 
-    fn cancel_pointer(&mut self) {
+    /// Cancels native pointer capture while retaining keyboard focus.
+    /// Hosts call this when their input region changes, then forward the
+    /// resulting events before delivering more pointer input.
+    pub fn cancel_pointer(&mut self) {
         if let Some(pointer) = self.pointer.as_ref().filter(|pointer| {
             pointer.scroll.is_none() && pointer.native.is_none() && !pointer.navigation_claimed
         }) {
@@ -2673,6 +2676,269 @@ mod tests {
 
     fn key(surface: &mut Surface, code: KeyCode, modifiers: KeyModifiers) {
         surface.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+
+    #[test]
+    fn captured_editor_drags_continue_with_native_horizontal_scroll() {
+        use nsh_core::{MountBatch, MountItem};
+
+        let mut surface = form();
+        let mut items = create(10, ViewKind::Input, ROOT_ID, 64.0);
+        items.extend([
+            MountItem::Frame {
+                id: 10,
+                frame: Bounds::new(point(px(0.0), px(64.0)), Size::new(px(32.0), px(16.0))),
+            },
+            MountItem::InputValue {
+                id: 10,
+                text: "abcdefghijklmno".into(),
+                count: 0,
+            },
+        ]);
+        surface.apply(MountBatch { items });
+        let mouse = |kind, column| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert!(surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 1)));
+        assert_eq!(surface.input_context().unwrap().selection, 1..1);
+        let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 6);
+        assert!(surface.handle_event(drag.clone()));
+        assert_eq!(surface.input_context().unwrap().selection, 1..6);
+        assert!(surface.handle_event(drag));
+        assert_eq!(surface.input_context().unwrap().selection, 1..9);
+        assert!(surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 6)));
+        surface.handle_event(Event::Paste("X".into()));
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some("aXjklmno")
+        );
+    }
+
+    #[test]
+    fn pointer_focus_preserves_a_clipped_press_and_keyboard_focus_reveals_it() {
+        use nsh_core::{MountBatch, MountItem};
+
+        let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
+        let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+        items.extend(create(4, ViewKind::View, 2, 32.0));
+        items.extend([
+            MountItem::Frame {
+                id: 2,
+                frame: Bounds::new(point(px(0.0), px(0.0)), Size::new(px(160.0), px(96.0))),
+            },
+            MountItem::Frame {
+                id: 4,
+                frame: Bounds::new(point(px(8.0), px(32.0)), Size::new(px(128.0), px(232.0))),
+            },
+            MountItem::ScrollContent {
+                id: 2,
+                size: Size::new(px(160.0), px(320.0)),
+            },
+            MountItem::Events {
+                id: 4,
+                events: mask(&[EventKind::Press, EventKind::PressDown, EventKind::PressUp]),
+            },
+        ]);
+        surface.apply(MountBatch { items });
+        surface.events.clear();
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert!(surface.handle_event(Event::Mouse(MouseEvent {
+                kind,
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            })));
+            assert_eq!(surface.focused(), Some(4));
+            assert_eq!(surface.node(2).unwrap().scroll.y, px(0.0));
+        }
+        let presses: Vec<_> = surface
+            .drain_events()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(id, EventKind::Press, EventPayload::None) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(presses, [4]);
+        key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(surface.focused(), Some(2));
+        key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(surface.focused(), Some(4));
+        assert_eq!(surface.node(2).unwrap().scroll.y, px(32.0));
+    }
+
+    #[test]
+    fn native_tooltip_observations_preserve_button_callbacks() {
+        use nsh_core::{
+            ApproxTextEngine, Core, MountBatch, MountItem, Op, Prop, Tag,
+            overlay::TooltipContent,
+            platform::{Idiom, Os},
+            ui::Environment,
+        };
+
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(320.0), px(192.0)));
+        core.set_environment(Environment {
+            os: Os::Linux,
+            idiom: Idiom::Desktop,
+            ..Environment::default()
+        });
+        for op in [
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Tooltip(TooltipContent::Text("Close conversation".into())),
+            },
+        ] {
+            core.apply(op).unwrap();
+        }
+        for event in [EventKind::Press, EventKind::PressDown, EventKind::PressUp] {
+            core.apply(Op::Listen {
+                id: 2,
+                event,
+                enabled: true,
+            })
+            .unwrap();
+        }
+        let events = core
+            .commit()
+            .unwrap()
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                MountItem::Events { id: 2, events } => Some(events),
+                _ => None,
+            })
+            .expect("the core mounts the tooltip anchor's event mask");
+        let watch = events
+            .hint_watch()
+            .expect("the core issues the native tooltip's watch token");
+        let mut surface = form();
+        surface.apply(MountBatch {
+            items: vec![MountItem::Events { id: 4, events }],
+        });
+        for (kind, column, row) in [
+            (MouseEventKind::Moved, 1, 3),
+            (MouseEventKind::Down(MouseButton::Left), 1, 3),
+            (MouseEventKind::Up(MouseButton::Left), 1, 3),
+            (MouseEventKind::Moved, 20, 10),
+        ] {
+            surface.handle_event(Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        let mut observations = Vec::new();
+        let mut callbacks = Vec::new();
+        for event in surface.drain_events() {
+            match event {
+                SurfaceEvent::HintObservation(HintObservation::Enter(token)) => {
+                    observations.push(("enter", vec![token]));
+                }
+                SurfaceEvent::HintObservation(HintObservation::Leave(token)) => {
+                    observations.push(("leave", vec![token]));
+                }
+                SurfaceEvent::HintObservation(HintObservation::Press(path)) => {
+                    observations.push(("press", path));
+                }
+                SurfaceEvent::Event(id, kind, payload) => callbacks.push((id, kind, payload)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            observations,
+            [
+                ("enter", vec![watch]),
+                ("press", vec![watch]),
+                ("leave", vec![watch]),
+            ]
+        );
+        assert_eq!(
+            callbacks,
+            [
+                (4, EventKind::PressDown, EventPayload::None),
+                (4, EventKind::PressUp, EventPayload::None),
+                (4, EventKind::Press, EventPayload::None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fractional_button_activates_at_its_visible_text_cell() {
+        use std::sync::Arc;
+
+        use nsh_core::{AttributedText, MountBatch, MountItem, ResolvedTextStyle, TextEngine};
+
+        let mut surface = Surface::new(8, 4, crate::CellMetrics::default());
+        let mut text = AttributedText {
+            selectable: Some(false),
+            ..Default::default()
+        };
+        text.push("x", ResolvedTextStyle::default());
+        let engine = crate::TerminalTextEngine::default();
+        let size = Size::new(px(8.0), px(16.0));
+        let layout = engine.layout(&engine.prepare(&text), size);
+        let mut items = create(2, ViewKind::View, ROOT_ID, 0.0);
+        items.extend(create(4, ViewKind::Text, 2, 0.0));
+        items.extend([
+            MountItem::Frame {
+                id: 2,
+                frame: Bounds::new(point(px(14.0), px(12.0)), size),
+            },
+            MountItem::Frame {
+                id: 4,
+                frame: Bounds::new(point(px(0.0), px(0.0)), size),
+            },
+            MountItem::Events {
+                id: 2,
+                events: mask(&[EventKind::Press]),
+            },
+            MountItem::Text {
+                id: 4,
+                text: Arc::new(text),
+                layout,
+                content: Bounds::new(point(px(0.0), px(0.0)), size),
+            },
+        ]);
+        surface.apply(MountBatch { items });
+        assert_eq!(surface.snapshot().lines().nth(1), Some("  x"));
+        for (column, row, expected) in [(1, 0, vec![]), (2, 1, vec![2])] {
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                surface.handle_event(Event::Mouse(MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }));
+            }
+            let presses: Vec<_> = surface
+                .drain_events()
+                .filter_map(|event| match event {
+                    SurfaceEvent::Event(id, EventKind::Press, EventPayload::None) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(presses, expected);
+        }
     }
 
     #[test]
