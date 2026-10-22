@@ -583,7 +583,7 @@ impl Surface {
 
     /// Applies one core commit in order, then reconciles native interaction.
     pub fn apply(&mut self, batch: MountBatch) {
-        let focus_return = self.prepare_focus_return(&batch);
+        let mut focus_return = self.prepare_focus_return(&batch);
         self.navigation_prepare(&batch);
         let mut finished = Vec::new();
         let mut tracked = Vec::new();
@@ -641,10 +641,10 @@ impl Surface {
                     }
                 }
                 MountItem::Remove { id } => {
+                    self.retire_input_within(id, focus_return.as_mut());
                     if self.navigation_removing(id) {
                         continue;
                     }
-                    self.retire_focus_within(id);
                     let now = self.now;
                     let retained = self.node_mut(id).is_some_and(|node| {
                         let transition = (!matches!(

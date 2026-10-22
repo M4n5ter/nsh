@@ -649,9 +649,54 @@ impl Surface {
         self.set_focus_from(id, FocusSource::Navigation);
     }
 
-    /// A real removal retires the old owner even if its recycling slot is
-    /// inserted again later in this batch. Insert-only moves keep focus.
-    pub(crate) fn retire_focus_within(&mut self, root: NodeId) {
+    /// Retire only owners within a real removal before its ancestry changes.
+    /// Insert-only moves retain their captures, caret and logical return chain.
+    pub(crate) fn retire_input_within(
+        &mut self,
+        root: NodeId,
+        before: Option<&mut FocusReturnBatch>,
+    ) {
+        let mut returns = std::mem::take(&mut self.focus_returns);
+        for scope in &mut returns {
+            if scope
+                .opener
+                .is_some_and(|target| self.within_popup(target.0, root))
+            {
+                scope.opener = None;
+            }
+        }
+        self.focus_returns = returns;
+        if let Some(before) = before
+            && before
+                .focus
+                .is_some_and(|target| self.within_popup(target.0, root))
+        {
+            before.focus = None;
+        }
+        if self.pointer.as_ref().is_some_and(|pointer| {
+            [
+                Some(pointer.target),
+                pointer.pressable,
+                pointer.pan_candidate,
+                pointer.pan,
+                pointer.native,
+                pointer.link,
+                pointer.scroll,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|id| self.within_popup(id, root))
+        }) || self
+            .drag_input
+            .is_some_and(|id| self.within_popup(id, root))
+        {
+            self.cancel_pointer();
+        }
+        if self.hovered_path.contains(&root)
+            || self.hovered.is_some_and(|id| self.within_popup(id, root))
+        {
+            self.set_hover(None);
+        }
         let mut history = std::mem::take(&mut self.focus_history);
         history.retain(|id| !self.ancestors(*id).contains(&root));
         self.focus_history = history;
@@ -3953,6 +3998,56 @@ mod tests {
     #[test]
     fn popup_close_does_not_restore_a_reused_opener_or_override_an_explicit_focus() {
         use nsh_core::{Command, MountBatch, MountItem};
+        for (ancestor, already_open, removed) in [
+            (false, true, true),
+            (true, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let mut surface = form();
+            surface.input_value(2, "abcdef".into(), 0);
+            surface.selection(2, 3, 3);
+            if ancestor {
+                let mut items = create(18, ViewKind::View, ROOT_ID, 0.0);
+                items.push(MountItem::Insert {
+                    parent: 18,
+                    child: 2,
+                    before: None,
+                });
+                surface.apply(MountBatch { items });
+            }
+            if already_open {
+                surface.apply(MountBatch {
+                    items: popup(6, 8, ROOT_ID, true),
+                });
+            }
+            let root = if ancestor { 18 } else { 2 };
+            let mut items = Vec::new();
+            if removed {
+                items.push(MountItem::Remove { id: root });
+            }
+            items.push(MountItem::Insert {
+                parent: ROOT_ID,
+                child: root,
+                before: None,
+            });
+            if !already_open {
+                items.extend(popup(6, 8, ROOT_ID, true));
+            }
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(8));
+            surface.apply(MountBatch {
+                items: vec![MountItem::Remove { id: 6 }],
+            });
+            assert_eq!(surface.focused(), if removed { None } else { Some(2) });
+            assert_eq!(surface.node(2).unwrap().editor.selection(), (3, 3));
+            key(&mut surface, KeyCode::Char('Z'), KeyModifiers::NONE);
+            assert_eq!(
+                surface.node(2).unwrap().editor.text(),
+                if removed { "abcdef" } else { "abcZdef" }
+            );
+        }
+
         let mut surface = form();
         surface.apply(MountBatch {
             items: popup(6, 8, ROOT_ID, true),
@@ -5013,6 +5108,46 @@ mod tests {
                 .any(|event| matches!(event, SurfaceEvent::Event(4, EventKind::PanEnd, _)))
         );
         assert!(surface.events.iter().any(|event| matches!(event,SurfaceEvent::Event(ROOT_ID,EventKind::Touch,EventPayload::Touch(touch)) if touch.phase == TouchPhase::Move && touch.activated == Some(4))));
+
+        for remove_owner in [false, true] {
+            let mut surface = form();
+            let mut items = create(6, ViewKind::View, 4, 0.0);
+            items.extend(create(8, ViewKind::View, ROOT_ID, 96.0));
+            surface.apply(MountBatch { items });
+            surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 1));
+            let mut items = vec![MountItem::Insert {
+                parent: 8,
+                child: 6,
+                before: None,
+            }];
+            if remove_owner {
+                items.push(MountItem::Remove { id: 4 });
+            }
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.node(6).unwrap().parent, Some(8));
+            surface.events.clear();
+            assert_eq!(
+                surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 1)),
+                !remove_owner
+            );
+            let released = surface
+                .drain_events()
+                .filter_map(|event| match event {
+                    SurfaceEvent::Event(id, kind @ (EventKind::Press | EventKind::PressUp), _) => {
+                        Some((id, kind))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                released,
+                if remove_owner {
+                    vec![]
+                } else {
+                    vec![(4, EventKind::PressUp), (4, EventKind::Press)]
+                }
+            );
+        }
     }
 
     #[test]
