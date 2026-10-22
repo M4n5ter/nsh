@@ -52,6 +52,11 @@ fn bind_keys(cx: &mut GpuiApp) {
     if cx.has_global::<KeysBound>() {
         return;
     }
+    restore_keys(cx);
+}
+
+/// Restores surface Tab bindings after the native menu clears the app's keymap.
+pub(crate) fn restore_keys(cx: &mut GpuiApp) {
     cx.set_global(KeysBound);
     cx.bind_keys([
         gpui::KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),

@@ -1278,6 +1278,7 @@ fn set_native_menus(surface: &Surface, cx: &mut App) {
         .collect();
     *c.entries.borrow_mut() = entries;
     cx.clear_key_bindings();
+    crate::app::restore_keys(cx);
     cx.bind_keys(bindings);
     cx.set_menus(menus);
 }

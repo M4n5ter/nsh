@@ -1750,7 +1750,10 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
             }
             let behavior = input.config.borrow().submit();
             match return_key(behavior, multiline, m) {
-                None => insert(surface, &view, &input, "\n", true),
+                None => {
+                    let ending = model::line_ending(input.model.borrow().text());
+                    insert(surface, &view, &input, ending, true);
+                }
                 Some(blur) => submit(surface, &view, &input, blur),
             }
             true
@@ -1815,7 +1818,9 @@ fn copy(input: &InputState, secure: bool) {
     if secure || !model.has_selection() {
         return;
     }
-    crate::system::set_clipboard_text(&model.selected().replace('\n', "\r\n"));
+    crate::system::set_clipboard_text(
+        &model.selected().replace("\r\n", "\n").replace('\n', "\r\n"),
+    );
 }
 
 fn cut(surface: &Surface, view: &NshView, input: &InputState, secure: bool) -> bool {
@@ -1857,7 +1862,7 @@ fn line_edge(input: &InputState, end: bool) -> usize {
         let model = input.model.borrow();
         let byte = model.text_at(at, secure);
         let text = model.text();
-        if byte > 0 && text[..byte].ends_with('\n') {
+        if byte > 0 && text[..byte].ends_with(['\r', '\n']) {
             at = at.saturating_sub(1);
         }
     }

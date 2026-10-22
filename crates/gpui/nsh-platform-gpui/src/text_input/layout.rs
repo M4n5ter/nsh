@@ -339,7 +339,15 @@ pub(crate) fn layout(
     let mut y = 0.0;
     let mut widest: f32 = 0.0;
     with_shaper(system, |shaper| {
-        for para in text.split('\n') {
+        let mut remaining = text;
+        loop {
+            let end = remaining.find(['\r', '\n']).unwrap_or(remaining.len());
+            let para = &remaining[..end];
+            let ending = if remaining[end..].starts_with("\r\n") {
+                2
+            } else {
+                usize::from(end < remaining.len())
+            };
             let mut p = shape_paragraph(shaper, para, style);
             if let Some(max) = ellipsis
                 && wrap_width.is_none()
@@ -393,7 +401,11 @@ pub(crate) fn layout(
                 });
                 y += height;
             }
-            offset += p.stops.last().map_or(0, |s| s.0) + 1;
+            offset += p.stops.last().map_or(0, |s| s.0) + ending as u32;
+            if ending == 0 {
+                break;
+            }
+            remaining = &remaining[end + ending..];
         }
     });
     Layout {

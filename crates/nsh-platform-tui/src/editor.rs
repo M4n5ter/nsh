@@ -60,7 +60,9 @@ impl Editor {
         if count < self.count {
             return false;
         }
-        self.assign_text(sanitize(&text, true))
+        // Values are editing data; the renderer filters terminal controls
+        // without changing the source text or its UTF-16 offsets.
+        self.assign_text(text)
     }
 
     /// Label selection uses the original UTF-16 offsets carried by the
@@ -144,10 +146,12 @@ impl Editor {
             if end { self.text.len() } else { 0 }
         } else if end {
             self.text[self.cursor..]
-                .find('\n')
+                .find(['\r', '\n'])
                 .map_or(self.text.len(), |i| self.cursor + i)
         } else {
-            self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
+            self.text[..self.cursor]
+                .rfind(['\r', '\n'])
+                .map_or(0, |i| i + 1)
         };
         self.select_bytes(if extend { self.anchor } else { offset }, offset)
     }
@@ -215,15 +219,15 @@ impl Editor {
         if !config.editable || incoming.is_empty() {
             return false;
         }
+        let text = sanitize(incoming, config.multiline);
+        if text.is_empty() {
+            return false;
+        }
         if config.secure
             || config.keyboard != KeyboardType::Default
             || config.auto_capitalize == AutoCapitalize::None
         {
-            return self.replace(incoming, config);
-        }
-        let text = sanitize(incoming, config.multiline);
-        if !incoming.is_empty() && text.is_empty() {
-            return false;
+            return self.replace(&text, config);
         }
         let prefix = &self.text[..self.selected_range().start];
         let text = match config.auto_capitalize {
@@ -261,7 +265,11 @@ impl Editor {
         if !config.editable {
             return None;
         }
-        let text = sanitize(incoming, config.multiline);
+        let text = if config.multiline {
+            incoming.to_owned()
+        } else {
+            sanitize(incoming, false)
+        };
         let text: String = if config.keyboard == KeyboardType::Number {
             text.chars().filter(char::is_ascii_digit).collect()
         } else {
@@ -373,7 +381,13 @@ impl Editor {
         }
         self.text
             .graphemes(true)
-            .map(|g| if g == "\n" { "\n" } else { "•" })
+            .map(|g| {
+                if matches!(g, "\n" | "\r" | "\r\n") {
+                    "\n"
+                } else {
+                    "•"
+                }
+            })
             .collect()
     }
 
@@ -404,7 +418,7 @@ impl Editor {
         let columns = columns.max(1);
         let (mut row, mut column) = (0usize, 0usize);
         for (offset, grapheme) in self.text.grapheme_indices(true) {
-            if grapheme == "\n" {
+            if matches!(grapheme, "\n" | "\r" | "\r\n") {
                 visit(offset, row, column);
                 row += 1;
                 column = 0;
@@ -531,8 +545,8 @@ fn ceil_grapheme(text: &str, offset: usize) -> usize {
         .unwrap_or(text.len())
 }
 
-/// Terminals must never receive application supplied escape sequences as
-/// editing content. Newlines and tabs retain their editing meaning.
+/// Typed controls and single-line paste follow the field's entry policy.
+/// Multiline values/paste retain their source bytes; painting filters controls.
 fn sanitize(text: &str, multiline: bool) -> String {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     normalized
@@ -656,7 +670,7 @@ mod tests {
         assert_eq!(editor.selected(), "b");
         assert_eq!(editor.selection(), (2, 3));
         editor.controlled("a\x1bb".into(), 0);
-        assert_eq!(editor.text(), "ab");
+        assert_eq!(editor.text(), "a\x1bb");
     }
 
     #[test]
