@@ -41,6 +41,7 @@ pub(crate) struct WindowState {
     closed: bool,
     bounds: Bounds<Pixels>,
     size: Size<DevicePixels>,
+    scale_factor: f32,
     active: bool,
     visible: WindowVisibility,
     hovered: bool,
@@ -85,9 +86,9 @@ pub(crate) fn rgba_len(size: Size<DevicePixels>) -> Result<usize> {
         .ok_or_else(|| anyhow!("terminal pixel dimensions overflow"))
 }
 
-fn device_size(size: Size<Pixels>) -> Result<Size<DevicePixels>> {
+fn device_size(size: Size<Pixels>, scale_factor: f32) -> Result<Size<DevicePixels>> {
     let convert = |value: Pixels| -> Result<DevicePixels> {
-        let value = f64::from(f32::from(value)).round();
+        let value = f64::from(f32::from(value) * scale_factor).round();
         ensure!(
             value.is_finite() && value >= 1.0 && value <= f64::from(i32::MAX),
             "invalid terminal viewport"
@@ -106,19 +107,24 @@ impl TerminalWindow {
         renderer: Box<gpui_wgpu::WgpuHeadlessRenderer>,
         sink: SubmissionSink,
         wake: Wake,
+        viewport: Option<(Size<DevicePixels>, f32)>,
     ) -> Result<(Self, WindowRef)> {
-        let size = device_size(params.bounds.size)?;
+        let (size, scale_factor) = match viewport {
+            Some(viewport) => viewport,
+            None => (device_size(params.bounds.size, 1.0)?, 1.0),
+        };
         let state = Rc::new(RefCell::new(WindowState {
             handle,
             closed: false,
             bounds: Bounds::new(
                 Point::default(),
                 gpui::size(
-                    gpui::px(size.width.0 as f32),
-                    gpui::px(size.height.0 as f32),
+                    gpui::px(size.width.0 as f32 / scale_factor),
+                    gpui::px(size.height.0 as f32 / scale_factor),
                 ),
             ),
             size,
+            scale_factor,
             active: params.focus,
             visible: if params.show {
                 WindowVisibility::Visible
@@ -207,9 +213,9 @@ impl WindowState {
         Ok(())
     }
 
-    pub(crate) fn resize(&mut self, size: Size<DevicePixels>) -> Result<()> {
+    pub(crate) fn resize(&mut self, size: Size<DevicePixels>, scale_factor: f32) -> Result<()> {
         rgba_len(size)?;
-        if size == self.size {
+        if size == self.size && scale_factor == self.scale_factor {
             return Ok(());
         }
         self.viewport_generation = self
@@ -217,9 +223,10 @@ impl WindowState {
             .checked_add(1)
             .ok_or_else(|| anyhow!("terminal viewport generation exhausted"))?;
         self.size = size;
+        self.scale_factor = scale_factor;
         self.bounds.size = gpui::size(
-            gpui::px(size.width.0 as f32),
-            gpui::px(size.height.0 as f32),
+            gpui::px(size.width.0 as f32 / scale_factor),
+            gpui::px(size.height.0 as f32 / scale_factor),
         );
         self.published = None;
         self.resized = true;
@@ -359,7 +366,8 @@ impl WindowState {
             let callback = state.borrow_mut().callbacks.resize.take();
             if let Some(mut callback) = callback {
                 let size = state.borrow().bounds.size;
-                callback(size, 1.0);
+                let scale_factor = state.borrow().scale_factor;
+                callback(size, scale_factor);
                 state.borrow_mut().callbacks.resize.get_or_insert(callback);
             }
             worked = true;
@@ -465,7 +473,9 @@ impl PlatformWindow for TerminalWindow {
         self.bounds().size
     }
     fn resize(&mut self, size: Size<Pixels>) {
-        let result = device_size(size).and_then(|size| self.0.borrow_mut().resize(size));
+        let scale_factor = self.0.borrow().scale_factor;
+        let result = device_size(size, scale_factor)
+            .and_then(|size| self.0.borrow_mut().resize(size, scale_factor));
         if let Err(error) = result {
             self.0.borrow_mut().error.get_or_insert(error.to_string());
         }
@@ -473,7 +483,7 @@ impl PlatformWindow for TerminalWindow {
         wake();
     }
     fn scale_factor(&self) -> f32 {
-        1.0
+        self.0.borrow().scale_factor
     }
     fn appearance(&self) -> WindowAppearance {
         WindowAppearance::Dark

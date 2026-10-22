@@ -57,6 +57,7 @@ pub struct TerminalPlatform {
     text: Arc<dyn PlatformTextSystem>,
     resources: RefCell<Option<(Box<gpui_wgpu::WgpuHeadlessRenderer>, SubmissionSink)>>,
     window: RefCell<Option<WindowRef>>,
+    viewport: Cell<Option<(Size<DevicePixels>, f32)>>,
     callbacks: RefCell<Callbacks>,
     started: Cell<bool>,
     pending_quit: Cell<bool>,
@@ -96,6 +97,7 @@ impl TerminalPlatform {
             )),
             resources: RefCell::new(Some((renderer, sink))),
             window: RefCell::new(None),
+            viewport: Cell::new(None),
             callbacks: RefCell::new(Callbacks::default()),
             started: Cell::new(false),
             pending_quit: Cell::new(false),
@@ -200,7 +202,24 @@ impl TerminalPlatform {
     /// Changes the real pixel viewport. Old presentation receipts become
     /// invalid immediately; GPUI's resize callback runs on the next pump.
     pub fn resize(&self, size: Size<DevicePixels>) -> Result<()> {
-        self.window()?.borrow_mut().resize(size)?;
+        let scale_factor = self.viewport.get().map_or(1.0, |(_, scale)| scale);
+        self.set_viewport(size, scale_factor)
+    }
+
+    /// Sets the physical render target and its logical pixel density together.
+    /// May be called before opening the window. A density-only change revokes
+    /// previous presentation tokens just like a size change; input positions
+    /// supplied by the host must use logical pixels (device pixels / density).
+    pub fn set_viewport(&self, size: Size<DevicePixels>, scale_factor: f32) -> Result<()> {
+        crate::window::rgba_len(size)?;
+        ensure!(
+            scale_factor.is_finite() && scale_factor > 0.0,
+            "invalid terminal pixel density"
+        );
+        if self.window.borrow().is_some() {
+            self.window()?.borrow_mut().resize(size, scale_factor)?;
+        }
+        self.viewport.set(Some((size, scale_factor)));
         (self.wake)();
         Ok(())
     }
@@ -350,8 +369,14 @@ impl Platform for TerminalPlatform {
             .borrow_mut()
             .take()
             .ok_or_else(|| anyhow!("terminal renderer already belongs to a window"))?;
-        let (window, weak) =
-            TerminalWindow::new(handle, params, renderer, sink, self.wake.clone())?;
+        let (window, weak) = TerminalWindow::new(
+            handle,
+            params,
+            renderer,
+            sink,
+            self.wake.clone(),
+            self.viewport.get(),
+        )?;
         *self.window.borrow_mut() = Some(weak);
         Ok(Box::new(window))
     }
@@ -668,6 +693,34 @@ mod tests {
         platform.dispatch_input(press)?;
         assert_eq!(presses.get(), 3);
         assert_eq!(platform.take_error(), None);
+        // A monitor/font density change can keep the same physical canvas.
+        // It still changes logical layout and invalidates old frame receipts.
+        platform.set_viewport(size(DevicePixels(80), DevicePixels(40)), 2.0)?;
+        assert!(platform.mark_presented(current).is_err());
+        assert!(platform.pump_with_draw(false));
+        application.update(|cx| {
+            window
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .update(cx, |_, window, _| {
+                    assert_eq!(window.viewport_size(), size(px(40.0), px(20.0)));
+                    assert_eq!(window.scale_factor(), 2.0);
+                })
+                .unwrap();
+        });
+        assert!(platform.pump());
+        let scaled = frames.borrow_mut().remove(0).complete()?;
+        assert_eq!(scaled.size(), size(DevicePixels(80), DevicePixels(40)));
+        assert_eq!(
+            &scaled.pixels()[(20 * 80 + 40) * 4..][..4],
+            &[255, 0, 0, 255]
+        );
+        assert!(
+            platform
+                .set_viewport(size(DevicePixels(80), DevicePixels(40)), f32::NAN)
+                .is_err()
+        );
         drop(application);
         platform.shutdown();
         Ok(())

@@ -319,3 +319,10 @@ window update, including while it is minimized and no frames are drawn. macOS
 restores miniaturized windows before activation; Windows restores minimized
 windows through GPUI. Linux window managers decide whether to grant activation.
 Embedded views leave window activation to their host.
+
+A pixel terminal host calls `TerminalPlatform::set_viewport(device_size, scale_factor)`
+before opening its window and whenever terminal density or dimensions change.
+The render target stays in device pixels; GPUI bounds and input positions are in
+logical pixels (device pixels divided by the same scale). Density-only updates
+invalidate previous presentation tokens and issue the ordinary GPUI resize callback.
+The adapter defaults to scale 1 for existing hosts; it does not infer OS DPI.
