@@ -486,8 +486,7 @@ impl<M: TextEngine> Core<M> {
                     own.jump(to);
                 }
             }
-            own.offset += by;
-            own.dirty = true;
+            own.anchor_by(by);
         }
         self.dependents_dirty(view);
     }

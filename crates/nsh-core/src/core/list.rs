@@ -589,19 +589,17 @@ impl ListState {
     /// applied, so a pinned target the list is away from was left by the
     /// user.
     fn moved_to(&mut self, at: f32, settled: bool) {
-        if at != self.offset {
+        let moved = at != self.offset;
+        if moved {
             self.offset = at;
             self.dirty = true;
         }
-        if let Some(Pin::Reading { at: expected, .. }) = &self.pin
-            && at != *expected
-        {
+        let reading_displaced =
+            matches!(&self.pin, Some(Pin::Reading { at: expected, .. }) if at != *expected);
+        if reading_displaced {
             // Replay already includes every unapplied correction. A real
             // displacement wins immediately, even with corrections pending.
             self.pin = None;
-            // Capture from the geometry the user actually scrolled through,
-            // before a source reply in this same turn can replace it.
-            self.anchor_source(false, 0.0);
         }
         if let Some(Pin::Following {
             target,
@@ -626,6 +624,21 @@ impl ListState {
                 });
             }
         }
+        if (moved || reading_displaced) && self.pin.is_none() {
+            // Capture from the geometry the user actually scrolled through,
+            // before a source reply in this same turn can replace it. This
+            // also begins reading when the user leaves end/target following.
+            self.anchor_source(false, 0.0);
+        }
+    }
+
+    /// A parent-viewport list already arranged this owner correction.
+    pub(super) fn anchor_by(&mut self, by: f32) {
+        self.offset += by;
+        if let Some(Pin::Reading { at, .. }) = &mut self.pin {
+            *at += by;
+        }
+        self.dirty = true;
     }
 
     /// Keeps following `target` after a scroll command sent the list to

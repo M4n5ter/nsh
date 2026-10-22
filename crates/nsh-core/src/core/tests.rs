@@ -1989,6 +1989,24 @@ fn source_reading_survives_prepend_and_rich_replacement() {
     })
     .unwrap();
     assert_eq!(shift(c.commit()), 32.0);
+
+    // End following had no Reading pin. Leaving it and receiving earlier
+    // source in the same turn still captures the old visible source first.
+    c.set_scroll_offset(2, point(px(0.0), px(2750.0)), u32::MAX);
+    apply(
+        &mut c,
+        vec![
+            Op::SetProp {
+                id: 20,
+                prop: source(1280),
+            },
+            Op::SetText {
+                id: 21,
+                text: format!("{}{}", "*".repeat(1280), "R".repeat(3320)).into(),
+            },
+        ],
+    );
+    assert_eq!(shift(c.commit()), 512.0);
 }
 
 /// A list of 100 rows estimated at 50 pt in a 400 pt viewport.
@@ -15635,6 +15653,15 @@ fn a_page_list_in_a_cell_of_a_list_follows_that_list() {
     c.apply(style_op(3, &[("height", StyleValue::Number(120.0))]))
         .unwrap();
     assert_eq!(page_scrolls(&c.commit().unwrap()), [(false, 20.0)]);
+    // A parent-list measurement forwards its own above-viewport correction
+    // to the same owner. The next layout round must not count it again.
+    let previous_row = cells[bound_slot(&c, 4, 39) as usize];
+    c.apply(style_op(
+        previous_row,
+        &[("height", StyleValue::Number(70.0))],
+    ))
+    .unwrap();
+    assert_eq!(page_scrolls(&c.commit().unwrap()), [(false, 20.0)]);
     c.apply(Op::Command {
         id: 4,
         command: Command::ScrollToIndex {
@@ -15646,7 +15673,7 @@ fn a_page_list_in_a_cell_of_a_list_follows_that_list() {
         },
     })
     .unwrap();
-    assert_eq!(page_scrolls(&c.commit().unwrap()), [(true, 2270.0)]);
+    assert_eq!(page_scrolls(&c.commit().unwrap()), [(true, 2290.0)]);
     assert!(
         c.commit()
             .is_none_or(|batch| page_scrolls(&batch).is_empty())
