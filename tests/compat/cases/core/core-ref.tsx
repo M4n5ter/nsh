@@ -5,7 +5,7 @@
 // ref got shows it as text, so the script sees that each form received
 // its own element. Its script checks each.
 import { Text, View, signal } from "nsh";
-import type { ViewProps } from "nsh";
+import type { ViewProps, YNode } from "nsh";
 
 function Card(props: ViewProps) {
   return <View ref={props.ref} style={{ width: 150, height: 15 }} />;
