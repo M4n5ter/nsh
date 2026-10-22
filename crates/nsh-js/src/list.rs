@@ -110,14 +110,20 @@ struct Cell {
     node: JsValue,
     /// The index signal.
     index: JsValue,
+    /// Updated with the index only when the core binds this cell.
+    item: JsValue,
     owner: u32,
 }
 
 struct ListData {
     props: JsValue,
-    /// The source after its cells' indices have followed the splice.
-    source: JsValue,
     node: JsValue,
+    /// Source whose count and splices the core has received.
+    source: JsValue,
+    /// Source accompanying ops that have not left the host yet.
+    staged_source: Option<JsValue>,
+    /// Last emitted count; an array may have been mutated since that emission.
+    emitted_len: i64,
     /// The owner the list was made under: cells are made as its roots.
     owner: u32,
     /// Cells by slot.
@@ -138,6 +144,17 @@ pub(crate) struct Lists {
 }
 
 impl Lists {
+    /// Publish sources with their ops, after requests from the previous frame.
+    pub(crate) fn publish_sources(&self, raw: *mut JsContext) {
+        for data in self.map.borrow_mut().values_mut() {
+            if let Some(source) = data.staged_source.take() {
+                // SAFETY: replace the reference owned by this list.
+                unsafe { qjs::JS_FreeValue(raw, data.source) };
+                data.source = source;
+            }
+        }
+    }
+
     /// Frees the values the lists hold (the state is unregistered).
     pub(crate) fn free_all(&mut self, raw: *mut JsContext) {
         for (_, data) in self.map.borrow_mut().drain() {
@@ -150,11 +167,15 @@ fn free_data(cx: *mut JsContext, data: ListData) {
     // SAFETY: values the list owned.
     unsafe {
         qjs::JS_FreeValue(cx, data.props);
-        qjs::JS_FreeValue(cx, data.source);
         qjs::JS_FreeValue(cx, data.node);
+        qjs::JS_FreeValue(cx, data.source);
+        if let Some(source) = data.staged_source {
+            qjs::JS_FreeValue(cx, source);
+        }
         for cell in data.cells.into_iter().flatten() {
             qjs::JS_FreeValue(cx, cell.node);
             qjs::JS_FreeValue(cx, cell.index);
+            qjs::JS_FreeValue(cx, cell.item);
         }
     }
 }
@@ -305,8 +326,10 @@ pub(crate) fn render(cx: *mut JsContext, props: JsValue) -> Result<JsValue, JsVa
     // SAFETY: dups the list owns.
     let data = Box::new(ListData {
         props: unsafe { qjs::JS_DupValue(cx, props) },
-        source: UNDEFINED,
         node: unsafe { qjs::JS_DupValue(cx, node) },
+        source: UNDEFINED,
+        staged_source: None,
+        emitted_len: 0,
         owner: reactive::current_owner(cx),
         cells: Vec::new(),
         extras: Vec::new(),
@@ -321,16 +344,11 @@ pub(crate) fn render(cx: *mut JsContext, props: JsValue) -> Result<JsValue, JsVa
         e
     };
     // The items: tells the core how they changed (by identity: the common
-    // start and end stay), so measurements follow their items. Cells read
-    // this memo, never the new source paired with their old index.
+    // start and end stay), so measurements follow their items.
     let func = native(cx, splice_run, 1, &mut [node, props]);
-    let source = reactive::memo(cx, func, false);
-    if let Some(data) = lists(cx).map.borrow_mut().get_mut(&id) {
-        data.source = source;
-    } else {
-        // SAFETY: the list was disposed while evaluating its source.
-        unsafe { qjs::JS_FreeValue(cx, source) };
-    }
+    let r = reactive::render_effect(cx, func);
+    // SAFETY: the effect keeps its own value.
+    unsafe { qjs::JS_FreeValue(cx, r) };
     // The forwarded props, the estimated size, the end threshold and the
     // host props passed on.
     let rest = rest_names(cx, props).map_err(fail)?;
@@ -451,44 +469,7 @@ fn set(cx: *mut JsContext, node: JsValue, name: &str, value: JsValue) -> Result<
     r
 }
 
-/// Keeps the JS cells on the same items the core's splice retains. A
-/// removed cell holds its last item until the core reuses its slot.
-fn splice_indices(cx: *mut JsContext, list: NodeId, at: i64, removed: i64, inserted: i64) {
-    let count = lists(cx)
-        .map
-        .borrow()
-        .get(&list)
-        .map_or(0, |data| data.cells.len());
-    for slot in 0..count {
-        let index = lists(cx)
-            .map
-            .borrow()
-            .get(&list)
-            .and_then(|data| data.cells.get(slot))
-            .and_then(|cell| cell.as_ref().map(|cell| cell.index));
-        let Some(index) = index else { continue };
-        let Some(old) = reactive::peek_number(cx, index) else {
-            continue;
-        };
-        if old < at as f64 {
-            continue;
-        }
-        let old = old as i64;
-        let next = if old >= at + removed {
-            old - removed + inserted
-        } else if old < at + inserted {
-            // A replacement at this index still updates without a rebind.
-            old
-        } else {
-            -1
-        };
-        if next != old {
-            reactive::set_signal(cx, index, qjs::JS_NewFloat64(next as f64));
-        }
-    }
-}
-
-/// A run of the source memo: the items set last in, the current out.
+/// A run of the items effect: the items set last in, the current out.
 unsafe extern "C" fn splice_run(
     cx: *mut JsContext,
     _this: JsValue,
@@ -505,16 +486,20 @@ unsafe extern "C" fn splice_run(
         if qjs::JS_IsException(next) {
             return next;
         }
-        let lengths = source_length(cx, old)
-            .and_then(|old_len| source_length(cx, next).map(|next_len| (old_len, next_len)));
-        let (old_len, next_len) = match lengths {
-            Ok(lengths) => lengths,
+        let id = dom::node_id(cx, node).expect("a list node");
+        let old_len = lists(cx)
+            .map
+            .borrow()
+            .get(&id)
+            .map_or(0, |data| data.emitted_len);
+        let next_len = match source_length(cx, next) {
+            Ok(length) => length,
             Err(e) => {
                 qjs::JS_FreeValue(cx, next);
                 return e;
             }
         };
-        if old_len > 0 && !qjs::JS_IsStrictEqual(cx, old, next) {
+        if old_len > 0 {
             let max = old_len.min(next_len);
             let same = |i: i64, j: i64| {
                 let a = qjs::JS_GetPropertyInt64(cx, old, i);
@@ -528,7 +513,12 @@ unsafe extern "C" fn splice_run(
             let mut end = 0;
             // A new indexed source is a new snapshot. Comparing its items
             // would materialize the whole source just to find a splice.
-            if qjs::JS_IsArray(old) && qjs::JS_IsArray(next) {
+            // A notified mutation of the same array has no recoverable old
+            // contents to diff. Rebind the range, as for an indexed snapshot.
+            if qjs::JS_IsArray(old)
+                && qjs::JS_IsArray(next)
+                && !qjs::JS_IsStrictEqual(cx, old, next)
+            {
                 while start < max && same(start, start) {
                     start += 1;
                 }
@@ -549,18 +539,17 @@ unsafe extern "C" fn splice_run(
                     qjs::JS_FreeValue(cx, next);
                     return e;
                 }
-                splice_indices(
-                    cx,
-                    dom::node_id(cx, node).expect("a list"),
-                    start,
-                    removed,
-                    inserted,
-                );
             }
         }
         if let Err(e) = set(cx, node, "count", qjs::JS_NewFloat64(next_len as f64)) {
             qjs::JS_FreeValue(cx, next);
             return e;
+        }
+        if let Some(data) = lists(cx).map.borrow_mut().get_mut(&id) {
+            data.emitted_len = next_len;
+            if let Some(previous) = data.staged_source.replace(qjs::JS_DupValue(cx, next)) {
+                qjs::JS_FreeValue(cx, previous);
+            }
         }
         next
     }
@@ -844,32 +833,47 @@ pub(crate) fn bind(
     list: NodeId,
     binds: &[(u32, u32)],
 ) -> Option<Result<(), ()>> {
-    if !lists(cx).map.borrow().contains_key(&list) {
-        return None;
-    }
+    let source = {
+        let map = lists(cx).map.borrow();
+        let data = map.get(&list)?;
+        // Keep this publication alive across arbitrary indexed-source calls.
+        // SAFETY: the list owns the borrowed source.
+        Guard(cx, unsafe { qjs::JS_DupValue(cx, data.source) })
+    };
     let mut failed = false;
+    let mut bound = Vec::with_capacity(binds.len());
     reactive::batch_with(cx, || {
         for &(slot, index) in binds {
+            let value = Guard(
+                cx,
+                reactive::untracked_with(cx, || source_item(cx, source.1, index as i64)),
+            );
+            // Resolve first: an exception must leave both signals unchanged.
+            // SAFETY: inline check of the owned result.
+            if unsafe { qjs::JS_IsException(value.1) } {
+                failed = true;
+                break;
+            }
             let existing = lists(cx)
                 .map
                 .borrow()
                 .get(&list)
                 .and_then(|d| d.cells.get(slot as usize))
-                .and_then(|c| c.as_ref().map(|c| c.index));
+                .and_then(|c| c.as_ref().map(|c| (c.index, c.item)));
             match existing {
-                Some(signal) => {
-                    if reactive::peek_number(cx, signal) != Some(index as f64) {
-                        reactive::set_signal(cx, signal, qjs::JS_NewFloat64(index as f64));
-                    }
+                Some((index_signal, item_signal)) => {
+                    // SAFETY: set_signal consumes the duplicated value.
+                    reactive::set_signal(cx, item_signal, unsafe { qjs::JS_DupValue(cx, value.1) });
+                    reactive::set_signal(cx, index_signal, qjs::JS_NewFloat64(index as f64));
                 }
                 None => {
-                    if let Err(e) = make_cell(cx, list, slot, index) {
-                        // SAFETY: the pending exception is reported below.
-                        let _ = e;
+                    if make_cell(cx, list, slot, index, value.1).is_err() {
                         failed = true;
+                        break;
                     }
                 }
             }
+            bound.push((slot, index));
         }
     });
     let r = reactive::finish_value(cx, UNDEFINED);
@@ -878,7 +882,7 @@ pub(crate) fn bind(
         failed = true;
     }
     // After the batch: the cells' new content is in the queue already.
-    for &(slot, index) in binds {
+    for &(slot, index) in &bound {
         let node = lists(cx)
             .map
             .borrow()
@@ -895,19 +899,26 @@ pub(crate) fn bind(
 }
 
 /// A new cell for `slot`, showing item `first`.
-fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<(), JsValue> {
-    let (props, source, list_node, owner) = {
+fn make_cell(
+    cx: *mut JsContext,
+    list: NodeId,
+    slot: u32,
+    first: u32,
+    value: JsValue,
+) -> Result<(), JsValue> {
+    let (props, list_node, owner) = {
         let map = lists(cx).map.borrow();
-        let d = &map[&list];
-        (d.props, d.source, d.node, d.owner)
+        let Some(d) = map.get(&list) else {
+            return Ok(());
+        };
+        (d.props, d.node, d.owner)
     };
     let mut made = None;
     let (root, r) = reactive::with_root_under(cx, owner, || -> Result<(), JsValue> {
-        let index = reactive::new_signal(cx, qjs::JS_NewFloat64(first as f64));
-        let item_fn = native(cx, item_run, 0, &mut [source, index]);
-        let item = reactive::memo(cx, item_fn, false);
         let cell = dom::create_element(cx, Tag::Cell)?;
-        made = Some((cell, index));
+        let index = reactive::new_signal(cx, qjs::JS_NewFloat64(first as f64));
+        let item = reactive::new_signal(cx, value);
+        made = Some((cell, index, item));
         set(cx, cell, "slot", qjs::JS_NewFloat64(slot as f64))?;
         dom::insert_node(cx, list_node, cell, None)?;
         let children = get(cx, props, "children");
@@ -918,7 +929,6 @@ fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<
         });
         unsafe {
             qjs::JS_FreeValue(cx, children);
-            qjs::JS_FreeValue(cx, item);
             if qjs::JS_IsException(content) {
                 return Err(content);
             }
@@ -945,7 +955,7 @@ fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<
         unsafe { qjs::JS_FreeValue(cx, content) };
         r
     });
-    if let Some((node, index)) = made {
+    if let Some((node, index, item)) = made {
         let mut map = lists(cx).map.borrow_mut();
         match map.get_mut(&list) {
             Some(d) => {
@@ -956,6 +966,7 @@ fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<
                 d.cells[slot] = Some(Cell {
                     node,
                     index,
+                    item,
                     owner: root,
                 });
             }
@@ -965,51 +976,12 @@ fn make_cell(cx: *mut JsContext, list: NodeId, slot: u32, first: u32) -> Result<
                 unsafe {
                     qjs::JS_FreeValue(cx, node);
                     qjs::JS_FreeValue(cx, index);
+                    qjs::JS_FreeValue(cx, item);
                 }
             }
         }
     }
     r
-}
-
-/// A cell's item from the reconciled source, or its last item while
-/// unbound (the data changed before the core reused the cell).
-unsafe extern "C" fn item_run(
-    cx: *mut JsContext,
-    _this: JsValue,
-    argc: c_int,
-    argv: *mut JsValue,
-    _magic: c_int,
-    data: *mut JsValue,
-) -> JsValue {
-    // SAFETY: two data values; values got are freed or returned.
-    unsafe {
-        let (source, index) = (*data, *data.add(1));
-        // Reading the source first reconciles this cell's index before
-        // the keyed child can observe the new items.
-        let each = qjs::JS_Call(cx, source, UNDEFINED, 0, ptr::null_mut());
-        if qjs::JS_IsException(each) {
-            return each;
-        }
-        let i = qjs::JS_Call(cx, index, UNDEFINED, 0, ptr::null_mut());
-        let mut n = 0f64;
-        qjs::JS_ToFloat64(cx, &mut n, i);
-        qjs::JS_FreeValue(cx, i);
-        let len = match source_length(cx, each) {
-            Ok(len) => len,
-            Err(e) => {
-                qjs::JS_FreeValue(cx, each);
-                return e;
-            }
-        };
-        let r = if n >= 0.0 && (n as i64) < len {
-            source_item(cx, each, n as i64)
-        } else {
-            qjs::JS_DupValue(cx, arg(argc, argv, 0))
-        };
-        qjs::JS_FreeValue(cx, each);
-        r
-    }
 }
 
 /// A row with a separator after it (before it in an inverted list), but
@@ -1435,6 +1407,138 @@ mod tests {
     }
 
     #[test]
+    fn array_splices_keep_retained_row_state_until_the_core_rebinds() {
+        let host = Host::new().unwrap();
+        host.eval_source(
+            r#"
+            import { mount, signal, cleanup } from "nsh";
+            import { each } from "nsh:rt";
+            import { List } from "nsh";
+            const a = { text: "A" }, b = { text: "B" }, x = { text: "X" };
+            const source = signal([a, b]);
+            let made = 0, cleaned = 0;
+            globalThis.prepend = () => source.set([x, a, b]);
+            globalThis.remove = () => source.set([a, b]);
+            globalThis.replace = () => source.set([{ text: "C" }, b]);
+            globalThis.check = (m, c) => {
+                if (made !== m || cleaned !== c) throw Error(`owners ${made}/${cleaned}`);
+            };
+            mount(() => List({
+                get each() { return source(); },
+                children: (item, index) => each(() => [item()], (row) => {
+                    made++;
+                    cleanup(() => cleaned++);
+                    const selected = signal(false);
+                    globalThis.select = () => selected.set(true);
+                    return () => `${row().text}/${index()}/${selected()}`;
+                }),
+            }));
+        "#,
+        )
+        .unwrap();
+        let list = take_ops(&host)
+            .iter()
+            .find_map(|op| match op {
+                Op::Create { id, tag: Tag::List } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        host.bind_list(list, &[(0, 1)]);
+        let body = created_text(&take_ops(&host), "B/1/false");
+        host.eval_script("select.js", "select(); check(1, 0)")
+            .unwrap();
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "B/1/true")));
+        host.eval_script("prepend.js", "prepend(); check(1, 0)")
+            .unwrap();
+        let pending = take_ops(&host);
+        assert!(pending.iter().any(|op| matches!(op,
+            Op::SetProp { id, prop: Prop::Splice(0, 0, 1) } if *id == list)));
+        host.bind_list(list, &[(0, 2)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "B/2/true")));
+        host.eval_script("remove.js", "remove(); check(1, 0)")
+            .unwrap();
+        take_ops(&host);
+        host.bind_list(list, &[(0, 1)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "B/1/true")));
+        host.eval_script("retained.js", "check(1, 0)").unwrap();
+        host.bind_list(list, &[(0, 0)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "A/0/false")));
+        host.eval_script("recycled.js", "check(2, 1); replace(); check(2, 1)")
+            .unwrap();
+        take_ops(&host);
+        host.bind_list(list, &[(0, 0)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "C/0/false")));
+        host.eval_script("replaced.js", "check(3, 2)").unwrap();
+    }
+
+    #[test]
+    fn pending_frame_binds_read_the_source_already_published_to_the_core() {
+        let host = Host::new().unwrap();
+        host.eval_source(r#"
+            import { mount, signal, List } from "nsh";
+            const source = signal(["A", "B"]);
+            globalThis.prepend = () => source.set(["X", "A", "B"]);
+            mount(() => List({ get each() { return source(); }, children: (item) => () => item() }));
+        "#).unwrap();
+        let list = take_ops(&host)
+            .iter()
+            .find_map(|op| match op {
+                Op::Create { id, tag: Tag::List } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        host.bind_list(list, &[(0, 0)]);
+        let body = created_text(&take_ops(&host), "A");
+        host.eval_script("prepend.js", "prepend()").unwrap();
+        // Driver answers the previous frame's requests before taking new ops.
+        host.bind_list(list, &[(0, 1)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "B")));
+        host.bind_list(list, &[(0, 1)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "A")));
+    }
+
+    #[test]
+    fn notifying_a_mutated_array_rebinds_its_previous_range() {
+        let host = Host::new().unwrap();
+        host.eval_source(r#"
+            import { mount, signal, List } from "nsh";
+            const rows = ["A", "B"];
+            const source = signal(rows, { equals: false });
+            globalThis.replace = () => { rows[0] = "Changed"; source.set(rows); };
+            globalThis.shrink = () => { rows.splice(0, 1); source.set(rows); };
+            mount(() => List({ get each() { return source(); }, children: (item) => () => item() }));
+        "#).unwrap();
+        let list = take_ops(&host)
+            .iter()
+            .find_map(|op| match op {
+                Op::Create { id, tag: Tag::List } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        host.bind_list(list, &[(0, 0)]);
+        let body = created_text(&take_ops(&host), "A");
+        host.eval_script("replace.js", "replace()").unwrap();
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetProp { id, prop: Prop::Splice(0, 2, 2) } if *id == list)));
+        host.bind_list(list, &[(0, 0)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "Changed")));
+        host.eval_script("shrink.js", "shrink()").unwrap();
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetProp { id, prop: Prop::Splice(0, 2, 1) } if *id == list)));
+        host.bind_list(list, &[(0, 0)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "B")));
+    }
+
+    #[test]
     fn array_splices_keep_surviving_keyed_row_owners() {
         let host = Host::new().unwrap();
         host.eval_source(
@@ -1477,19 +1581,88 @@ mod tests {
             .unwrap();
         // The core preserves the final item's slot and moves its index.
         // The JS row must keep that same owner before and after the bind.
+        take_ops(&host);
         host.bind_list(list, &[(1, 2), (2, 1)]);
         host.eval_script("expanded.js", "check(1, 0)").unwrap();
         take_ops(&host);
         host.eval_script("collapse.js", "collapse(); check(1, 0)")
             .unwrap();
+        take_ops(&host);
         host.bind_list(list, &[(1, 1)]);
         host.eval_script("collapsed.js", "check(1, 0)").unwrap();
         take_ops(&host);
-        // A genuine same-index replacement still reaches its keyed child
-        // without waiting for a core rebind.
-        host.eval_script("replace.js", "replaceFinal(); check(1, 1)")
+        // A genuine same-index replacement reaches its keyed child when the
+        // core consumes the splice and binds the replacement.
+        host.eval_script("replace.js", "replaceFinal(); check(1, 0)")
             .unwrap();
+        take_ops(&host);
+        host.bind_list(list, &[(1, 1)]);
+        host.eval_script("replaced.js", "check(1, 1)").unwrap();
         created_text(&take_ops(&host), "replacement");
+        assert!(!host.has_exception());
+    }
+
+    #[test]
+    fn pending_previous_frame_bind_keeps_the_selected_row_owner() {
+        let host = Host::new().unwrap();
+        host.eval_source(
+            r#"
+            import { mount, signal, cleanup } from "nsh";
+            import { each, text } from "nsh:rt";
+            import { List } from "nsh/list";
+            const rows = signal(["A", "B"]);
+            let made = 0, cleaned = 0, select;
+            globalThis.prepend = value => rows.set([value, ...rows()]);
+            globalThis.selectB = () => select(true);
+            globalThis.check = () => {
+                if (made !== 1 || cleaned !== 0)
+                    throw Error(`B owner ${made}/${cleaned}, expected 1/0`);
+            };
+            mount(() => List({
+                get each() { return rows(); },
+                children: (item, index) => each(() => [item()], owned => {
+                    const key = owned();
+                    const selected = signal(false);
+                    if (key === "B") { made++; select = value => selected.set(value); }
+                    cleanup(() => { if (key === "B") cleaned++; });
+                    return () => `${key}:${selected()}:${index()}`;
+                }, key => key),
+            }));
+        "#,
+        )
+        .unwrap();
+        let list = take_ops(&host)
+            .iter()
+            .find_map(|op| match op {
+                Op::Create { id, tag: Tag::List } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        host.bind_list(list, &[(0, 1)]);
+        let original = created_text(&take_ops(&host), "B:false:1");
+        host.eval_script("select.js", "selectB(); check()").unwrap();
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == original && text == "B:true:1")));
+        host.eval_script("first.js", "prepend('X'); check()")
+            .unwrap();
+        // Core consumes this splice and queues slot 0 -> index 2.
+        take_ops(&host);
+        // Next turn's JS timers can run before that pending bind is served.
+        host.eval_script("second.js", "prepend('Y'); check()")
+            .unwrap();
+        host.bind_list(list, &[(0, 2)]);
+        host.eval_script("old-bind.js", "check()").unwrap();
+        let pending = take_ops(&host);
+        assert!(
+            !pending
+                .iter()
+                .any(|op| matches!(op, Op::Remove { child, .. } if *child == original))
+        );
+        host.bind_list(list, &[(0, 3)]);
+        host.eval_script("current-bind.js", "check()").unwrap();
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == original && text == "B:true:3")));
+
         assert!(!host.has_exception());
     }
 
@@ -1577,12 +1750,11 @@ mod tests {
         let replaced = take_ops(&host);
         assert!(replaced.iter().any(|op| matches!(
             op,
-            Op::SetText { id, text } if *id == body && text == "Updated 999999"
-        )));
-        assert!(replaced.iter().any(|op| matches!(
-            op,
             Op::SetProp { id, prop: Prop::Splice(0, 1_000_000, 1_000_000) } if *id == list
         )));
+        host.bind_list(list, &[(0, 999_999)]);
+        assert!(take_ops(&host).iter().any(|op| matches!(op,
+            Op::SetText { id, text } if *id == body && text == "Updated 999999")));
         host.dispatch_event(
             list,
             EventKind::ViewableItemsChange,
