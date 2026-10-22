@@ -16,6 +16,15 @@
   resolves, never JS) and keep the downloaded bytes in a data cache (32 MB) until a view
   decodes them. Android `ImageBox` draws its borders above the
   image (as Core Animation's layer border).
+- **Fit and position**: `resizeMode` (or an `object-*` fit class) sizes the image and the `objectPosition` style
+  (`ObjectPosition`, CSS's `object-position`, parsed by `css::object_position`; `object-top`, ... set it) places it, both
+  computed by one function, `ResizeMode::fit` (`center` shrinks what is larger than the box, as CSS's `scale-down`; iOS
+  and the terminal backend keep their existing natural-size centering). The
+  position is the image's, not the view's: it travels in `ImageOptions::position` with `MountItem::Image`, and a change
+  sends that item again, not a `ViewStyle`. iOS and macOS show the image in a picture layer inside the clipped image
+  layer, framed at the fitted rectangle (the tint and its mask inside it); Android translates its draw matrix by the
+  position; Windows, Linux, GPUI and the terminal backend draw at the fitted rectangle; the web sets CSS's `object-position` on the `<img>`
+  (and the tint mask's position).
 - **In-memory images** (`nsh_core::image`): `data:` URIs and `blob:` URLs are resolved once, in shared code, and their
   bytes travel with the source (`ImageSource::data`, an `ImageData`: shared, cloned without a copy, equal by
   identity). The core decodes a `data:` source (base64 or percent-encoded) when the prop is set

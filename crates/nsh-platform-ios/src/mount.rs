@@ -1917,7 +1917,7 @@ impl Mounter {
         if !matches!(s.native, Native::Image(_)) {
             return;
         }
-        s.decor.set_resize_mode(resize_mode);
+        s.decor.set_fit(resize_mode, options.position);
         let same_source =
             s.image.as_ref().map(|src| &src.uri) == source.as_ref().map(|src| &src.uri);
         let same_look = s.image_options.placeholder == options.placeholder
@@ -3049,14 +3049,18 @@ impl Mounter {
         }
     }
 
-    /// Brings a list's sticky cells above its other cells.
+    /// Brings a list's sticky cells above its other cells (the cells of a
+    /// list in the scroll view's viewport are in that list, where the core
+    /// keeps them on top).
     fn front_sticky(&self, list: NodeId) {
         let (Some(cells), Some(l)) = (self.sticky.get(&list), self.slot(list)) else {
             return;
         };
         let container = l.native.view();
         for c in cells {
-            if let Some(s) = self.slot(c.cell) {
+            if let Some(s) = self.slot(c.cell)
+                && s.native.view().superview().as_deref() == Some(container)
+            {
                 container.bringSubviewToFront(s.native.view());
             }
         }

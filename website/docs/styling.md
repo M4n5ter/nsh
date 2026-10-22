@@ -293,6 +293,22 @@ Platform support differs:
 | `backdropFilter` | A system blur material, approximating the radius | From Android 12 (API 31) |
 | `mixBlendMode` | Yes | From Android 10 (API 29) |
 
+On iOS, `ios={{ backdropMaterial: "regular" }}` selects the system material used by a
+`backdropFilter` blur. Values are `"ultraThin"` (the default), `"thin"`, `"regular"`, `"thick"`,
+and `"chrome"`. Pair the prop with a positive blur radius to show the material. Rust uses
+`.backdrop_material(BackdropMaterial::Regular)` alongside `.backdrop_blur(px(30.0))`.
+The radius approximates material strength: NSH applies a fraction of the chosen material,
+reaching full strength at 30 points. The light or dark variant follows the view's background color.
+These choices map to Apple's [system blur materials](https://developer.apple.com/documentation/uikit/uiblureffect/style/systemmaterial).
+
+```rust tabs
+view().backdrop_blur(px(30.0)).backdrop_material(BackdropMaterial::Regular)
+```
+
+```tsx tabs
+<View ios={{ backdropMaterial: "regular" }} style={{ height: 64, backdropFilter: "blur(30px)" }} />
+```
+
 `glassEffect` draws Liquid Glass behind a view's content on iOS 26 and later. `"regular"` uses the standard material;
 `"clear"` takes less color from the background. Pair it with `backdropFilter` for the blur shown on earlier iOS
 versions and other platforms. The glass follows the view's size and rounded corners.

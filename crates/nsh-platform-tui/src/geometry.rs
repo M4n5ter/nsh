@@ -288,7 +288,26 @@ impl Surface {
                 .scroll
                 .sticky
                 .iter()
-                .find(|sticky| sticky.cell == current)
+                .filter(|sticky| {
+                    // Sticky cells can live below a plain container (a
+                    // parent-viewport list, or a nested position: sticky
+                    // view). Move its subtree, not its siblings. Empty
+                    // sticky sets do no extra walking or allocation.
+                    let mut descendant = id;
+                    loop {
+                        if descendant == sticky.cell {
+                            return true;
+                        }
+                        if descendant == current {
+                            return false;
+                        }
+                        let Some(parent) = self.node(descendant).and_then(|node| node.parent)
+                        else {
+                            return false;
+                        };
+                        descendant = parent;
+                    }
+                })
                 .map(|sticky| {
                     let offset = if parent.scroll.horizontal {
                         parent.scroll.x.0
@@ -298,7 +317,7 @@ impl Surface {
                     (offset - sticky.start.0 * zoom)
                         .clamp(0.0, ((sticky.end.0 - sticky.start.0) * zoom).max(0.0))
                 })
-                .unwrap_or(0.0);
+                .sum::<f32>();
             if zoom != 1.0 {
                 result = result.mul(&Matrix::of(TransformKind::Scale, zoom as f64));
             }
@@ -371,6 +390,119 @@ mod tests {
 
     use super::*;
     use crate::CellMetrics;
+
+    #[test]
+    fn descendant_sticky_cells_move_their_subtree_on_both_axes() {
+        for horizontal in [false, true] {
+            let mut surface = Surface::new(40, 20, CellMetrics::default());
+            let at = |main| {
+                if horizontal {
+                    Point::new(px(main), px(0.0))
+                } else {
+                    Point::new(px(0.0), px(main))
+                }
+            };
+            let mut items = Vec::new();
+            for (id, parent, kind, main, extent) in [
+                (2, ROOT_ID, ViewKind::Scroll, 8.0, 160.0),
+                (4, 2, ViewKind::View, 40.0, 160.0),
+                (6, 4, ViewKind::View, 20.0, 32.0),
+                (8, 6, ViewKind::View, 3.0, 8.0),
+                (10, 4, ViewKind::View, 70.0, 16.0),
+                (12, 2, ViewKind::View, 30.0, 16.0),
+            ] {
+                items.extend([
+                    MountItem::Create { id, kind },
+                    MountItem::Insert {
+                        parent,
+                        child: id,
+                        before: None,
+                    },
+                    MountItem::Frame {
+                        id,
+                        frame: Bounds::new(at(main), Size::new(px(extent), px(extent))),
+                    },
+                ]);
+            }
+            items.push(MountItem::StickyCells {
+                id: 2,
+                cells: vec![nsh_core::StickyCell {
+                    cell: 6,
+                    start: px(60.0),
+                    end: px(140.0),
+                }],
+            });
+            surface.apply(MountBatch { items });
+            surface.node_mut(2).unwrap().scroll.horizontal = horizontal;
+            let origin = |surface: &Surface, id| {
+                let frame = surface.global_frame(id).unwrap();
+                if horizontal {
+                    frame.origin.x.0
+                } else {
+                    frame.origin.y.0
+                }
+            };
+            // Origin = unscrolled origin - offset + clamp(offset - 60, 0, 80).
+            // At offset 200 the sticky travel ends: 68 - 200 + 80 = -52.
+            for (offset, sticky, child, sibling) in [
+                (0.0, 68.0, 71.0, 118.0),
+                (100.0, 8.0, 11.0, 18.0),
+                (200.0, -52.0, -49.0, -82.0),
+            ] {
+                let scroll = &mut surface.node_mut(2).unwrap().scroll;
+                if horizontal {
+                    scroll.x = px(offset);
+                } else {
+                    scroll.y = px(offset);
+                }
+                assert_eq!(origin(&surface, 6), sticky);
+                assert_eq!(origin(&surface, 8), child);
+                assert_eq!(origin(&surface, 10), sibling);
+            }
+            // Preserve native zoom and horizontal mirroring. Both a direct
+            // sticky child and a nested one shift in the owner's coordinates.
+            // At 2x, shifts are clamp(200 - 120, 0, 160) = 80 for the
+            // nested cell, and clamp(200 - 60, 0, 120) = 120 for the direct
+            // cell. The unchanged mirror translation cancels in the deltas.
+            let scroll = &mut surface.node_mut(2).unwrap().scroll;
+            scroll.physics.zoom = 2.0;
+            scroll.mirrored = horizontal;
+            scroll.sticky.clear();
+            let before = [6, 8, 10, 12].map(|id| origin(&surface, id));
+            surface.apply(MountBatch {
+                items: vec![MountItem::StickyCells {
+                    id: 2,
+                    cells: vec![
+                        nsh_core::StickyCell {
+                            cell: 6,
+                            start: px(60.0),
+                            end: px(140.0),
+                        },
+                        nsh_core::StickyCell {
+                            cell: 12,
+                            start: px(30.0),
+                            end: px(90.0),
+                        },
+                    ],
+                }],
+            });
+            for (index, id) in [6, 8, 10, 12].into_iter().enumerate() {
+                assert_eq!(
+                    origin(&surface, id) - before[index],
+                    [80.0, 80.0, 0.0, 120.0][index]
+                );
+            }
+            surface.apply(MountBatch {
+                items: vec![MountItem::StickyCells {
+                    id: 2,
+                    cells: Vec::new(),
+                }],
+            });
+            for (index, id) in [6, 8, 10, 12].into_iter().enumerate() {
+                assert_eq!(origin(&surface, id), before[index]);
+            }
+        }
+    }
 
     #[test]
     fn render_cache_never_reuses_geometry_after_a_mount_or_outside_rendering() {

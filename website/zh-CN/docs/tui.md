@@ -69,7 +69,9 @@ NSH 保持以 point 布局。默认情况下，一个终端单元格代表 **8×
 当前界面内。普通 `Text` 使用终端字体和单元格几何；应用变换或效果的文本组将字体轮廓栅格化，并对齐测量后的
 单元格几何。
 
-图片支持 PNG、JPEG、GIF 和 WebP，也支持解码器资源上限内的 GIF、WebP 动画。`defaultSource` 在加载期间和
+图片支持 PNG、JPEG、GIF 和 WebP，也支持解码器资源上限内的 GIF、WebP 动画。
+`resizeMode` 确定图片大小后，`objectPosition` 设置图片在框内的位置，同时用于字符和像素图像。
+`defaultSource` 在加载期间和
 加载出错后保持可见。`blurRadius` 由工作线程处理；`fadeDuration` 设置已加载图片在占位图上的淡入时长，终端的
 默认值为 0 ms。下载进度最多每 100 ms 送达一次，并在完成时送达最终进度。
 

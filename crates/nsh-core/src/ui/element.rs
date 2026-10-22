@@ -420,6 +420,7 @@ pub struct ListConfig {
     pub(crate) scrollbar_visible: Option<bool>,
     pub(crate) content: Option<ListContentStyle>,
     pub(crate) follow_end: Option<f32>,
+    pub(crate) viewport: Option<crate::ListViewport>,
 }
 
 impl ListConfig {
@@ -447,6 +448,9 @@ impl ListConfig {
         }
         if self.follow_end != old.follow_end {
             out.push(Prop::FollowEnd(self.follow_end.map(Points)));
+        }
+        if self.viewport != old.viewport {
+            out.push(Prop::ListViewport(self.viewport.unwrap_or_default()));
         }
     }
 }
@@ -1529,6 +1533,12 @@ pub trait Interactive: Element {
     /// The elevation shadow (Android).
     fn elevation(mut self, elevation: impl Into<Points>) -> Self {
         super::host::set(self.node(), Prop::Elevation(elevation.into()));
+        self
+    }
+
+    /// The system material of a backdrop blur (iOS).
+    fn backdrop_material(mut self, material: crate::BackdropMaterial) -> Self {
+        super::host::set(self.node(), Prop::BackdropMaterial(material));
         self
     }
 

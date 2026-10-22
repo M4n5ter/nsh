@@ -81,6 +81,7 @@ that surface. Ordinary `Text` uses the terminal's font and cell geometry; transf
 rasterize font outlines fitted to the measured cell geometry.
 
 Images support PNG, JPEG, GIF and WebP, including animated GIF and WebP within the decoder's resource bounds.
+`objectPosition` places an image within its box after `resizeMode` sizes it, for both cell and pixel graphics.
 `defaultSource` remains visible during loading and after a load error. `blurRadius` runs on the worker and
 `fadeDuration` sets the loaded image's fade over its placeholder; the terminal default is 0 ms. Download progress
 arrives at most once every 100 ms and on completion.
