@@ -140,6 +140,8 @@ it is open; background navigation screens cannot receive input. Tab and
 Shift+Tab traverse this scope, and Enter/Space activate a pressable.
 Keyboard, programmatic and automatic focus scroll the chosen node into view.
 Pointer focus preserves the scroll position of the content being clicked.
+The initial pointer contact places an input caret using the text visible before
+native focus changes; captured selection drags follow the editor's scrolling.
 Popovers and dialogs retain the actual opener across scope replacement.
 A retiring scope passes its surviving opener to the replacement, including
 its node generation and caret. Covered openers stay eligible as return

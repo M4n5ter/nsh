@@ -1956,9 +1956,18 @@ impl Surface {
                     })
                 });
                 if let Some(id) = field {
+                    // Focus changes the editor's scrolling and caret spacing.
+                    // Resolve this contact using its native focus before Down.
+                    let focused = self.focus == Some(id);
                     self.set_focus_from(Some(id), FocusSource::Pointer);
                     self.drag_input = Some(id);
-                    self.place_caret(id, x, y, mouse.modifiers.contains(KeyModifiers::SHIFT));
+                    self.place_caret(
+                        id,
+                        x,
+                        y,
+                        focused,
+                        mouse.modifiers.contains(KeyModifiers::SHIFT),
+                    );
                 } else if let Some(id) = pressable {
                     self.set_focus_from(Some(id), FocusSource::Pointer);
                 } else if let Some(id) = path
@@ -2055,7 +2064,7 @@ impl Surface {
                     return true;
                 }
                 if let Some(id) = self.drag_input {
-                    self.place_caret(id, x, y, true);
+                    self.place_caret(id, x, y, self.focus == Some(id), true);
                 }
                 self.drag_pointer(x, y, true);
                 true
@@ -2129,7 +2138,7 @@ impl Surface {
         true
     }
 
-    pub(crate) fn place_caret(&mut self, id: NodeId, x: f32, y: f32, extend: bool) {
+    fn place_caret(&mut self, id: NodeId, x: f32, y: f32, focused: bool, extend: bool) {
         if self.node(id).is_some_and(|n| n.kind == ViewKind::Text) {
             if let Some(offset) = self.text_offset_at(id, x, y)
                 && let Some(node) = self.node_mut(id)
@@ -2156,13 +2165,12 @@ impl Surface {
         } else {
             usize::MAX
         };
-        let (origin_row, origin_col) =
-            crate::render::input_scroll(node, self.focus == Some(id), cols, rows);
+        let (origin_row, origin_col) = crate::render::input_scroll(node, focused, cols, rows);
         let row = ((y / self.metrics.height().0).floor() as i64 - geometry.row).max(0) as usize
             + origin_row;
         let col = ((x / self.metrics.width().0).floor() as i64 - geometry.column).max(0) as usize
             + origin_col;
-        let offsets = crate::render::input_line_offsets(node, self.focus == Some(id), cols);
+        let offsets = crate::render::input_line_offsets(node, focused, cols);
         let col = col.saturating_sub(offsets.get(row).copied().unwrap_or(0));
         let offset = node.editor.offset_at(row, col, columns, node.input.secure);
         self.edit_input(id, |editor, _| {
@@ -2721,6 +2729,176 @@ mod tests {
 
     fn key(surface: &mut Surface, code: KeyCode, modifiers: KeyModifiers) {
         surface.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+
+    #[test]
+    fn first_pointer_focus_places_the_caret_in_visible_input_text() {
+        use nsh_core::{InputConfig, MountBatch, MountItem, TextAlign};
+
+        for (text, multiline, align, click, visible, caret, edited) in [
+            (
+                "abcdefghijklmno",
+                false,
+                TextAlign::Left,
+                (1, 4),
+                &["abcd"][..],
+                1,
+                "aXbcdefghijklmno",
+            ),
+            (
+                "ab",
+                false,
+                TextAlign::Right,
+                (2, 4),
+                &["  ab"][..],
+                0,
+                "Xab",
+            ),
+            (
+                "abcd\nefgh\nijkl",
+                true,
+                TextAlign::Left,
+                (1, 5),
+                &["abcd", "efgh"][..],
+                6,
+                "abcd\neXfgh\nijkl",
+            ),
+        ] {
+            let mut surface = form();
+            let mut items = create(10, ViewKind::Input, ROOT_ID, 64.0);
+            items.extend([
+                MountItem::Frame {
+                    id: 10,
+                    frame: Bounds::new(
+                        point(px(0.0), px(64.0)),
+                        Size::new(px(32.0), px(if multiline { 32.0 } else { 16.0 })),
+                    ),
+                },
+                MountItem::Input {
+                    id: 10,
+                    config: Box::new(InputConfig {
+                        multiline,
+                        align,
+                        ..Default::default()
+                    }),
+                },
+                MountItem::InputValue {
+                    id: 10,
+                    text: text.into(),
+                    count: 0,
+                },
+                MountItem::Events {
+                    id: 10,
+                    events: mask(&[EventKind::Focus, EventKind::SelectionChange]),
+                },
+            ]);
+            surface.apply(MountBatch { items });
+            assert_eq!(surface.focused(), Some(2));
+            assert_eq!(
+                surface
+                    .snapshot()
+                    .lines()
+                    .skip(4)
+                    .take(visible.len())
+                    .collect::<Vec<_>>(),
+                visible
+            );
+            surface.events.clear();
+            assert!(surface.handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click.0,
+                row: click.1,
+                modifiers: KeyModifiers::NONE,
+            })));
+            assert_eq!(surface.focused(), Some(10));
+            assert_eq!(surface.input_context().unwrap().selection, caret..caret);
+            assert_eq!(
+                surface
+                    .snapshot()
+                    .lines()
+                    .skip(4)
+                    .take(visible.len())
+                    .collect::<Vec<_>>(),
+                visible
+            );
+            let callbacks: Vec<_> = surface
+                .drain_events()
+                .filter_map(|event| match event {
+                    SurfaceEvent::Event(id, kind, payload) => Some((id, kind, payload)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                callbacks,
+                [
+                    (10, EventKind::Focus, EventPayload::None),
+                    (
+                        10,
+                        EventKind::SelectionChange,
+                        EventPayload::Map(vec![
+                            ("start", PayloadValue::Number(f64::from(caret))),
+                            ("end", PayloadValue::Number(f64::from(caret))),
+                        ])
+                    ),
+                ]
+            );
+            assert!(surface.handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: click.0,
+                row: click.1,
+                modifiers: KeyModifiers::NONE,
+            })));
+            surface.handle_event(Event::Paste("X".into()));
+            assert_eq!(
+                surface.input_context().unwrap().text.as_deref(),
+                Some(edited)
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_caret_resolves_the_current_focused_scroll_offset() {
+        use nsh_core::{MountBatch, MountItem};
+
+        let mut surface = form();
+        let mut items = create(10, ViewKind::Input, ROOT_ID, 64.0);
+        items.extend([
+            MountItem::Frame {
+                id: 10,
+                frame: Bounds::new(point(px(0.0), px(64.0)), Size::new(px(32.0), px(16.0))),
+            },
+            MountItem::InputValue {
+                id: 10,
+                text: "abcdefghijklmno".into(),
+                count: 0,
+            },
+            MountItem::Command {
+                id: 10,
+                command: Command::Focus,
+            },
+        ]);
+        surface.apply(MountBatch { items });
+        assert_eq!(surface.focused(), Some(10));
+        assert_eq!(surface.input_context().unwrap().selection, 15..15);
+        assert_eq!(surface.snapshot().lines().nth(4), Some("mno"));
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert!(surface.handle_event(Event::Mouse(MouseEvent {
+                kind,
+                column: 1,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            })));
+            assert_eq!(surface.input_context().unwrap().selection, 13..13);
+        }
+        assert_eq!(surface.snapshot().lines().nth(4), Some("klmn"));
+        surface.handle_event(Event::Paste("X".into()));
+        assert_eq!(
+            surface.input_context().unwrap().text.as_deref(),
+            Some("abcdefghijklmXno")
+        );
     }
 
     #[test]
