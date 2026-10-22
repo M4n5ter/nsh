@@ -118,19 +118,95 @@ pub(crate) struct Pointer {
 }
 
 impl Surface {
+    pub(crate) fn text_link(&self, id: NodeId) -> Option<(NodeId, &nsh_core::TextLink)> {
+        if self.node(id).is_some() {
+            return None;
+        }
+        self.nodes.iter().enumerate().find_map(|(owner, node)| {
+            let (text, ..) = node.as_ref()?.text.as_ref()?;
+            text.links
+                .iter()
+                .find(|link| link.node == id)
+                .map(|link| (owner as NodeId, link))
+        })
+    }
+
+    pub(crate) fn focus_owner(&self, id: NodeId) -> Option<NodeId> {
+        self.node(id)
+            .map(|_| id)
+            .or_else(|| self.text_link(id).map(|(owner, _)| owner))
+    }
+
+    pub(crate) fn text_link_bounds(
+        &self,
+        id: NodeId,
+    ) -> Option<(NodeId, nsh_core::Bounds<nsh_core::Points>)> {
+        let (owner, link) = self.text_link(id)?;
+        let node = self.node(owner)?;
+        let (_, layout, content) = node.text.as_ref()?;
+        let layout = layout.downcast::<crate::text::TerminalLayout>()?;
+        let frame = self.presentation_frame(owner)?;
+        let sx = if node.frame.size.width.0 > 0.0 {
+            frame.size.width.0 / node.frame.size.width.0
+        } else {
+            1.0
+        };
+        let sy = if node.frame.size.height.0 > 0.0 {
+            frame.size.height.0 / node.frame.size.height.0
+        } else {
+            1.0
+        };
+        let mut bounds: Option<nsh_core::Bounds<nsh_core::Points>> = None;
+        for run in layout
+            .runs
+            .iter()
+            .filter(|run| run.width > 0 && run.start < link.end && run.end > link.start)
+        {
+            let rect = nsh_core::Bounds::new(
+                nsh_core::Point::new(content.origin.x * sx + run.x, content.origin.y * sy + run.y),
+                nsh_core::Size::new(
+                    f32::from(run.width) * self.metrics.width(),
+                    self.metrics.height(),
+                ),
+            );
+            bounds = Some(match bounds {
+                None => rect,
+                Some(old) => {
+                    let x = old.origin.x.min(rect.origin.x);
+                    let y = old.origin.y.min(rect.origin.y);
+                    nsh_core::Bounds::new(
+                        nsh_core::Point::new(x, y),
+                        nsh_core::Size::new(
+                            (old.origin.x + old.size.width).max(rect.origin.x + rect.size.width)
+                                - x,
+                            (old.origin.y + old.size.height).max(rect.origin.y + rect.size.height)
+                                - y,
+                        ),
+                    )
+                }
+            });
+        }
+        bounds.map(|bounds| (owner, bounds))
+    }
+
     fn within_popup(&self, id: NodeId, root: NodeId) -> bool {
         let mut current = Some(id);
         while let Some(id) = current {
             if id == root {
                 return true;
             }
-            current = self.node(id).and_then(|node| node.parent);
+            current = self
+                .node(id)
+                .map(|node| node.parent)
+                .unwrap_or_else(|| self.text_link(id).map(|(owner, _)| owner));
         }
         false
     }
 
     fn focus_target(&self, id: NodeId) -> Option<FocusTarget> {
-        self.node(id).map(|node| FocusTarget(id, node.generation))
+        self.focus_owner(id)
+            .and_then(|owner| self.node(owner))
+            .map(|node| FocusTarget(id, node.generation))
     }
 
     fn current_focus_target(&self) -> Option<FocusTarget> {
@@ -146,9 +222,11 @@ impl Surface {
 
     fn returnable_focus(&self, target: FocusTarget, shown: &[NodeId]) -> bool {
         self.focus_target(target.0) == Some(target)
-            && shown.contains(&target.0)
+            && self
+                .focus_owner(target.0)
+                .is_some_and(|owner| shown.contains(&owner))
             && !self.is_dying(target.0)
-            && self.navigation_accepts(target.0)
+            && self.navigation_accepts(self.focus_owner(target.0).unwrap_or(target.0))
             && self.focusable(target.0)
     }
 
@@ -453,7 +531,8 @@ impl Surface {
                 return true;
             }
             let Some(node) = self.node(id) else {
-                return false;
+                current = self.text_link(id).map(|(owner, _)| owner);
+                continue;
             };
             if node.props.focus_return_parent.is_some() {
                 return false;
@@ -475,11 +554,14 @@ impl Surface {
 
     fn keyboard_stop(&self, id: NodeId) -> bool {
         self.focusable(id)
-            && self.node(id).is_some_and(|n| {
-                n.props
-                    .focusable
-                    .unwrap_or(n.props.focus_return_parent.is_none())
-            })
+            && (self
+                .text_link(id)
+                .is_some_and(|(_, link)| link.is_tab_stop())
+                || self.node(id).is_some_and(|n| {
+                    n.props
+                        .focusable
+                        .unwrap_or(n.props.focus_return_parent.is_none())
+                }))
     }
 
     fn popup_focus_target(&self, scope: FocusTarget) -> Option<NodeId> {
@@ -505,7 +587,7 @@ impl Surface {
             return Vec::new();
         }
         self.focus
-            .filter(|id| self.node(*id).is_some())
+            .filter(|id| self.focus_owner(*id).is_some())
             .map(|id| self.ancestors(id))
             .unwrap_or_default()
     }
@@ -756,7 +838,7 @@ impl Surface {
             .focus
             .is_some_and(|id| !visible.contains(&id) || !self.focusable(id));
         if displaced {
-            if let Some(id) = self.focus.filter(|id| self.node(*id).is_some()) {
+            if let Some(id) = self.focus.filter(|id| self.focus_owner(*id).is_some()) {
                 self.remember_focus(id);
             }
             self.set_focus(None);
@@ -847,8 +929,9 @@ impl Surface {
     }
 
     fn remember_focus(&mut self, id: NodeId) {
-        self.focus_history
-            .retain(|old| *old != id && self.nodes.get(*old as usize).is_some_and(Option::is_some));
+        let mut history = std::mem::take(&mut self.focus_history);
+        history.retain(|old| *old != id && self.focus_owner(*old).is_some());
+        self.focus_history = history;
         self.focus_history.push(id);
     }
 
@@ -937,6 +1020,19 @@ impl Surface {
     }
 
     pub(crate) fn focusable(&self, id: NodeId) -> bool {
+        if let Some((owner, link)) = self.text_link(id) {
+            return link.is_enabled()
+                && self.text_link_bounds(id).is_some()
+                && self.node(owner).is_some_and(|node| {
+                    !node.style.hidden
+                        && !node.props.accessibility.state.disabled
+                        && node.props.pointer_events != PointerEvents::None
+                })
+                && !self.ancestors(owner).into_iter().skip(1).any(|id| {
+                    self.node(id)
+                        .is_some_and(|node| node.props.pointer_events == PointerEvents::None)
+                });
+        }
         let Some(node) = self.node(id) else {
             return false;
         };
@@ -968,6 +1064,17 @@ impl Surface {
     }
 
     pub(crate) fn pressable(&self, id: NodeId) -> bool {
+        if let Some((_, link)) = self.text_link(id) {
+            return link.is_enabled()
+                && [
+                    EventKind::Press,
+                    EventKind::LongPress,
+                    EventKind::PressDown,
+                    EventKind::PressUp,
+                ]
+                .into_iter()
+                .any(|event| link.events.contains(event));
+        }
         self.node(id).is_some_and(|n| {
             !n.props.accessibility.state.disabled
                 && [
@@ -989,7 +1096,10 @@ impl Surface {
                 break;
             }
             result.push(id);
-            next = self.node(id).and_then(|n| n.parent);
+            next = self
+                .node(id)
+                .map(|n| n.parent)
+                .unwrap_or_else(|| self.text_link(id).map(|(owner, _)| owner));
         }
         result
     }
@@ -1030,6 +1140,16 @@ impl Surface {
     }
 
     pub(crate) fn reveal_focus(&mut self, id: NodeId, overridden: &[(NodeId, u64)]) {
+        let (geometry, target) = if let Some(link) = self.text_link_bounds(id) {
+            link
+        } else if let Some(frame) = self.presentation_frame(id) {
+            (
+                id,
+                nsh_core::Bounds::new(nsh_core::Point::default(), frame.size),
+            )
+        } else {
+            return;
+        };
         let ancestors = self.ancestors(id);
         for scroll in ancestors.into_iter().skip(1) {
             let Some(node) = self.node(scroll) else {
@@ -1044,16 +1164,17 @@ impl Surface {
             let (x, y) = (node.scroll.x.0, node.scroll.y.0);
             let mirrored = node.scroll.mirrored;
             let viewport = (node.frame.size.width.0, node.frame.size.height.0);
-            let (Some(matrix), Some(target)) =
-                (self.local_to_surface(id), self.presentation_frame(id))
-            else {
+            let Some(matrix) = self.local_to_surface(geometry) else {
                 continue;
             };
             let points = [
-                (0.0, 0.0),
-                (target.size.width.0, 0.0),
-                (0.0, target.size.height.0),
-                (target.size.width.0, target.size.height.0),
+                (target.origin.x.0, target.origin.y.0),
+                (target.origin.x.0 + target.size.width.0, target.origin.y.0),
+                (target.origin.x.0, target.origin.y.0 + target.size.height.0),
+                (
+                    target.origin.x.0 + target.size.width.0,
+                    target.origin.y.0 + target.size.height.0,
+                ),
             ];
             let mut bounds = (
                 f32::INFINITY,
@@ -1573,6 +1694,14 @@ impl Surface {
             KeyCode::End => (x, content_h),
             _ => return false,
         };
+        self.scroll_intent(
+            id,
+            match key.code {
+                KeyCode::Home => "start",
+                KeyCode::End => "end",
+                _ => "scroll",
+            },
+        );
         self.user_scroll(id, x, y);
         true
     }
@@ -1834,6 +1963,7 @@ impl Surface {
             MouseEventKind::ScrollDown => y += vertical_step,
             _ => {}
         }
+        self.scroll_intent(id, "scroll");
         self.user_scroll(id, x, y);
         steps
     }
@@ -2232,7 +2362,9 @@ impl Surface {
             return None;
         }
         let (text, _, _) = self.node(id)?.text.as_ref()?;
-        text.link_at(run.start).map(|link| link.node)
+        text.link_at(run.start)
+            .filter(|link| link.is_enabled())
+            .map(|link| link.node)
     }
 
     fn text_offset_at(&self, id: NodeId, x: f32, y: f32) -> Option<u32> {
@@ -4866,8 +4998,27 @@ mod tests {
     #[test]
     fn wheel_scrolls_native_state_and_preserves_core_adjustment_count() {
         use nsh_core::{MountBatch, MountItem, Size};
+        let intents = |surface: &Surface| {
+            surface
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    SurfaceEvent::Event(id, EventKind::ScrollIntent, EventPayload::Map(fields)) => {
+                        fields.iter().find_map(|(key, value)| match (*key, value) {
+                            ("intent", PayloadValue::Str(intent)) => Some((*id, intent.clone())),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
         let mut surface = Surface::new(40, 12, crate::CellMetrics::default());
         let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+        items.push(MountItem::Events {
+            id: 2,
+            events: mask(&[EventKind::ScrollIntent]),
+        });
         items.push(MountItem::ScrollContent {
             id: 2,
             size: Size::new(px(160.0), px(1000.0)),
@@ -4882,6 +5033,9 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         assert_eq!(surface.node(2).unwrap().scroll.y.0, 48.0);
+        assert!(
+            matches!(surface.events.first(), Some(SurfaceEvent::Event(2, EventKind::ScrollIntent, EventPayload::Map(fields))) if fields.contains(&("intent", PayloadValue::Str("scroll".into()))))
+        );
         assert!(
             surface
                 .events
@@ -4911,6 +5065,42 @@ mod tests {
         assert_eq!(surface.node(2).unwrap().scroll.x.0, 0.0);
         key(&mut surface, KeyCode::End, KeyModifiers::NONE);
         assert_eq!(surface.node(2).unwrap().scroll.x.0, 840.0);
+        key(&mut surface, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(surface.node(2).unwrap().scroll.x.0, 840.0);
+        assert_eq!(
+            intents(&surface),
+            vec![
+                (2, "scroll".into()),
+                (2, "scroll".into()),
+                (2, "scroll".into()),
+                (2, "scroll".into()),
+                (2, "start".into()),
+                (2, "end".into()),
+                (2, "end".into())
+            ]
+        );
+        surface.events.clear();
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Command {
+                    id: 2,
+                    command: nsh_core::Command::ScrollTo {
+                        x: px(0.0),
+                        y: px(0.0),
+                        animated: false,
+                    },
+                },
+                MountItem::ScrollBy {
+                    id: 2,
+                    dx: px(16.0),
+                    dy: px(0.0),
+                },
+            ],
+        });
+        assert_eq!(intents(&surface), Vec::<(NodeId, String)>::new());
+        surface.node_mut(2).unwrap().scroll.enabled = false;
+        key(&mut surface, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(intents(&surface), Vec::<(NodeId, String)>::new());
     }
 
     #[test]
@@ -4920,6 +5110,10 @@ mod tests {
         let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
         items.extend(create(4, ViewKind::Scroll, 2, 48.0));
         for id in [2, 4] {
+            items.push(MountItem::Events {
+                id,
+                events: mask(&[EventKind::ScrollIntent]),
+            });
             items.push(MountItem::ScrollContent {
                 id,
                 size: Size::new(px(160.0), px(1000.0)),
@@ -4960,6 +5154,15 @@ mod tests {
             })
             .collect();
         assert_eq!(offsets, [(2, 0.0, 144.0, 0)]);
+        let owners: Vec<_> = surface
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(id, EventKind::ScrollIntent, _) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(owners, [2]);
 
         surface.node_mut(2).unwrap().scroll.y.0 = 0.0;
         surface.events.clear();
@@ -5400,6 +5603,7 @@ mod tests {
                 end: 5,
                 node: 10,
                 events: mask(&[EventKind::Press]),
+                props: Arc::default(),
             });
             let engine = crate::TerminalTextEngine::default();
             let prepared = engine.prepare(&text);
@@ -5430,6 +5634,12 @@ mod tests {
             assert_eq!(surface.node(2).unwrap().editor.selected(), "llo");
             key(&mut surface, KeyCode::Char('c'), KeyModifiers::CONTROL);
             assert_eq!(surface.clipboard, "llo");
+            assert!(
+                !surface
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, SurfaceEvent::Event(10, EventKind::Press, _)))
+            );
             surface.events.clear();
             surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 3));
             surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 3));
@@ -5440,6 +5650,181 @@ mod tests {
                     .any(|event| matches!(event, SurfaceEvent::Event(10, EventKind::Press, _)))
             );
         }
+
+        let mut surface = Surface::new(8, 8, crate::CellMetrics::default());
+        let mut text = AttributedText {
+            selectable: Some(true),
+            ..Default::default()
+        };
+        text.push("a中中中中z\n一二", ResolvedTextStyle::default());
+        text.links = vec![
+            TextLink {
+                start: 1,
+                end: 5,
+                node: 10,
+                events: mask(&[EventKind::Press]),
+                props: Arc::default(),
+            },
+            TextLink {
+                start: 7,
+                end: 9,
+                node: 12,
+                events: mask(&[EventKind::Press]),
+                props: Arc::default(),
+            },
+        ];
+        let engine = crate::TerminalTextEngine::default();
+        let layout = engine.layout(&engine.prepare(&text), Size::new(px(32.0), px(64.0)));
+        let content = Bounds::new(Point::default(), Size::new(px(32.0), px(64.0)));
+        let mut items = create(2, ViewKind::Scroll, ROOT_ID, 0.0);
+        items.push(MountItem::Frame {
+            id: 2,
+            frame: Bounds::new(Point::default(), Size::new(px(32.0), px(32.0))),
+        });
+        items.push(MountItem::ScrollConfig {
+            id: 2,
+            horizontal: false,
+            scrollbar_visible: false,
+            scroll_value: None,
+            keyboard_dismiss: Default::default(),
+            mirrored: false,
+        });
+        items.push(MountItem::ScrollContent {
+            id: 2,
+            size: Size::new(px(32.0), px(64.0)),
+        });
+        items.extend(create(4, ViewKind::Text, 2, 0.0));
+        items.push(MountItem::Frame {
+            id: 4,
+            frame: content,
+        });
+        items.push(MountItem::Text {
+            id: 4,
+            text: Arc::new(text.clone()),
+            layout: layout.clone(),
+            content,
+        });
+        surface.apply(MountBatch { items });
+        surface.set_focus(Some(4));
+        key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(surface.focused(), Some(10));
+        assert_eq!(surface.focus_path(), vec![10, 4, 2, ROOT_ID]);
+        assert_eq!(
+            surface.snapshot().lines().take(2).collect::<Vec<_>>(),
+            vec!["a中", "中中"]
+        );
+        let area = ratatui::layout::Rect::new(0, 0, 8, 8);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        surface.render_plain(area, &mut buffer);
+        assert!(
+            !buffer[(0, 0)]
+                .modifier
+                .contains(ratatui::style::Modifier::UNDERLINED)
+        );
+        for cell in [(1, 0), (0, 1), (2, 1)] {
+            assert!(
+                buffer[cell]
+                    .modifier
+                    .contains(ratatui::style::Modifier::UNDERLINED)
+            );
+        }
+        key(&mut surface, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(surface.focused(), Some(12));
+        assert_eq!(surface.node(2).unwrap().scroll.y, px(32.0));
+        assert_eq!(
+            surface.snapshot().lines().take(2).collect::<Vec<_>>(),
+            vec!["中z", "一二"]
+        );
+        let semantics = surface.accessibility_snapshot();
+        let second = semantics.iter().find(|node| node.id == 12).unwrap();
+        assert_eq!(second.role, nsh_core::AccessibilityRole::Link);
+        assert_eq!(second.label, "一二");
+        assert!(second.focused);
+        assert_eq!(
+            second.frame,
+            Bounds::new(Point::new(px(0.0), px(16.0)), Size::new(px(32.0), px(16.0)))
+        );
+        surface.events.clear();
+        key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
+        surface.handle_event(Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        )));
+        key(&mut surface, KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(surface.focused(), Some(10));
+        key(&mut surface, KeyCode::Char(' '), KeyModifiers::NONE);
+        let presses: Vec<_> = surface
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SurfaceEvent::Event(id, EventKind::Press, _) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(presses, vec![12, 10]);
+        surface.events.clear();
+        let mouse = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 1,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left)));
+        surface.set_focus(Some(10));
+        surface.apply(MountBatch {
+            items: vec![
+                MountItem::Delete { id: 10 },
+                MountItem::Text {
+                    id: 4,
+                    text: Arc::new(text.clone()),
+                    layout: layout.clone(),
+                    content,
+                },
+            ],
+        });
+        assert_eq!(surface.focused(), Some(2));
+        assert!(surface.pointer.is_none());
+        surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left)));
+        assert!(
+            !surface
+                .events
+                .iter()
+                .any(|event| matches!(event, SurfaceEvent::Event(10, EventKind::Press, _)))
+        );
+        surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left)));
+        surface.set_focus(Some(10));
+        assert_eq!(surface.focused(), Some(10));
+        text.links.retain(|link| link.node != 10);
+        surface.apply(MountBatch {
+            items: vec![MountItem::Text {
+                id: 4,
+                text: Arc::new(text),
+                layout,
+                content,
+            }],
+        });
+        assert_eq!(surface.focused(), Some(2));
+        assert!(surface.pointer.is_none());
+        surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left)));
+        key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            !surface
+                .events
+                .iter()
+                .any(|event| matches!(event, SurfaceEvent::Event(10, EventKind::Press, _)))
+        );
+        key(&mut surface, KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(surface.focused(), Some(12));
+        key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            surface
+                .events
+                .iter()
+                .any(|event| matches!(event, SurfaceEvent::Event(12, EventKind::Press, _)))
+        );
     }
 
     #[test]

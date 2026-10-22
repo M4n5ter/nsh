@@ -296,13 +296,20 @@ impl Surface {
             }
             if let Some((text, layout, content)) = &node.text {
                 let content = relative_frame(frame, node.frame, *content);
-                let selection = node.editor.selection();
-                if self.focus == Some(id)
-                    && text.is_selectable()
+                let focused_link = text.links.iter().find(|link| {
+                    self.dialog.is_none() && self.focus == Some(link.node) && link.is_enabled()
+                });
+                let selection = focused_link
+                    .map_or_else(|| node.editor.selection(), |link| (link.start, link.end));
+                if ((self.focus == Some(id) && text.is_selectable()) || focused_link.is_some())
                     && selection.0 < selection.1
                     && let Some(terminal) = layout.0.downcast_ref::<crate::text::TerminalLayout>()
                 {
-                    let color = text.selection_color.unwrap_or(Color(0x388b_fd66));
+                    let color = if focused_link.is_some() {
+                        Color(0x388b_fd66)
+                    } else {
+                        text.selection_color.unwrap_or(Color(0x388b_fd66))
+                    };
                     for run in terminal
                         .runs
                         .iter()
@@ -352,6 +359,37 @@ impl Surface {
                         area,
                         buffer,
                     );
+                }
+                if let Some(link) = focused_link
+                    && let Some(terminal) = layout.downcast::<crate::text::TerminalLayout>()
+                {
+                    for run in terminal
+                        .runs
+                        .iter()
+                        .filter(|run| run.start < link.end && run.end > link.start)
+                    {
+                        let rect = cells(
+                            Bounds::new(
+                                Point::new(content.origin.x + run.x, content.origin.y + run.y),
+                                Size::new(
+                                    f32::from(run.width) * self.metrics.width(),
+                                    self.metrics.height(),
+                                ),
+                            ),
+                            self.metrics,
+                            area,
+                        )
+                        .intersection(cells(clip, self.metrics, area))
+                        .intersection(buffer.area);
+                        for y in rect.y..rect.bottom() {
+                            for x in rect.x..rect.right() {
+                                let cell = &mut buffer[(x, y)];
+                                if focus_text_cell(cell) {
+                                    cell.set_style(Style::new().add_modifier(Modifier::UNDERLINED));
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if (node.kind == ViewKind::Scroll
@@ -699,9 +737,12 @@ impl Surface {
         if let Some((text, layout, content)) = &node.text {
             let content = relative_frame(local, node.frame, *content);
             let mut selection = Vec::new();
-            let range = node.editor.selection();
-            if self.focus == Some(id)
-                && text.is_selectable()
+            let focused_link = text.links.iter().find(|link| {
+                self.dialog.is_none() && self.focus == Some(link.node) && link.is_enabled()
+            });
+            let range =
+                focused_link.map_or_else(|| node.editor.selection(), |link| (link.start, link.end));
+            if ((self.focus == Some(id) && text.is_selectable()) || focused_link.is_some())
                 && range.0 < range.1
                 && let Some(terminal) = layout.0.downcast_ref::<crate::text::TerminalLayout>()
             {
@@ -718,7 +759,11 @@ impl Surface {
                                 self.metrics.height(),
                             ),
                         ),
-                        text.selection_color.unwrap_or(Color(0x388b_fd66)),
+                        if focused_link.is_some() {
+                            Color(0x388b_fd66)
+                        } else {
+                            text.selection_color.unwrap_or(Color(0x388b_fd66))
+                        },
                     ));
                 }
             }
@@ -728,6 +773,7 @@ impl Surface {
                 foreground,
                 selection,
                 focus: focus_text,
+                focus_range: focused_link.map(|link| (link.start, link.end)),
             });
         }
         if matches!(

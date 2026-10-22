@@ -65,7 +65,7 @@ use std::{
 
 use gpui::{Font, FontFeatures, FontStyle, FontWeight, SharedString, TextSystem, px};
 use nsh_core::{
-    AutoCapitalize, Color, EventKind, EventPayload, InputConfig, PayloadValue, Points,
+    AutoCapitalize, Color, EventKind, EventPayload, InputConfig, NodeId, PayloadValue, Points,
     ReturnKeyType, SubmitBehavior, TextAlign,
     tailwind::state,
     text_edit::{self as model, Composition, Model, Unit, key_of, pasted, utf16_to_byte},
@@ -576,11 +576,75 @@ fn xalign(config: &InputConfig) -> f32 {
 
 // --- Focus -------------------------------------------------------------------
 
-/// A surface's focused view, and whether the surface has the window's
-/// focus.
+/// A keyboard target lives in one native view. Inline links retain their
+/// own node identity without adding a view or another focus owner.
+#[derive(Clone, PartialEq)]
+pub(crate) enum FocusTarget {
+    View(NshView),
+    TextLink(NshView, NodeId),
+}
+
+impl FocusTarget {
+    pub(crate) fn view(&self) -> &NshView {
+        match self {
+            Self::View(view) | Self::TextLink(view, _) => view,
+        }
+    }
+
+    pub(crate) fn id(&self) -> NodeId {
+        match self {
+            Self::View(view) => view.id(),
+            Self::TextLink(_, node) => *node,
+        }
+    }
+
+    pub(crate) fn link(&self) -> Option<nsh_core::TextLink> {
+        let Self::TextLink(view, node) = self else {
+            return None;
+        };
+        view.state()
+            .text
+            .as_ref()?
+            .text
+            .links
+            .iter()
+            .find(|link| link.node == *node)
+            .cloned()
+    }
+
+    pub(crate) fn valid(&self, surface: &Surface) -> bool {
+        crate::input::focusable(surface, self.view())
+            && match self {
+                Self::View(_) => true,
+                Self::TextLink(..) => self.link().is_some_and(|link| link.is_enabled()),
+            }
+    }
+
+    fn event(&self, surface: &Surface, kind: EventKind) {
+        match self {
+            Self::View(view) => send(surface, view, kind, || EventPayload::None),
+            Self::TextLink(..) => {
+                if self.link().is_some_and(|link| link.events.contains(kind)) {
+                    surface.event(self.id(), kind, EventPayload::None);
+                }
+            }
+        }
+    }
+
+    fn focused_state(&self, surface: &Surface, on: bool) {
+        match self {
+            Self::View(view) => crate::input::set_state(surface, view, state::FOCUSED, on),
+            Self::TextLink(..) => {
+                surface.control(|c| c.set_states(self.id(), if on { state::FOCUSED } else { 0 }))
+            }
+        }
+    }
+}
+
+/// A surface's sole keyboard target and its window activation.
 #[derive(Default)]
 struct Focus {
-    view: Option<NshView>,
+    target: Option<FocusTarget>,
     inactive: bool,
 }
 
@@ -634,21 +698,50 @@ pub(crate) fn set_accessible_value(surface: &Rc<Surface>, view: &NshView, text: 
 
 /// The view that has the surface's keyboard focus.
 pub(crate) fn focused_view(surface: &Surface) -> Option<NshView> {
-    let view = FOCUS.with(|f| f.borrow().get(&surface.key()).and_then(|f| f.view.clone()))?;
+    focused_target(surface).map(|target| target.view().clone())
+}
+
+/// The mounted view or inline link that owns the keyboard focus.
+pub(crate) fn focused_target(surface: &Surface) -> Option<FocusTarget> {
+    let target = FOCUS.with(|f| {
+        f.borrow()
+            .get(&surface.key())
+            .and_then(|f| f.target.clone())
+    })?;
+    let view = target.view();
     // A view the app removed loses the focus quietly (its node is gone).
-    if view.attached() {
-        return Some(view);
+    if target.valid(surface) {
+        return Some(target);
     }
-    if let Some(input) = input_of(&view) {
+    if let Some(input) = input_of(view) {
         input.focused.set(false);
     }
+    target.focused_state(surface, false);
     FOCUS.with(|f| {
         if let Some(f) = f.borrow_mut().get_mut(&surface.key()) {
-            f.view = None;
+            f.target = None;
         }
     });
     blink::update();
     None
+}
+
+/// Resolves a span from the current mounted text, never a retained range.
+pub(crate) fn link_target(surface: &Surface, node: NodeId) -> Option<FocusTarget> {
+    fn find(view: &NshView, node: NodeId) -> Option<FocusTarget> {
+        if view
+            .state()
+            .text
+            .as_ref()
+            .is_some_and(|text| text.text.links.iter().any(|link| link.node == node))
+        {
+            return Some(FocusTarget::TextLink(view.clone(), node));
+        }
+        view.child_views()
+            .iter()
+            .find_map(|child| find(child, node))
+    }
+    find(&surface.root, node)
 }
 
 /// The focused input, if the surface's keyboard focus belongs to one.
@@ -661,54 +754,85 @@ pub(crate) fn window_active(surface: &Surface) -> bool {
     FOCUS.with(|f| f.borrow().get(&surface.key()).is_none_or(|f| !f.inactive))
 }
 
+/// The focused inline range of this view, derived from the sole owner.
+pub(crate) fn focused_link(view: &NshView) -> Option<nsh_core::TextLink> {
+    FOCUS.with_borrow(|focuses| {
+        focuses.values().find_map(|focus| {
+            let target = focus.target.as_ref()?;
+            (!focus.inactive && target.view() == view)
+                .then(|| target.link())
+                .flatten()
+        })
+    })
+}
+
+pub(crate) fn reveal_target(surface: &Rc<Surface>, target: &FocusTarget) {
+    if let Some(link) = target.link() {
+        if let Some(rect) = crate::text::range_rect(&target.view().state(), link.start, link.end) {
+            crate::scroll::reveal_rect(surface, target.view(), rect);
+        }
+    } else {
+        crate::scroll::reveal(surface, target.view());
+    }
+}
+
 /// Moves the surface's focus to `view` (or nowhere), reporting the blur of
 /// the view that had it, then the focus of the new one. Callers validate
 /// eligibility and navigation scope before entering this transition.
 fn set_focus(surface: &Rc<Surface>, view: Option<&NshView>) {
-    if view.is_some_and(|view| !view.attached()) {
+    set_focus_target(surface, view.cloned().map(FocusTarget::View));
+}
+
+/// All view and span transitions use the same native focus lifecycle.
+pub(crate) fn set_focus_target(surface: &Rc<Surface>, target: Option<FocusTarget>) {
+    if target.as_ref().is_some_and(|target| !target.valid(surface)) {
         return;
     }
     // A native focus intent (pointer, Tab or explicit focus) supersedes
     // an earlier autoFocus request that has not mounted yet.
     surface.pending_auto_focus.borrow_mut().take();
-    if view.is_some() {
+    if target.is_some() {
         crate::native::focus_surface(surface);
     }
-    let old = focused_view(surface);
+    let old = focused_target(surface);
     let previous = crate::input::focus_chain(surface);
-    if old.as_ref() == view {
-        if view.is_some() {
+    if old == target {
+        if target.is_some() {
             surface.sync_focus();
         }
         return;
     }
     if let Some(old) = &old {
-        if let Some(input) = input_of(old) {
+        let view = old.view();
+        if let Some(input) = input_of(view) {
             input.focused.set(false);
             input.drag.set(None);
             // What the input method composed is dropped with the focus
             // (the handler that would commit it is no longer registered).
             input.model.borrow_mut().composition = None;
             input.relayout();
-            report_composition(surface, old, &input);
+            report_composition(surface, view, &input);
         }
-        FOCUS.with(|f| f.borrow_mut().entry(surface.key()).or_default().view = None);
-        crate::input::set_state(surface, old, state::FOCUSED, false);
-        send(surface, old, EventKind::Blur, || EventPayload::None);
-        old.changed();
+        FOCUS.with(|f| f.borrow_mut().entry(surface.key()).or_default().target = None);
+        old.focused_state(surface, false);
+        old.event(surface, EventKind::Blur);
+        view.changed();
     }
-    if let Some(view) = view {
-        FOCUS.with(|f| f.borrow_mut().entry(surface.key()).or_default().view = Some(view.clone()));
+    if let Some(target) = target {
+        let view = target.view();
+        FOCUS.with(|f| {
+            f.borrow_mut().entry(surface.key()).or_default().target = Some(target.clone())
+        });
         if let Some(input) = input_of(view) {
             input.focused.set(true);
             input.active.set(window_active(surface));
             input.wake_caret();
             input.reveal();
         }
-        crate::input::set_state(surface, view, state::FOCUSED, true);
-        send(surface, view, EventKind::Focus, || EventPayload::None);
+        target.focused_state(surface, true);
+        target.event(surface, EventKind::Focus);
         // The scroll views around bring the focused view into sight.
-        crate::scroll::reveal(surface, view);
+        reveal_target(surface, &target);
         crate::access::focus_changed(surface, view);
         view.changed();
     }
@@ -1958,7 +2082,7 @@ mod blink {
             f.borrow()
                 .iter()
                 .filter(|(key, f)| !f.inactive && Surface::by_key(**key).is_some())
-                .filter_map(|(_, f)| f.view.clone())
+                .filter_map(|(_, f)| f.target.as_ref().map(|target| target.view().clone()))
                 .filter(|view| view.attached() && input_of(view).is_some())
                 .collect()
         })

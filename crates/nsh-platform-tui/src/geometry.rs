@@ -331,13 +331,17 @@ impl Surface {
     }
 
     pub(crate) fn global_frame(&self, id: NodeId) -> Option<Bounds<Points>> {
-        let frame = self.presentation_frame(id)?;
-        let transform = self.local_to_surface(id)?;
+        let (origin, size, transform) = if let Some((owner, bounds)) = self.text_link_bounds(id) {
+            (bounds.origin, bounds.size, self.local_to_surface(owner)?)
+        } else {
+            let frame = self.presentation_frame(id)?;
+            (Point::default(), frame.size, self.local_to_surface(id)?)
+        };
         let points = [
-            (0.0, 0.0),
-            (frame.size.width.0, 0.0),
-            (0.0, frame.size.height.0),
-            (frame.size.width.0, frame.size.height.0),
+            (origin.x.0, origin.y.0),
+            (origin.x.0 + size.width.0, origin.y.0),
+            (origin.x.0, origin.y.0 + size.height.0),
+            (origin.x.0 + size.width.0, origin.y.0 + size.height.0),
         ];
         let mut bounds = (
             f32::INFINITY,

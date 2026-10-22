@@ -560,6 +560,129 @@ fn buttons_keep_native_focus_and_live_key_scopes(cx: &mut TestAppContext) {
     wait_for_button(&view, cx, "popup-action");
     cx.simulate_keystrokes("f9");
     wait_for_button(&view, cx, "native");
+    // The same native owner traverses real inline ranges, including wrapped
+    // CJK text. A span is not a separate view or a button beside the sentence.
+    let links = r#"
+import { Input, mount, signal, Scroll, Text, View } from "nsh";
+import { keymap } from "nsh/keymap";
+const events = signal("ready");
+const shown = signal(true);
+const record = (event) => events.set(`${events()}|${event}`);
+let first, second, reader;
+keymap.bind("f4", () => first.focus(), { when: "always" });
+keymap.bind("f5", () => second.focus(), { when: "always" });
+keymap.bind("f6", () => record(`${keymap.focusedWithin(first)}:${keymap.focusedWithin(second)}`), { when: "always" });
+keymap.bind("f8", () => reader.focus(), { when: "always" });
+keymap.bind("f11", () => { shown.set(false); record("removed"); }, { when: "always" });
+mount(() => <View>
+  <Input testID="report" autoFocus readonly value={events()} style={{height: 30}} />
+  <Scroll ref={(node) => reader = node} testID="reader" style={{width: 90, height: 200}} onScrollIntent={({intent}) => record(`intent:${intent}`)}>
+    <Text testID="sentence" selectable style={{fontSize: 20}}>
+      <If when={shown()}><Text ref={(node) => first = node} testID="first-link" accessibilityRole="link" accessibilityLabel="First document" focusable onPress={() => record("first")}>
+        打开<Text style={{fontWeight: "bold"}}>跨行中文</Text>文档
+      </Text></If>
+      {" plain "}<Text ref={(node) => second = node} testID="second-link" accessibilityRole="link" accessibilityLabel="Second document" focusable onPress={() => record("second")}>second</Text>
+    </Text>
+  </Scroll>
+  <View testID="after" focusable onPress={() => record("after")}><Text>After links</Text></View>
+</View>);
+"#;
+    let code = nsh_bundler::compile_module("App.tsx", links, &[]).unwrap();
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    wait_for_report(&view, cx, "ready");
+    cx.simulate_keystrokes("f4 enter tab space shift-tab enter f6");
+    wait_for_report(&view, cx, "ready|first|second|first|true:false");
+    // A real native pointer drag through the wrapped label selects text
+    // without firing its application link action.
+    let (start, end) = view.read_with(cx, |view, _| {
+        let surface = view.surface();
+        let sentence = find_test_view(&surface.root, "sentence").unwrap();
+        let state = sentence.state();
+        let text = &state.text.as_ref().unwrap().text;
+        let link = text
+            .links
+            .iter()
+            .find(|link| link.props.test_id.as_deref() == Some("first-link"))
+            .unwrap();
+        let first = crate::text::range_rect(&state, link.start, link.start + 1).unwrap();
+        let last = crate::text::range_rect(&state, link.end - 1, link.end).unwrap();
+        assert!(
+            last.1 > first.1,
+            "the CJK link must wrap at the native content width"
+        );
+        let matrix = sentence.to_root().unwrap();
+        let (ox, oy) = surface.origin.get();
+        let at = |x, y| {
+            let (x, y) = matrix.map(x, y).unwrap();
+            gpui::point(gpui::px(ox + x), gpui::px(oy + y))
+        };
+        (
+            at(first.0, first.1 + first.3 / 2.0),
+            at(last.0 + last.2, last.1 + last.3 / 2.0),
+        )
+    });
+    for event in [
+        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: start,
+            click_count: 1,
+            ..Default::default()
+        }),
+        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+            position: end,
+            pressed_button: Some(gpui::MouseButton::Left),
+            ..Default::default()
+        }),
+        gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position: end,
+            click_count: 1,
+            ..Default::default()
+        }),
+    ] {
+        cx.update(|window, cx| {
+            window.dispatch_event(event, cx);
+        });
+    }
+    cx.simulate_keystrokes("f6");
+    wait_for_report(&view, cx, "ready|first|second|first|true:false|true:false");
+    let copy = if cfg!(target_os = "macos") {
+        "cmd-c"
+    } else {
+        "ctrl-c"
+    };
+    cx.simulate_keystrokes(copy);
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("打开跨行中文文档".into())
+        )
+    });
+    cx.simulate_keystrokes("f11");
+    wait_for_report(
+        &view,
+        cx,
+        "ready|first|second|first|true:false|true:false|removed",
+    );
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            crate::text_input::focused_target(view.surface()).map(|target| target.id()),
+            None
+        )
+    });
+    cx.simulate_keystrokes("enter f5 enter f6");
+    wait_for_report(
+        &view,
+        cx,
+        "ready|first|second|first|true:false|true:false|removed|second|false:true",
+    );
+    cx.simulate_keystrokes("f8 home end pageup");
+    wait_for_report(
+        &view,
+        cx,
+        "ready|first|second|first|true:false|true:false|removed|second|false:true|intent:start|intent:end|intent:scroll",
+    );
     view.update(cx, |view, _| view.stop());
 }
 

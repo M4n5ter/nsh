@@ -2541,6 +2541,9 @@ impl<M: TextEngine> Core<M> {
                 if selected.is_some() || checked.is_some() || indeterminate.is_some() {
                     if flags != 0 {
                         self.mark(key, flags);
+                        if self.nodes[key as usize].kind == Kind::Text {
+                            self.mark_text_block(key);
+                        }
                     }
                     if let Some(selected) = selected {
                         self.set_selected(key, selected);
@@ -2811,6 +2814,11 @@ impl<M: TextEngine> Core<M> {
         }
         if flags != 0 {
             self.mark(key, flags);
+            if self.nodes[key as usize].kind == Kind::Text {
+                // Inline texts have no native view: their interaction props
+                // must travel in the containing block's TextLink metadata.
+                self.mark_text_block(key);
+            }
         }
         Ok(())
     }
@@ -3083,7 +3091,10 @@ impl<M: TextEngine> Core<M> {
         if let Some(layout) = node.layout {
             self.layout.remove(layout).expect("taffy remove");
         }
-        if node.created {
+        if node.created || (node.inline && node.kind == Kind::Text) {
+            // A virtual press target still has a native lifetime. Releasing
+            // and recreating the same id in one batch must cancel its old
+            // captured contact and focus before the replacement text mounts.
             self.mount.push(MountItem::Delete { id });
         }
         Ok(())
@@ -3814,6 +3825,7 @@ impl<M: TextEngine> Core<M> {
                             end: out.len_utf16(),
                             node: child.id,
                             events: child.events,
+                            props: Arc::new(child.props.as_deref().cloned().unwrap_or_default()),
                         });
                     }
                 }

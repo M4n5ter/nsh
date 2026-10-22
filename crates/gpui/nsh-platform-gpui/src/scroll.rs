@@ -268,9 +268,30 @@ pub(crate) fn command(surface: &Rc<Surface>, view: &NshView, command: &Command) 
 
 // Input.
 
+/// The actual user target reports intent before changing native scroll state.
+/// Programmatic commands, reveal, animation and momentum do not call this.
+pub(crate) fn intent(surface: &Surface, view: &NshView, intent: &'static str) {
+    let enabled = {
+        let state = view.state();
+        state.events.contains(EventKind::ScrollIntent)
+            && state
+                .scroll
+                .as_ref()
+                .is_some_and(|scroll| scroll.behavior.enabled)
+    };
+    if enabled {
+        surface.event(
+            view.id(),
+            EventKind::ScrollIntent,
+            EventPayload::Map(vec![("intent", nsh_core::PayloadValue::Str(intent.into()))]),
+        );
+    }
+}
+
 /// A finger or pen drag starts scrolling `view` (the mouse never drags
 /// content).
 pub(crate) fn drag_begin(surface: &Rc<Surface>, view: &NshView) {
+    intent(surface, view, "scroll");
     shared::drag_begin(&Host::new(surface, view));
 }
 
@@ -303,6 +324,7 @@ pub(crate) fn hovered(surface: &Rc<Surface>, view: &NshView) {
 
 /// The mouse grabbed `view`'s indicator ([`grabs_thumb`]).
 pub(crate) fn thumb_begin(surface: &Rc<Surface>, view: &NshView) {
+    intent(surface, view, "scroll");
     shared::thumb_begin(&Host::new(surface, view));
 }
 
@@ -438,10 +460,19 @@ fn key_move(event: &KeyEvent) -> Option<(bool, KeyMove)> {
 /// as iOS and Android do for the focused field: text inputs call it when
 /// they get the focus.
 pub(crate) fn reveal(surface: &Rc<Surface>, target: &NshView) {
-    let Some(bounds) = target.to_root().and_then(|m| {
+    let bounds = {
         let s = target.state();
-        m.bounds(0.0, 0.0, s.frame.size.width.0, s.frame.size.height.0)
-    }) else {
+        (0.0, 0.0, s.frame.size.width.0, s.frame.size.height.0)
+    };
+    reveal_rect(surface, target, bounds);
+}
+
+/// Reveals an actual content range rather than its potentially long paragraph.
+pub(crate) fn reveal_rect(surface: &Rc<Surface>, target: &NshView, rect: (f32, f32, f32, f32)) {
+    let Some(bounds) = target
+        .to_root()
+        .and_then(|m| m.bounds(rect.0, rect.1, rect.2, rect.3))
+    else {
         return;
     };
     // Content moved by the scroll views inside, which bounds measured now
@@ -514,6 +545,15 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, x: f32, y: f32) -> bo
         return false;
     };
     // Left and Right follow what they show in a right-to-left list.
+    intent(
+        surface,
+        &view,
+        match m {
+            KeyMove::Start => "start",
+            KeyMove::End => "end",
+            _ => "scroll",
+        },
+    );
     shared::key_scroll(&Host::new(surface, &view), m, horizontal);
     true
 }
@@ -523,11 +563,19 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, x: f32, y: f32) -> bo
 /// that axis first, then a horizontal one (as vertical wheels move those).
 fn key_scroll_view(view: &NshView, horizontal: bool, sign: f32) -> Option<NshView> {
     let mut chain = Vec::new();
+    let mut boundary = Vec::new();
     let mut current = Some(view.clone());
     while let Some(v) = current {
         current = v.parent_view();
         if v.kind() != ViewKind::Scroll {
             continue;
+        }
+        if v.state()
+            .scroll
+            .as_ref()
+            .is_some_and(|scroll| scroll.behavior.enabled)
+        {
+            boundary.push(v.clone());
         }
         let (dx, dy) = {
             let state = v.state();
@@ -545,8 +593,9 @@ fn key_scroll_view(view: &NshView, horizontal: bool, sign: f32) -> Option<NshVie
         }
     }
     let along = |v: &NshView| v.state().scroll.as_ref().is_some_and(|s| s.horizontal) == horizontal;
-    let first = chain.iter().position(along).unwrap_or(0);
-    chain.into_iter().nth(first)
+    let candidates = if chain.is_empty() { boundary } else { chain };
+    let first = candidates.iter().position(along).unwrap_or(0);
+    candidates.into_iter().nth(first)
 }
 
 /// The innermost view at `(x, y)` (`view`'s coordinates).

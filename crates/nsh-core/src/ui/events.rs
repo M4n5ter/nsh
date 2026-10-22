@@ -42,6 +42,19 @@ impl Default for ScrollEvent {
     }
 }
 
+/// User scrolling requested before the offset changes (`on_scroll_intent`),
+/// including when the scroll view is already at a boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScrollIntent {
+    /// Move to the start (Home).
+    Start,
+    /// Move to the end (End).
+    End,
+    /// Other scrolling, or the start of a drag.
+    #[default]
+    Scroll,
+}
+
 /// A drag (`on_pan_start` / `on_pan_end`): translation since it started and
 /// velocity, in points (per second).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -318,6 +331,15 @@ pub(crate) fn scroll(p: &EventPayload) -> Option<Cow<'_, ScrollEvent>> {
                 _ => 1.0,
             },
         },
+    }))
+}
+
+pub(crate) fn scroll_intent(p: &EventPayload) -> Option<Cow<'_, ScrollIntent>> {
+    Some(Cow::Owned(match string(p, "intent")? {
+        "start" => ScrollIntent::Start,
+        "end" => ScrollIntent::End,
+        "scroll" => ScrollIntent::Scroll,
+        _ => return None,
     }))
 }
 

@@ -65,6 +65,7 @@ pub(crate) struct Text {
     pub(crate) foreground: Option<Color>,
     pub(crate) selection: Vec<(Bounds<Points>, Color)>,
     pub(crate) focus: bool,
+    pub(crate) focus_range: Option<(u32, u32)>,
 }
 
 impl PartialEq for Scene {
@@ -110,6 +111,7 @@ impl PartialEq for Text {
             && self.foreground == other.foreground
             && self.selection == other.selection
             && self.focus == other.focus
+            && self.focus_range == other.focus_range
     }
 }
 
@@ -415,10 +417,15 @@ impl Context<'_> {
                 },
                 &mut output,
             );
-            if text.focus
+            if (text.focus || text.focus_range.is_some())
                 && let Some(terminal) = text.layout.0.downcast_ref::<crate::text::TerminalLayout>()
             {
-                for run in &terminal.runs {
+                for run in terminal.runs.iter().filter(|run| {
+                    text.focus
+                        || text
+                            .focus_range
+                            .is_some_and(|range| run.start < range.1 && run.end > range.0)
+                }) {
                     self.solid(
                         layer,
                         Bounds::new(

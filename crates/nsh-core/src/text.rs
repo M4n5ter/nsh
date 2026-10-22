@@ -435,7 +435,7 @@ pub const ATTACHMENT_CHAR: char = '\u{FFFC}';
 
 /// A nested `<text>` span with press listeners: presses on its characters
 /// go to it rather than to the block.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextLink {
     /// Start offset (UTF-16 units, inclusive).
     pub start: u32,
@@ -445,6 +445,23 @@ pub struct TextLink {
     pub node: NodeId,
     /// Its listeners.
     pub events: EventMask,
+    /// The span's native interaction and accessibility properties. A span
+    /// has no view of its own; these travel with its character range.
+    pub props: Arc<crate::ViewProps>,
+}
+
+impl TextLink {
+    /// Whether the mounted span accepts native interaction.
+    pub fn is_enabled(&self) -> bool {
+        self.start < self.end
+            && self.props.pointer_events != crate::PointerEvents::None
+            && !self.props.accessibility.state.disabled
+    }
+
+    /// Whether the enabled span participates in keyboard traversal.
+    pub fn is_tab_stop(&self) -> bool {
+        self.is_enabled() && self.props.focusable != Some(false)
+    }
 }
 
 impl AttributedText {

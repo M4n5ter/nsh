@@ -136,7 +136,7 @@ pub use self::{
     env::Environment,
     events::{
         Composition, FileDropEvent, GestureEvent, ImageProgress, NativeEvent, OverlayPosition,
-        PanEvent, ScrollEvent, Selection, VideoInfo, VideoProgress, WebNavigation,
+        PanEvent, ScrollEvent, ScrollIntent, Selection, VideoInfo, VideoProgress, WebNavigation,
     },
     flow::{Each, If, IntoElements, Reset, catch_error, dynamic, each, when},
     host::{
@@ -334,6 +334,7 @@ pub mod prelude {
         ScreenAnimation,
         Scroll,
         ScrollEvent,
+        ScrollIntent,
         Scrollable,
         Selection,
         SharedString,

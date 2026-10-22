@@ -1059,8 +1059,11 @@ fn tab(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     if stops.is_empty() {
         return trapped;
     }
-    let focused = crate::text_input::focused_view(surface)
-        .or_else(|| crate::native::focused_component(surface).and_then(|id| surface.view(id)));
+    let focused = crate::text_input::focused_target(surface).or_else(|| {
+        crate::native::focused_component(surface)
+            .and_then(|id| surface.view(id))
+            .map(crate::text_input::FocusTarget::View)
+    });
     let current = focused.and_then(|f| stops.iter().position(|v| *v == f));
     // Modal scopes trap focus; outside them it can leave the window.
     let Some(next) = input::tab_stop(current, stops.len(), m.shift, trapped) else {
@@ -1091,9 +1094,12 @@ pub(crate) fn tab_to_edge(surface: &Rc<Surface>, shift: bool) -> bool {
 
 /// Moves the keyboard focus to `view`: a text field, or a native component
 /// (focused by [`crate::native::apply_focus`], which has the window).
-fn focus_stop(surface: &Rc<Surface>, view: &NshView) {
+pub(crate) fn focus_stop(surface: &Rc<Surface>, target: &crate::text_input::FocusTarget) {
+    let view = target.view();
     if view.kind() == ViewKind::Native {
         crate::native::tab_to(surface, view.id());
+    } else if matches!(target, crate::text_input::FocusTarget::TextLink(..)) {
+        crate::text_input::set_focus_target(surface, Some(target.clone()));
     } else {
         crate::text_input::tab_to_view(surface, view);
     }
@@ -1123,7 +1129,10 @@ pub(crate) fn focusable(surface: &Surface, view: &NshView) -> bool {
             || crate::text::selectable(&s)
             || s.scroll.as_ref().is_some_and(|s| s.behavior.enabled)
             || (s.kind == ViewKind::Native && crate::native::focusable(surface, s.id))
-            || has_press(s.events))
+            || has_press(s.events)
+            || s.text
+                .as_ref()
+                .is_some_and(|text| text.text.links.iter().any(|link| link.is_enabled())))
 }
 
 /// Ends one existing native contact without firing its application press.
@@ -1287,6 +1296,42 @@ pub(crate) fn focus_view(surface: &Rc<Surface>, view: &NshView) -> bool {
     true
 }
 
+/// Focuses a real character span under its current native text owner.
+pub(crate) fn focus_link(surface: &Rc<Surface>, view: &NshView, node: NodeId) -> bool {
+    let target = crate::text_input::FocusTarget::TextLink(view.clone(), node);
+    if !target.valid(surface) || !chain(view).contains(&crate::navigation::focus_scope(surface)) {
+        return false;
+    }
+    crate::text_input::set_focus_target(surface, Some(target));
+    true
+}
+
+/// Ends a virtual target's lifetime before a released node id can be reused.
+pub(crate) fn retire_link(surface: &Rc<Surface>, node: NodeId) {
+    crate::focus_return::retiring_link(surface, node);
+    let keys: Vec<_> = surface
+        .input
+        .pointers
+        .borrow()
+        .iter()
+        .filter(|pointer| {
+            pointer
+                .press
+                .as_ref()
+                .is_some_and(|press| press.node == node)
+        })
+        .map(|pointer| pointer.key)
+        .collect();
+    for key in keys {
+        if let Some(pointer) = take(surface, key) {
+            cancel_contact(surface, pointer);
+        }
+    }
+    if crate::text_input::focused_target(surface).is_some_and(|target| target.id() == node) {
+        crate::text_input::blur_all(surface);
+    }
+}
+
 /// Activates the actual focused press target, preserving native Enter and
 /// Space behavior outside text fields and suppressing held-key repeats.
 fn activate_focused(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
@@ -1298,15 +1343,19 @@ fn activate_focused(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     {
         return false;
     }
-    let Some(view) = crate::text_input::focused_view(surface) else {
+    let Some(target) = crate::text_input::focused_target(surface) else {
         return false;
     };
+    let view = target.view();
     let (id, events) = {
         let s = view.state();
-        if s.kind == ViewKind::Input || !has_press(s.events) || !focusable(surface, &view) {
+        let (id, events) = target
+            .link()
+            .map_or((s.id, s.events), |link| (link.node, link.events));
+        if s.kind == ViewKind::Input || !has_press(events) || !target.valid(surface) {
             return false;
         }
-        (s.id, s.events)
+        (id, events)
     };
     if !event.repeat {
         for kind in [EventKind::PressDown, EventKind::PressUp, EventKind::Press] {
@@ -1320,14 +1369,32 @@ fn activate_focused(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
 
 /// Enabled native controls in tree order. `focusable=false` excludes a
 /// press target from Tab while keeping explicit and pointer focus valid.
-fn collect_stops(surface: &Surface, view: &NshView, out: &mut Vec<NshView>) {
+fn collect_stops(surface: &Surface, view: &NshView, out: &mut Vec<crate::text_input::FocusTarget>) {
     {
         let s = view.state();
         if s.style.hidden || s.concealed || s.props.pointer_events == PointerEvents::None {
             return;
         }
-        if s.props.focusable != Some(false) && focusable(surface, view) {
-            out.push(view.clone());
+        if focusable(surface, view) {
+            if s.props.focusable != Some(false)
+                && (s.kind != ViewKind::Text || crate::text::selectable(&s) || has_press(s.events))
+            {
+                out.push(crate::text_input::FocusTarget::View(view.clone()));
+            }
+            if let Some(text) = &s.text {
+                let mut links: Vec<_> = text
+                    .text
+                    .links
+                    .iter()
+                    .filter(|link| link.is_tab_stop())
+                    .collect();
+                links.sort_by_key(|link| (link.start, std::cmp::Reverse(link.end)));
+                out.extend(
+                    links.into_iter().map(|link| {
+                        crate::text_input::FocusTarget::TextLink(view.clone(), link.node)
+                    }),
+                );
+            }
         }
     }
     view.with_children(|children| {
@@ -1338,7 +1405,10 @@ fn collect_stops(surface: &Surface, view: &NshView, out: &mut Vec<NshView>) {
 }
 
 /// The first keyboard stop, without Tab's select-all behavior.
-pub(crate) fn first_focus_stop(surface: &Surface, view: &NshView) -> Option<NshView> {
+pub(crate) fn first_focus_stop(
+    surface: &Surface,
+    view: &NshView,
+) -> Option<crate::text_input::FocusTarget> {
     let mut stops = Vec::new();
     collect_stops(surface, view, &mut stops);
     stops.into_iter().next()
@@ -1645,8 +1715,20 @@ fn down(
     }
     let native = matches!(item, Some(Item::Hosted(..) | Item::Input(_)));
     let selects = matches!(item, Some(Item::Text(_) | Item::Area(_)));
-    if !native && let Some(target) = chain(&hit.view).into_iter().find(|v| focusable(surface, v)) {
-        focus_view(surface, &target);
+    if !native {
+        let link = {
+            let (lx, ly) = local(&hit.view, x, y);
+            let state = hit.view.state();
+            crate::text::char_at(&state, lx, ly)
+                .and_then(|index| state.text.as_ref()?.text.link_at(index))
+                .filter(|link| link.is_enabled())
+                .map(|link| link.node)
+        };
+        if let Some(node) = link {
+            focus_link(surface, &hit.view, node);
+        } else if let Some(target) = chain(&hit.view).into_iter().find(|v| focusable(surface, v)) {
+            focus_view(surface, &target);
+        }
     }
     let input = &surface.input;
     if input.pointers.borrow().is_empty() {
@@ -2043,12 +2125,13 @@ fn find_press(
             let link = crate::text::char_at(&s, lx, ly).and_then(|i| text.text.link_at(i));
             if let Some(link) = link
                 && has_press(link.events)
+                && link.is_enabled()
             {
                 return Some(Press::new(
                     target.clone(),
                     link.node,
                     link.events,
-                    s.props.long_press_delay,
+                    link.props.long_press_delay,
                     generation,
                 ));
             }
@@ -2542,6 +2625,20 @@ fn scroll_target(surface: &Surface, x: f32, y: f32, dx: f32, dy: f32) -> Option<
         |v| v.state().scroll.as_ref().map(|s| s.horizontal),
         |v| v.kind() == ViewKind::Scroll && crate::scroll::can_scroll(v, dx, dy),
     )
+    .or_else(|| {
+        input::scroll_target(
+            chain(&hit.view),
+            Points(dx),
+            Points(dy),
+            |view| view.state().scroll.as_ref().map(|scroll| scroll.horizontal),
+            |view| {
+                view.state()
+                    .scroll
+                    .as_ref()
+                    .is_some_and(|scroll| scroll.behavior.enabled)
+            },
+        )
+    })
 }
 
 /// Whether `view` is still shown in its surface.
@@ -2598,6 +2695,7 @@ fn wheel_input(
             *input.latch.borrow_mut() = Some((view.clone(), horizontal, time));
             // Without a begin, the scroll module takes it as a mouse wheel:
             // it settles (and snaps) by itself once the notches stop.
+            crate::scroll::intent(surface, &view, "scroll");
             crate::scroll::wheel(surface, &view, dx, dy);
             true
         }
@@ -2622,11 +2720,13 @@ fn wheel_input(
                     crate::scroll::wheel_end(surface, &held, 0.0, 0.0);
                 }
             }
-            if input.wheel.borrow().is_none() {
+            let beginning = input.wheel.borrow().is_none();
+            if beginning {
                 let Some(view) = scroll_target(surface, x, y, dx, dy) else {
                     return false;
                 };
                 *input.wheel.borrow_mut() = Some(Wheel::new(view.clone(), time, phased));
+                crate::scroll::intent(surface, &view, "scroll");
                 crate::scroll::wheel_begin(surface, &view);
             }
             let view = {
@@ -2645,6 +2745,9 @@ fn wheel_input(
             };
             if !phased {
                 watch_touchpad(surface);
+            }
+            if !beginning {
+                crate::scroll::intent(surface, &view, "scroll");
             }
             crate::scroll::wheel(surface, &view, dx, dy);
             true
@@ -2843,6 +2946,7 @@ fn touchpad_hold(surface: &Rc<Surface>, x: f32, y: f32, time: f64) {
     let mut wheel = Wheel::new(view.clone(), time, true);
     wheel.held = true;
     *surface.input.wheel.borrow_mut() = Some(wheel);
+    crate::scroll::intent(surface, &view, "scroll");
     crate::scroll::wheel_begin(surface, &view);
 }
 

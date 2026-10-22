@@ -167,8 +167,8 @@ events! {
     Error = "onError": "An image failed to load (payload: [`EventPayload::Error`]).",
     ChangeText = "onChangeText" as "onChange": "The user edited an input (payload: [`EventPayload::Text`]).",
     SubmitEditing = "onSubmitEditing" as "onSubmit": "The return key was pressed in an input (payload: [`EventPayload::Text`]).",
-    Focus = "onFocus": "An input became focused.",
-    Blur = "onBlur": "An input lost focus.",
+    Focus = "onFocus": "An input, scroll view or list became focused.",
+    Blur = "onBlur": "An input, scroll view or list lost focus.",
     PressDown = "onPressIn" as "onPressDown": "A press went down on a pressable view (a finger, a pen or a mouse button).",
     PressUp = "onPressOut" as "onPressUp": "The press ended: released, moved away or cancelled.",
     Layout = "onLayout": "The frame changed (payload: [`EventPayload::Layout`], relative to the parent).",
@@ -219,7 +219,7 @@ events! {
     Cancel = "onCancel": "Escape or the Android back button was pressed while the overlay was the top one listening to it (raised by the core).",
     Position = "onPosition": "The core placed an overlay (payload: `placement`, the side it went on, `x`, `y`, `width`, `height` in the root view, `availableWidth`, `availableHeight`: the room on that side).",
     MouseMove = "onMouseMove": "The mouse moved inside the view, including with a button down (desktops and web; local coordinates `x`, `y`; at most once per frame).",
-
+    ScrollIntent = "onScrollIntent": "The user requested scrolling, before the offset changes, including at a boundary (payload: `intent`: `\"start\"`, `\"end\"` or `\"scroll\"`; once when a drag starts, before `onScrollDragStart`; programmatic scrolling does not emit it).",
 }
 
 /// What an input holds, for the system's autofill and suggestions

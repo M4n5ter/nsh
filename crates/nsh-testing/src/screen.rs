@@ -1497,6 +1497,7 @@ mod tests {
             end,
             node,
             events,
+            props: Arc::default(),
         };
         let linked = |links: Vec<nsh_core::TextLink>| MountItem::Text {
             id: 4,

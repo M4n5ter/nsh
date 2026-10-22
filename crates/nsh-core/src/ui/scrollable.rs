@@ -3,7 +3,7 @@
 //! (`ScrollingHostProps`).
 
 use super::{
-    AnimatedValue, Element, IntoListener, IntoReactive, Listener, ScrollEvent,
+    AnimatedValue, Element, IntoListener, IntoReactive, Listener, ScrollEvent, ScrollIntent,
     events::{self, Decode},
     host,
 };
@@ -166,6 +166,26 @@ pub trait Scrollable: Element {
     /// It moved (at most once per frame, [`Self::event_throttle`]).
     fn on_scroll<M>(self, listener: impl IntoListener<ScrollEvent, M>) -> Self {
         self.listen_scroll(EventKind::Scroll, listener.into_listener(), events::scroll)
+    }
+
+    /// The user requested scrolling, before the offset changes, including at a
+    /// boundary. A drag emits once at its start; programmatic scrolling does not.
+    fn on_scroll_intent<M>(self, listener: impl IntoListener<ScrollIntent, M>) -> Self {
+        self.listen_scroll(
+            EventKind::ScrollIntent,
+            listener.into_listener(),
+            events::scroll_intent,
+        )
+    }
+
+    /// It became focused.
+    fn on_focus<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.listen_scroll(EventKind::Focus, listener.into_listener(), events::unit)
+    }
+
+    /// It lost focus.
+    fn on_blur<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.listen_scroll(EventKind::Blur, listener.into_listener(), events::unit)
     }
 
     /// The user started dragging it.

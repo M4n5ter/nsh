@@ -62,6 +62,7 @@ const FORWARDED: &[&str] = &[
     "scrollEventThrottle",
     "disableIntervalMomentum",
     "onScroll",
+    "onScrollIntent",
     "onScrollDragStart",
     "onScrollDragEnd",
     "onMomentumStart",

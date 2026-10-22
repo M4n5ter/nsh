@@ -3,7 +3,8 @@
 //! pointer hit areas and the minimum useful movement.
 
 use nsh_core::{
-    EventKind, EventPayload, KeyboardDismissMode, Matrix, NodeId, Point, Points, Size, ViewKind,
+    EventKind, EventPayload, KeyboardDismissMode, Matrix, NodeId, PayloadValue, Point, Points,
+    Size, ViewKind,
 };
 
 use crate::surface::{Node, Surface, SurfaceEvent};
@@ -214,6 +215,19 @@ fn glide(velocity: f32, rate: f32, ms: f32) -> (f32, f32) {
 }
 
 impl Surface {
+    pub(crate) fn scroll_intent(&mut self, id: NodeId, intent: &str) {
+        if self
+            .node(id)
+            .is_some_and(|node| node.events.contains(EventKind::ScrollIntent))
+        {
+            self.emit(
+                id,
+                EventKind::ScrollIntent,
+                EventPayload::Map(vec![("intent", PayloadValue::Str(intent.into()))]),
+            );
+        }
+    }
+
     fn scroll_emit(&mut self, id: NodeId, kind: EventKind) {
         if let Some(node) = self.node(id)
             && node.events.contains(kind)
@@ -667,6 +681,7 @@ impl Surface {
                 page.y = (position + direction * viewport).clamp(min, max);
             }
         }
+        self.scroll_intent(id, "scroll");
         self.interrupt_scroll(id);
         self.scroll_emit(id, EventKind::ScrollDragStart);
         self.write_scroll(id, page, true);
@@ -1103,6 +1118,7 @@ mod tests {
     fn inertia_decelerates_and_ends_with_balanced_lifecycle() {
         let mut surface = scroll();
         for kind in [
+            EventKind::ScrollIntent,
             EventKind::ScrollDragStart,
             EventKind::ScrollDragEnd,
             EventKind::MomentumStart,
@@ -1112,7 +1128,15 @@ mod tests {
             surface.node_mut(2).unwrap().events.set(kind, true);
         }
         surface.scroll_jump(2, Points(0.0), Points(500.0));
+        surface.events.clear();
         surface.begin_scroll_drag(2, 40.0, 100.0, false);
+        assert!(
+            matches!(surface.events.first(), Some(SurfaceEvent::Event(2, EventKind::ScrollIntent, EventPayload::Map(fields))) if fields.contains(&("intent", PayloadValue::Str("scroll".into()))))
+        );
+        assert!(matches!(
+            surface.events.get(1),
+            Some(SurfaceEvent::Event(2, EventKind::ScrollDragStart, _))
+        ));
         surface.now = 0.1;
         surface.move_scroll_drag(2, 40.0, 50.0);
         surface.end_scroll_drag(2, false);
@@ -1123,6 +1147,7 @@ mod tests {
         surface.tick_scroll(10.0);
         assert!(first > 550.0 && second > first);
         for kind in [
+            EventKind::ScrollIntent,
             EventKind::ScrollDragStart,
             EventKind::ScrollDragEnd,
             EventKind::MomentumStart,

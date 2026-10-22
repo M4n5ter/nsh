@@ -659,6 +659,12 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "",
     ),
     (
+        EventKind::ScrollIntent,
+        on::SCROLLING,
+        "(e: { intent: \"start\" | \"end\" | \"scroll\" }) => void",
+        "Before user scrolling, including at a boundary; once at drag start. Home is `start`, End is `end`, other scrolling is `scroll`. Programmatic scrolling does not emit it.",
+    ),
+    (
         EventKind::ScrollDragStart,
         on::SCROLLING,
         "(e: Point) => void",
@@ -702,8 +708,18 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "(e: { text: string }) => void",
         "",
     ),
-    (EventKind::Focus, on::INPUT, "() => void", ""),
-    (EventKind::Blur, on::INPUT, "() => void", ""),
+    (
+        EventKind::Focus,
+        on::INPUT | on::SCROLL | on::LIST,
+        "() => void",
+        "",
+    ),
+    (
+        EventKind::Blur,
+        on::INPUT | on::SCROLL | on::LIST,
+        "() => void",
+        "",
+    ),
     (
         EventKind::SelectionChange,
         on::INPUT,

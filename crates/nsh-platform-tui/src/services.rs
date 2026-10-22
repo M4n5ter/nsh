@@ -781,6 +781,44 @@ impl Surface {
         visible
             .into_iter()
             .filter_map(|id| {
+                if let Some((owner, link)) = self.text_link(id) {
+                    let a = &link.props.accessibility;
+                    if a.hidden || a.accessible == Some(false) {
+                        return None;
+                    }
+                    for ancestor in self.ancestors(owner) {
+                        let props = &self.node(ancestor)?.props.accessibility;
+                        if props.hidden || props.accessible == Some(true) {
+                            return None;
+                        }
+                    }
+                    let (text, ..) = self.node(owner)?.text.as_ref()?;
+                    let mut offset = 0;
+                    let fallback: String = text
+                        .text
+                        .chars()
+                        .filter(|ch| {
+                            let start = offset;
+                            offset += ch.len_utf16() as u32;
+                            start < link.end && offset > link.start
+                        })
+                        .collect();
+                    return Some(AccessibleNode {
+                        id,
+                        frame: self.global_frame(id)?,
+                        role: if a.role == AccessibilityRole::None {
+                            AccessibilityRole::Link
+                        } else {
+                            a.role
+                        },
+                        label: plain(a.label.as_deref().unwrap_or(&fallback), true),
+                        hint: a.hint.as_deref().map(|hint| plain(hint, true)),
+                        state: a.state,
+                        value: a.value.clone(),
+                        focused: self.focus == Some(id),
+                        actions: a.actions.clone(),
+                    });
+                }
                 let node = self.node(id)?;
                 let a = &node.props.accessibility;
                 if a.hidden || a.accessible == Some(false) {

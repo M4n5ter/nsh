@@ -7472,10 +7472,17 @@ mod components {
         view().child(
             text(move || format!("Tapped {} ", taps.get()))
                 .text_size(px(16.0))
-                .child(text("the link").underline().on_press(move |_: &()| {
-                    taps.update(|t| *t += 1);
-                    long.set(true);
-                }))
+                .child(
+                    text("the link")
+                        .underline()
+                        .role(crate::AccessibilityRole::Link)
+                        .test_id("terms")
+                        .focusable(move || !long.get())
+                        .on_press(move |_: &()| {
+                            taps.update(|t| *t += 1);
+                            long.set(true);
+                        }),
+                )
                 .child(", ")
                 .child(text("bold").font_weight(FontWeight::BOLD))
                 .child(when(long, || " and more"))
@@ -7498,8 +7505,14 @@ mod components {
         assert_eq!(t.text, "Tapped 0 the link, bold\u{fffc}");
         assert_eq!(t.attachments.len(), 1, "the view sits in the text");
         assert!(t.spans.iter().any(|s| s.style.font_weight == 700));
-        let link = t.links[0];
+        let link = &t.links[0];
         assert_eq!((link.start, link.end), (9, 17));
+        assert_eq!(
+            link.props.accessibility.role,
+            crate::AccessibilityRole::Link
+        );
+        assert_eq!(link.props.test_id.as_deref(), Some("terms"));
+        assert_eq!(link.props.focusable, Some(true));
         // Only the block and the inline view have native views.
         let views = batch
             .items
@@ -7512,6 +7525,7 @@ mod components {
         let t = text(&c.commit().unwrap()).expect("built again");
         // A piece added between a span and the view goes in its place.
         assert_eq!(t.text, "Tapped 1 the link, bold and more\u{fffc}");
+        assert_eq!(t.links[0].props.focusable, Some(false));
     }
 }
 

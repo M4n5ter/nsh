@@ -151,7 +151,7 @@ fn a_rust_apps_typed_styles_and_spans_reach_the_platform() {
         .map(|(_, t)| t.clone())
         .expect("the sentence");
     assert_eq!(sentence.text, "Tapped 0 times: tap or not");
-    let link = sentence.links[0];
+    let link = &sentence.links[0];
     let tap = sentence
         .spans
         .iter()

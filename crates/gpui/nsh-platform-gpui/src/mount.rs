@@ -97,6 +97,11 @@ impl Mounter {
     }
 
     pub(crate) fn apply(&mut self, surface: &Rc<Surface>, item: &MountItem) {
+        if let MountItem::Delete { id } = item
+            && self.views.get(*id).is_none()
+        {
+            crate::input::retire_link(surface, *id);
+        }
         if let MountItem::Remove { id } | MountItem::Delete { id } = item
             && let Some(view) = self.views.get(*id)
         {
@@ -393,11 +398,19 @@ impl Mounter {
             Command::Focus => {
                 if let Some(view) = view {
                     crate::input::focus_view(surface, view);
+                } else if let Some(target) = crate::text_input::link_target(surface, id) {
+                    crate::input::focus_link(surface, target.view(), id);
                 }
             }
             Command::Blur => match view {
                 Some(view) => crate::text_input::blur_view(surface, view),
-                _ => crate::text_input::blur_all(surface),
+                _ if id == nsh_core::ROOT_ID
+                    || crate::text_input::focused_target(surface)
+                        .is_some_and(|target| target.id() == id) =>
+                {
+                    crate::text_input::blur_all(surface)
+                }
+                _ => {}
             },
             Command::SetSelection { start, end } => {
                 if let Some(view) = view {
@@ -417,6 +430,8 @@ impl Mounter {
             Command::AccessibilityFocus => {
                 if let Some(view) = view {
                     crate::access::focus(surface, view);
+                } else if let Some(target) = crate::text_input::link_target(surface, id) {
+                    crate::input::focus_link(surface, target.view(), id);
                 }
             }
             Command::ImageInfo { .. } => crate::image::command(surface, id, command),

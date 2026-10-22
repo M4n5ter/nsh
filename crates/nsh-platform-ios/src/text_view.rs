@@ -698,7 +698,7 @@ impl TextView {
                 index
             }
         };
-        text.link_at(index.max(0) as u32).copied()
+        text.link_at(index.max(0) as u32).cloned()
     }
 
     fn has_text(&self) -> bool {

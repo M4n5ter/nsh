@@ -676,6 +676,22 @@ impl Surface {
                     }
                 }
                 MountItem::Delete { id } => {
+                    if let Some((owner, _)) = self.text_link(id) {
+                        if focus_reveal
+                            .as_ref()
+                            .is_some_and(|reveal| reveal.target.0 == id)
+                        {
+                            focus_reveal = None;
+                        }
+                        removed_focus |= self.retire_recycled_focus(id);
+                        self.retire_input_within(id, focus_return.as_mut());
+                        if let Some((text, ..)) =
+                            self.node_mut(owner).and_then(|node| node.text.as_mut())
+                        {
+                            Arc::make_mut(text).links.retain(|link| link.node != id);
+                        }
+                        continue;
+                    }
                     self.retire_input_within(id, focus_return.as_mut());
                     if self.navigation_removing(id) {
                         if let Some(node) = self.node_mut(id) {
@@ -808,6 +824,26 @@ impl Surface {
                     layout,
                     content,
                 } => {
+                    let retired = self
+                        .node(id)
+                        .and_then(|node| node.text.as_ref())
+                        .map(|(old, ..)| {
+                            old.links
+                                .iter()
+                                .filter(|link| {
+                                    !text
+                                        .links
+                                        .iter()
+                                        .any(|next| next.node == link.node && next.is_enabled())
+                                })
+                                .map(|link| link.node)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    for link in retired {
+                        self.retire_input_within(link, None);
+                        removed_focus |= self.retire_recycled_focus(link);
+                    }
                     if let Some(node) = self.node_mut(id) {
                         node.editor.label_text(&text.text);
                         node.text = Some((text, layout, content));
@@ -957,7 +993,10 @@ impl Surface {
                                 removed_focus = false;
                             }
                         } else if self.focus != old_focus || self.focus.is_none() {
-                            let target = self.node(id).map(|node| (id, node.generation));
+                            let target = self
+                                .focus_owner(id)
+                                .and_then(|owner| self.node(owner))
+                                .map(|node| (id, node.generation));
                             if focus_reveal.as_ref().map(|reveal| reveal.target) != target {
                                 focus_reveal = target.map(|target| FocusReveal {
                                     target,
@@ -1005,7 +1044,8 @@ impl Surface {
         if let Some(reveal) = focus_reveal
             && self.focus == Some(reveal.target.0)
             && self
-                .node(reveal.target.0)
+                .focus_owner(reveal.target.0)
+                .and_then(|owner| self.node(owner))
                 .is_some_and(|node| node.generation == reveal.target.1)
         {
             self.reveal_focus(reveal.target.0, &reveal.overridden);
@@ -1168,6 +1208,7 @@ impl Surface {
     }
 
     pub(crate) fn is_dying(&self, id: NodeId) -> bool {
+        let id = self.focus_owner(id).unwrap_or(id);
         if self.navigation_retains(id) {
             return true;
         }
@@ -1396,7 +1437,7 @@ impl Surface {
     /// The newest modal is the root of the active input scope.
     pub(crate) fn visible_ids(&self) -> Vec<NodeId> {
         let ids = self.paint_ids();
-        if let Some(modal) = ids
+        let active = if let Some(modal) = ids
             .iter()
             .rev()
             .copied()
@@ -1409,7 +1450,15 @@ impl Surface {
             ids.into_iter()
                 .filter(|&id| !self.is_dying(id) && self.navigation_accepts(id))
                 .collect()
+        };
+        let mut result = Vec::with_capacity(active.len());
+        for id in active {
+            result.push(id);
+            if let Some((text, ..)) = self.node(id).and_then(|node| node.text.as_ref()) {
+                result.extend(text.links.iter().map(|link| link.node));
+            }
         }
+        result
     }
 
     pub(crate) fn presentation_frame(&self, id: NodeId) -> Option<Bounds<Points>> {

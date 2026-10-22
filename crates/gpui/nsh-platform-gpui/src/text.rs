@@ -2450,7 +2450,6 @@ pub(crate) fn draw_silhouette(
 /// The first rectangle (view coordinates: x, y, width, height) the
 /// characters `start..end` of the text view with `state` cover (the test
 /// agent's spans).
-#[cfg(feature = "dev")]
 pub(crate) fn range_rect(state: &ViewState, start: u32, end: u32) -> Option<(f32, f32, f32, f32)> {
     let drawn = state.text.as_ref()?;
     let layout = drawn.layout.downcast::<GpuiLayout>()?;
@@ -2460,6 +2459,57 @@ pub(crate) fn range_rect(state: &ViewState, start: u32, end: u32) -> Option<(f32
         first.get_or_insert((cx + x, cy + y, w, h));
     });
     first
+}
+
+/// Draws every visual fragment of the native inline keyboard target.
+pub(crate) fn draw_focus(cx: &mut DrawCx<'_>, view: &NshView, state: &ViewState) {
+    let Some(link) = crate::text_input::focused_link(view) else {
+        return;
+    };
+    let Some(drawn) = &state.text else { return };
+    let Some(layout) = drawn.layout.downcast::<GpuiLayout>() else {
+        return;
+    };
+    let (ox, oy) = (drawn.content.origin.x.0, drawn.content.origin.y.0);
+    let color = drawn
+        .text
+        .span_at(link.start)
+        .map_or(ResolvedTextStyle::default().color, |span| span.style.color);
+    layout.selection_rects((link.start, link.end), |x, y, w, h| {
+        for (x, y, w, h) in [
+            (ox + x, oy + y, w, 1.0),
+            (ox + x, oy + y + h - 1.0, w, 1.0),
+            (ox + x, oy + y, 1.0, h),
+            (ox + x + w - 1.0, oy + y, 1.0, h),
+        ] {
+            cx.fill_rect(crate::geom::rect(x, y, w, h), [0.0; 4], color);
+        }
+    });
+}
+
+/// Union of all visual fragments of a span, in its view's coordinates.
+pub(crate) fn range_bounds(
+    state: &ViewState,
+    start: u32,
+    end: u32,
+) -> Option<(f32, f32, f32, f32)> {
+    let drawn = state.text.as_ref()?;
+    let layout = drawn.layout.downcast::<GpuiLayout>()?;
+    let mut bounds: Option<(f32, f32, f32, f32)> = None;
+    layout.selection_rects((start, end), |x, y, w, h| {
+        bounds = Some(match bounds {
+            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x + w), y1.max(y + h)),
+            None => (x, y, x + w, y + h),
+        });
+    });
+    bounds.map(|(x0, y0, x1, y1)| {
+        (
+            drawn.content.origin.x.0 + x0,
+            drawn.content.origin.y.0 + y0,
+            x1 - x0,
+            y1 - y0,
+        )
+    })
 }
 
 /// The UTF-16 offset of the character at `(x, y)` (view coordinates), if

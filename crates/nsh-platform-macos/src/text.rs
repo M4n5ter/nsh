@@ -1336,7 +1336,7 @@ pub(crate) fn link_at(
     if text.links.is_empty() {
         return None;
     }
-    text.link_at(char_at(state, x, y)?).copied()
+    text.link_at(char_at(state, x, y)?).cloned()
 }
 
 /// The caret offset nearest `(x, y)` (view coordinates): on the nearest

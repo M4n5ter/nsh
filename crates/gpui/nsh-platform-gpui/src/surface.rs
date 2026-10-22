@@ -391,9 +391,17 @@ impl Surface {
         if crate::system::has_dialog(self) || crate::chrome::menu_open(self) {
             return Vec::new();
         }
-        let mut view = crate::text_input::focused_view(self)
+        let target = crate::text_input::focused_target(self);
+        let mut view = target
+            .as_ref()
+            .map(|target| target.view().clone())
             .or_else(|| crate::native::focused_component(self).and_then(|id| self.view(id)));
         let mut path = Vec::new();
+        if let Some(target) = &target
+            && target.id() != target.view().id()
+        {
+            path.push(target.id());
+        }
         while let Some(node) = view {
             let s = node.state();
             if !node.attached()
@@ -610,6 +618,11 @@ impl Surface {
         let mut focus_return = crate::focus_return::before_batch(self, batch);
         crate::access::prepare(batch);
         for item in &batch.items {
+            if let MountItem::Delete { id } = item
+                && self.view(*id).is_none()
+            {
+                crate::focus_return::retire_link_before(focus_return.as_mut(), *id);
+            }
             if let MountItem::Remove { id } | MountItem::Delete { id } = item
                 && let Some(root) = self.view(*id)
             {

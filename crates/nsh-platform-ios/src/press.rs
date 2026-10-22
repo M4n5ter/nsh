@@ -51,7 +51,7 @@ pub(crate) struct PressIvars {
     handles_press: Cell<bool>,
     /// The pressable text span the current touch is on: its presses go
     /// there.
-    link: Cell<Option<TextLink>>,
+    link: std::cell::RefCell<Option<TextLink>>,
 }
 
 define_class!(
@@ -76,7 +76,7 @@ define_class!(
             let link = view
                 .downcast_ref::<TextView>()
                 .and_then(|t| t.link_at(touch.locationInView(Some(&view))));
-            ivars.link.set(link);
+            *ivars.link.borrow_mut() = link.clone();
             if link.is_none() && !ivars.own.get() {
                 return self.set_state(UIGestureRecognizerState::Failed);
             }
@@ -128,7 +128,7 @@ define_class!(
             }
             // A style observer reports the pressed state without competing
             // with an ancestor that handles the click.
-            self.set_state(if self.ivars().handles_press.get() || self.ivars().link.get().is_some() {
+            self.set_state(if self.ivars().handles_press.get() || self.ivars().link.borrow().is_some() {
                 UIGestureRecognizerState::Ended
             } else {
                 UIGestureRecognizerState::Failed
@@ -149,7 +149,7 @@ define_class!(
             if ivars.pressed.replace(false) {
                 self.report(Report::PressOut);
             }
-            ivars.link.set(None);
+            ivars.link.borrow_mut().take();
         }
 
         #[unsafe(method(canBePreventedByGestureRecognizer:))]
@@ -221,7 +221,7 @@ impl PressRecognizer {
 
     /// The pressable text span the current press is on.
     pub(crate) fn link(&self) -> Option<TextLink> {
-        self.ivars().link.get()
+        self.ivars().link.borrow().clone()
     }
 
     /// The touch ended on the view: reports the press out, and returns
@@ -246,7 +246,7 @@ impl PressRecognizer {
 
     fn report(&self, report: Report) {
         let target = &self.ivars().target;
-        if let Some(link) = self.ivars().link.get() {
+        if let Some(link) = self.link() {
             let kind = match report {
                 Report::PressIn => EventKind::PressDown,
                 Report::PressOut => EventKind::PressUp,

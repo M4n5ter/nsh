@@ -645,6 +645,7 @@ pub(crate) fn draw_content(cx: &mut DrawCx<'_>, view: &NshView, world: Mat4) {
         cx.push_clip_rect(0.0, 0.0, w, h);
     }
     crate::text::draw(cx, &state);
+    crate::text::draw_focus(cx, view, &state);
     crate::image::draw(cx, &state);
     match cx.measured {
         Some(_) => {

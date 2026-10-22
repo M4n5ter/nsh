@@ -395,7 +395,7 @@ struct ModalNav {
     /// The view that had the keyboard focus when it was presented: it
     /// gets it back when the modal closes, as a desktop dialog gives it
     /// back.
-    restore: Option<NshView>,
+    restore: Option<crate::text_input::FocusTarget>,
 }
 
 /// The screen under the moving one darkening (a fill it hosts while the
@@ -956,16 +956,12 @@ impl Nav {
         set_shift(&view, (0.0, 0.0));
         set_fade(&view, 1.0);
         if let Some(field) = restore
-            && crate::input::focusable(surface, &field)
+            && field.valid(surface)
             && crate::text_input::focused_view(surface).is_none()
-            && is_ancestor(&self.focus_scope(surface), &field)
+            && is_ancestor(&self.focus_scope(surface), field.view())
         {
             // The navigation borrow is held: use the already checked scope.
-            if field.kind() == ViewKind::Native {
-                crate::native::tab_to(surface, field.id());
-            } else {
-                crate::text_input::focus_view(surface, &field);
-            }
+            crate::input::focus_stop(surface, &field);
         }
         match leaves {
             Some((duration, fade)) => {
@@ -1289,11 +1285,15 @@ pub(crate) fn present(surface: &Rc<Surface>, view: &NshView) {
     let m = nav.modals.entry(id).or_default();
     // The field being typed in under the modal leaves it (until the modal
     // closes); one of the modal's own keeps it.
-    let field = crate::text_input::focused_view(surface)
-        .or_else(|| crate::native::focused_component(surface).and_then(|id| surface.view(id)))
-        .filter(|f| !is_ancestor(view, f));
+    let field = crate::text_input::focused_target(surface)
+        .or_else(|| {
+            crate::native::focused_component(surface)
+                .and_then(|id| surface.view(id))
+                .map(crate::text_input::FocusTarget::View)
+        })
+        .filter(|f| !is_ancestor(view, f.view()));
     if let Some(field) = &field {
-        drop_focus(surface, field);
+        drop_focus(surface, field.view());
     }
     m.restore = field;
     m.view = Some(view.clone());
@@ -1316,7 +1316,9 @@ pub(crate) fn focus_scope(surface: &Surface) -> NshView {
 
 /// The presented modals' return owners, captured before a mount batch can
 /// remove a popup or modal they opened from.
-pub(crate) fn focus_returns(surface: &Surface) -> Vec<(NshView, Option<NshView>)> {
+pub(crate) fn focus_returns(
+    surface: &Surface,
+) -> Vec<(NshView, Option<crate::text_input::FocusTarget>)> {
     let nav = surface.nav.borrow();
     nav.order
         .iter()
@@ -1329,7 +1331,11 @@ pub(crate) fn focus_returns(surface: &Surface) -> Vec<(NshView, Option<NshView>)
 
 /// Inherit a retiring scope's surviving owner. Native modal dismissal
 /// still consumes this same return target, including outside mount batches.
-pub(crate) fn set_focus_return(surface: &Surface, view: &NshView, target: Option<NshView>) {
+pub(crate) fn set_focus_return(
+    surface: &Surface,
+    view: &NshView,
+    target: Option<crate::text_input::FocusTarget>,
+) {
     let mut nav = surface.nav.borrow_mut();
     if let Some(modal) = nav.modals.get_mut(&view.id())
         && modal.view.as_ref() == Some(view)

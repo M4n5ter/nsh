@@ -651,6 +651,7 @@ impl Surface {
 
     /// Departing trees retain their pixels, but leave the active input scope.
     pub(crate) fn navigation_accepts(&self, id: NodeId) -> bool {
+        let id = self.focus_owner(id).unwrap_or(id);
         if self.navigation_retains(id) {
             return false;
         }
