@@ -5958,7 +5958,7 @@ mod tests {
         surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
         surface.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 4));
         surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 5, 4));
-        assert_eq!(presses(&surface), []);
+        assert!(presses(&surface).is_empty());
 
         surface.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
         surface.apply(MountBatch {
@@ -5981,7 +5981,7 @@ mod tests {
         assert!(surface.pointer.is_none());
         surface.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 2, 3));
         key(&mut surface, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(presses(&surface), []);
+        assert!(presses(&surface).is_empty());
     }
 
     #[test]
