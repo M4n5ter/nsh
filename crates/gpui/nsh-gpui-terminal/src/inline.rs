@@ -5,8 +5,9 @@
 //! mode (DECSDM 80) that the driver saves and restores through its sole reader
 //! and writer. These codecs neither query stdin nor change that session mode.
 //!
-//! Each transaction erases only the owned alternate viewport, replaces its full
-//! image and restores the cursor to its top left. Erase it again before leaving
+//! Each transaction replaces the owned alternate viewport's full image and
+//! restores the cursor to its top left. An opaque Sixel replacement can retain
+//! the previous image until the new DCS is complete. Erase it before leaving
 //! that alternate screen; never apply this full-viewport contract to the user's
 //! main screen. Neither protocol supplies a per-image success acknowledgement.
 //! The sole output owner's complete write and flush receipt is the available
@@ -45,12 +46,17 @@ impl InlineFrame {
     /// Run on the existing graphics worker, outside the output owner's IO lock.
     /// `synchronized` is an independently negotiated synchronized-update
     /// capability. The transaction includes all of its matching controls.
+    /// `same_viewport_flushed` is the sole writer's proof that a previous whole
+    /// image transaction was written and flushed since the last viewport
+    /// geometry change. Pass false without that receipt. Only fully opaque
+    /// Sixel pixels can replace that image without first erasing the viewport.
     pub fn encode(
         frame: &CandidateFrame,
         protocol: InlineProtocol,
         columns: u16,
         rows: u16,
         synchronized: bool,
+        same_viewport_flushed: bool,
     ) -> Result<Self> {
         ensure!(
             columns > 0 && rows > 0,
@@ -61,7 +67,13 @@ impl InlineFrame {
         if synchronized {
             output.write_all(b"\x1b[?2026h")?;
         }
-        output.write_all(b"\x1b[H\x1b[2J")?;
+        output.write_all(b"\x1b[H")?;
+        if protocol != InlineProtocol::Sixel
+            || !same_viewport_flushed
+            || !frame.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255)
+        {
+            output.write_all(b"\x1b[2J")?;
+        }
         let suffix = if synchronized {
             b"\x1b[H\x1b[?2026l".as_slice()
         } else {
@@ -148,7 +160,7 @@ mod tests {
     fn the_same_native_scene_survives_both_inline_transports() {
         let source = frame();
         for protocol in [InlineProtocol::Sixel, InlineProtocol::Iterm2] {
-            let encoded = InlineFrame::encode(&source, protocol, 1, 1, false).unwrap();
+            let encoded = InlineFrame::encode(&source, protocol, 1, 1, false, false).unwrap();
             assert_eq!(encoded.token(), source.token());
             let payload = encoded
                 .bytes()
@@ -192,17 +204,64 @@ mod tests {
     fn whole_transactions_include_controls_and_reject_inert_frames() {
         let source = frame();
         for protocol in [InlineProtocol::Sixel, InlineProtocol::Iterm2] {
-            let encoded = InlineFrame::encode(&source, protocol, 1, 1, true).unwrap();
+            let encoded = InlineFrame::encode(&source, protocol, 1, 1, true, false).unwrap();
             assert!(encoded.bytes().starts_with(b"\x1b[?2026h\x1b[H\x1b[2J"));
             assert!(encoded.bytes().ends_with(b"\x1b[H\x1b[?2026l"));
             assert!(
-                InlineFrame::encode(&CandidateFrame::default(), protocol, 1, 1, false).is_err()
+                InlineFrame::encode(&CandidateFrame::default(), protocol, 1, 1, false, false)
+                    .is_err()
             );
-            assert!(InlineFrame::encode(&source, protocol, 0, 1, false).is_err());
+            assert!(InlineFrame::encode(&source, protocol, 0, 1, false, false).is_err());
 
-            let without_sync = InlineFrame::encode(&source, protocol, 1, 1, false).unwrap();
+            let without_sync = InlineFrame::encode(&source, protocol, 1, 1, false, false).unwrap();
             assert_eq!(encoded.bytes().len(), without_sync.bytes().len() + 16);
         }
+    }
+
+    #[test]
+    fn opaque_sixel_replaces_every_pixel_without_erasing_a_flushed_viewport() {
+        let mut source = frame();
+        source.size.height = gpui::DevicePixels(7);
+        source.pixels = [0, 0, 0, 255, 255, 255, 255, 255].repeat(7);
+        let first =
+            InlineFrame::encode(&source, InlineProtocol::Sixel, 1, 1, false, false).unwrap();
+        assert!(first.bytes().starts_with(b"\x1b[H\x1b[2J\x1bP"));
+        let replacement =
+            InlineFrame::encode(&source, InlineProtocol::Sixel, 1, 1, false, true).unwrap();
+        assert!(
+            !replacement
+                .bytes()
+                .windows(4)
+                .any(|bytes| bytes == b"\x1b[2J")
+        );
+        let payload = replacement
+            .bytes()
+            .strip_prefix(b"\x1b[H")
+            .unwrap()
+            .strip_suffix(b"\x1b[H")
+            .unwrap();
+        let decoded = icy_sixel::SixelImage::decode(payload).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 12));
+        assert_eq!(
+            &decoded.pixels[..56],
+            [0, 0, 0, 255, 255, 255, 255, 255].repeat(7)
+        );
+        assert_eq!(&decoded.pixels[56..], [0; 40]);
+    }
+
+    #[test]
+    fn transparent_sixel_and_iterm_still_erase_the_previous_image() {
+        let mut source = frame();
+        for alpha in [0, 127, 128, 254] {
+            source.pixels[3] = alpha;
+            let encoded =
+                InlineFrame::encode(&source, InlineProtocol::Sixel, 1, 1, false, true).unwrap();
+            assert!(encoded.bytes().starts_with(b"\x1b[H\x1b[2J\x1bP"));
+        }
+        source.pixels[3] = 255;
+        let encoded =
+            InlineFrame::encode(&source, InlineProtocol::Iterm2, 1, 1, false, true).unwrap();
+        assert!(encoded.bytes().starts_with(b"\x1b[H\x1b[2J\x1b]1337;"));
     }
 
     #[test]
@@ -225,7 +284,8 @@ mod tests {
         source.pixels[3] = 127;
         let last_alpha = source.pixels.len() - 1;
         source.pixels[last_alpha] = 0;
-        let encoded = InlineFrame::encode(&source, InlineProtocol::Iterm2, 120, 40, true).unwrap();
+        let encoded =
+            InlineFrame::encode(&source, InlineProtocol::Iterm2, 120, 40, true, false).unwrap();
         let payload = encoded
             .bytes()
             .strip_prefix(b"\x1b[?2026h\x1b[H\x1b[2J")
