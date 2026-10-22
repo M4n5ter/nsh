@@ -4019,7 +4019,7 @@ mod tests {
         surface.render(buffer.area, &mut buffer);
         assert!(buffer[(9, 0)].modifier.contains(Modifier::REVERSED));
         let lease = surface.input_snapshot().press_at(9, 1).unwrap();
-        assert!(lease.is_native_input());
+        assert!(lease.allows_drag());
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),

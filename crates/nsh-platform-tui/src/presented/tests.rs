@@ -164,7 +164,7 @@ fn native_value_pans_keep_their_capture_while_other_content_commits() {
     });
     surface.apply(MountBatch { items: child });
     let lease = surface.input_snapshot().press_at(2, 1).unwrap();
-    assert!(lease.is_native_pan());
+    assert!(lease.allows_drag());
     assert_eq!(lease.binding(), None);
     assert_eq!(
         surface.handle_presented_mouse(down(2, 1), &lease),
@@ -1223,7 +1223,7 @@ fn editor_surface() -> Surface {
 fn a_presented_editor_keeps_its_caret_intent_when_unrelated_layout_moves_it() {
     let mut surface = editor_surface();
     let lease = surface.input_snapshot().press_at(3, 4).unwrap();
-    assert!(lease.is_native_input());
+    assert!(lease.allows_drag());
     assert_eq!(lease.binding(), None);
     surface.apply(MountBatch {
         items: vec![MountItem::Frame {

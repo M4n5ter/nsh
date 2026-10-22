@@ -1959,7 +1959,7 @@ impl Surface {
         true
     }
 
-    fn place_caret(&mut self, id: NodeId, x: f32, y: f32, extend: bool) {
+    pub(crate) fn place_caret(&mut self, id: NodeId, x: f32, y: f32, extend: bool) {
         if self.node(id).is_some_and(|n| n.kind == ViewKind::Text) {
             if let Some(offset) = self.text_offset_at(id, x, y)
                 && let Some(node) = self.node_mut(id)

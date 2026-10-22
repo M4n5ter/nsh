@@ -8,8 +8,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use nsh_core::{
-    Bounds, EventKind, Matrix, NodeId, PanActivation, Points, ScrollBehavior, Size, ViewKind,
-    animation::GestureBinding, overlay::HintObservation,
+    Bounds, EventKind, Matrix, NodeId, PanActivation, Points, ScrollBehavior, Size, TextLayout,
+    ViewKind, animation::GestureBinding, overlay::HintObservation,
 };
 
 use crate::{
@@ -46,10 +46,24 @@ pub struct InputSnapshot {
 enum PointerTarget {
     Action(u64),
     Input(InputContact),
+    Text(TextContact),
+    ScrollFocus,
     Pan {
         binding: GestureBinding,
         activation: Option<PanActivation>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct TextContact {
+    revision: u64,
+    layout: TextLayout,
+}
+
+impl PartialEq for TextContact {
+    fn eq(&self, other: &Self) -> bool {
+        self.revision == other.revision && Arc::ptr_eq(&self.layout.0, &other.layout.0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,7 +124,7 @@ pub struct WheelLease {
     origin: (u16, u16),
 }
 
-/// A sealed action, native input or value-only Pan in a completed presentation.
+/// A sealed action, native selection/focus or value-only Pan in a presentation.
 ///
 /// Keep this same lease for its left-button Down, Drag and Up. The native
 /// surface checks its identity. An action's [`Self::binding`] must additionally
@@ -128,23 +142,28 @@ pub struct PressLease {
 }
 
 impl PressLease {
-    /// The sealed app action binding, or `None` for native input or Pan.
+    /// The sealed app action binding, or `None` for a native selection, focus or Pan.
     pub fn binding(&self) -> Option<u64> {
         match &self.route.owner {
             PointerTarget::Action(binding) => Some(*binding),
-            PointerTarget::Input(_) | PointerTarget::Pan { .. } => None,
+            PointerTarget::Input(_)
+            | PointerTarget::Text(_)
+            | PointerTarget::ScrollFocus
+            | PointerTarget::Pan { .. } => None,
         }
     }
 
-    /// Whether this capture moves native animation values without app input.
-    pub fn is_native_pan(&self) -> bool {
-        matches!(self.route.owner, PointerTarget::Pan { .. })
+    /// Whether the original native owner accepts left-button drag continuation.
+    /// Application actions and a plain scroll-focus contact accept only Down/Up.
+    pub fn allows_drag(&self) -> bool {
+        match &self.route.owner {
+            PointerTarget::Action(_) | PointerTarget::ScrollFocus => false,
+            PointerTarget::Input(_) | PointerTarget::Text(_) | PointerTarget::Pan { .. } => true,
+        }
     }
 
-    /// Whether this capture focuses and selects one original native input.
-    /// Its route excludes application input callbacks.
-    pub fn is_native_input(&self) -> bool {
-        matches!(self.route.owner, PointerTarget::Input(_))
+    fn is_native_pan(&self) -> bool {
+        matches!(self.route.owner, PointerTarget::Pan { .. })
     }
 
     /// The native activation owner, rather than a text child that was hit.
@@ -198,9 +217,9 @@ impl InputSnapshot {
 
     /// Resolves an ordinary left press at the terminal cell's native center.
     ///
-    /// Plain built-in inputs retain their original focus and caret owner.
-    /// Native components, label selection, callback-capable gestures, system
-    /// overlays and focus callbacks intentionally have no press lease.
+    /// Built-in inputs, selectable labels and plain scroll content retain their
+    /// native selection or focus owner. Links, native components, scrollbars,
+    /// callback-capable gestures, overlays and focus callbacks use exact input.
     pub fn press_at(&self, column: u16, row: u16) -> Option<PressLease> {
         if self.blocked || column >= self.viewport.0 || row >= self.viewport.1 {
             return None;
@@ -307,18 +326,26 @@ impl Surface {
                     routes.entry(target).or_insert(route);
                     continue;
                 }
+                if let Some(route) = self.selection_route(hit, &geometry) {
+                    owners.insert(hit, hit);
+                    routes.entry(hit).or_insert(route);
+                    continue;
+                }
                 if path.iter().any(|&id| self.opaque_press_node(id)) {
-                    if self
-                        .node(hit)
-                        .is_some_and(|node| node.kind == ViewKind::Input)
-                        && let Some(route) = self.input_route(hit, &geometry)
-                    {
-                        owners.insert(hit, hit);
-                        routes.entry(hit).or_insert(route);
-                    }
                     continue;
                 }
                 let Some(target) = path.iter().copied().find(|&id| self.pressable(id)) else {
+                    if let Some(target) = path.iter().copied().find(|&id| {
+                        self.node(id).is_some_and(|node| {
+                            node.kind == ViewKind::Scroll && node.scroll.enabled
+                        })
+                    }) && self.native_contact_safe(target, hit, &geometry)
+                        && let Some(route) =
+                            self.press_route(target, PointerTarget::ScrollFocus, &geometry)
+                    {
+                        owners.insert(hit, target);
+                        routes.entry(target).or_insert(route);
+                    }
                     continue;
                 };
                 let Some(node) = self.node(target) else {
@@ -474,16 +501,14 @@ impl Surface {
         })
     }
 
-    fn input_route(&self, target: NodeId, geometry: &HitSnapshot) -> Option<PressRoute> {
-        let node = self.node(target)?;
-        if node.kind != ViewKind::Input
-            || !self.focusable(target)
-            || (self.focus != Some(target)
+    fn native_contact_safe(&self, target: NodeId, hit: NodeId, geometry: &HitSnapshot) -> bool {
+        self.focusable(target)
+            && !(self.focus != Some(target)
                 && self.focus.is_some_and(|id| {
                     self.node(id)
                         .is_some_and(|node| node.events.contains(EventKind::Blur))
                 }))
-            || geometry.ancestors(target).into_iter().any(|id| {
+            && !geometry.ancestors(hit).into_iter().any(|id| {
                 self.node(id).is_none_or(|node| {
                     (id != target && self.opaque_native_gesture_node(id))
                         || node.native.is_some()
@@ -507,8 +532,32 @@ impl Surface {
                         .any(|kind| node.events.contains(kind))
                 })
             })
-        {
+    }
+
+    fn selection_route(&self, target: NodeId, geometry: &HitSnapshot) -> Option<PressRoute> {
+        let node = self.node(target)?;
+        match node.kind {
+            ViewKind::Input => {}
+            ViewKind::Text
+                if node
+                    .text
+                    .as_ref()
+                    .is_some_and(|(text, _, _)| text.is_selectable() && text.links.is_empty()) => {}
+            _ => return None,
+        }
+        if !self.native_contact_safe(target, target, geometry) {
             return None;
+        }
+        if node.kind == ViewKind::Text {
+            let (_, layout, _) = node.text.as_ref()?;
+            return self.press_route(
+                target,
+                PointerTarget::Text(TextContact {
+                    revision: node.editor.revision(),
+                    layout: layout.clone(),
+                }),
+                geometry,
+            );
         }
         let input = self.input_hit_geometry(target)?;
         let columns = input.columns.max(1);
@@ -727,6 +776,13 @@ impl Surface {
                             node.kind == ViewKind::Input
                                 && node.editor.revision() == contact.revision
                         }
+                        PointerTarget::Text(contact) => {
+                            node.kind == ViewKind::Text
+                                && node.editor.revision() == contact.revision
+                        }
+                        PointerTarget::ScrollFocus => {
+                            node.kind == ViewKind::Scroll && node.scroll.enabled
+                        }
                         PointerTarget::Pan {
                             binding,
                             activation,
@@ -741,8 +797,12 @@ impl Surface {
             self.reject_presented_press(lease);
             return None;
         }
-        if lease.is_native_input() {
-            return self.handle_presented_input(mouse, lease, &current);
+        match &lease.route.owner {
+            PointerTarget::Input(_) => return self.handle_presented_input(mouse, lease, &current),
+            PointerTarget::Text(_) | PointerTarget::ScrollFocus => {
+                return self.handle_presented_reading(mouse, lease, &current);
+            }
+            PointerTarget::Action(_) | PointerTarget::Pan { .. } => {}
         }
         if matches!(mouse.kind, MouseEventKind::Down(_)) {
             let offered = current.press_at(mouse.column, mouse.row);
@@ -817,6 +877,52 @@ impl Surface {
             self.presented_press = None;
         }
         Some(changed)
+    }
+
+    fn handle_presented_reading(
+        &mut self,
+        mouse: MouseEvent,
+        lease: &PressLease,
+        current: &InputSnapshot,
+    ) -> Option<bool> {
+        let down = matches!(mouse.kind, MouseEventKind::Down(_));
+        if current.routes.get(&lease.target()) != Some(&lease.route)
+            || !current
+                .press_at(lease.origin.0, lease.origin.1)
+                .is_some_and(|offered| offered.same_capture(lease))
+            || (down && (mouse.column, mouse.row) != lease.origin)
+            || (!down
+                && !self
+                    .presented_press
+                    .as_ref()
+                    .is_some_and(|captured| captured.same_capture(lease)))
+            || (matches!(mouse.kind, MouseEventKind::Drag(_)) && !lease.allows_drag())
+        {
+            self.reject_presented_press(lease);
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Up(_)) {
+            self.clear_sealed_pointer();
+            return Some(true);
+        }
+        if down {
+            self.clear_sealed_pointer();
+            self.set_hover(Some(lease.target()));
+            self.set_focus_from(Some(lease.target()), FocusSource::Pointer);
+            self.presented_press = Some(lease.clone());
+        }
+        if matches!(&lease.route.owner, PointerTarget::Text(_)) {
+            self.drag_input = Some(lease.target());
+            // This is the original immutable text layout, not a new hit or
+            // another component encountered while selection leaves its bounds.
+            self.place_caret(
+                lease.target(),
+                (f32::from(mouse.column) + 0.5) * self.metrics.width().0,
+                (f32::from(mouse.row) + 0.5) * self.metrics.height().0,
+                !down,
+            );
+        }
+        Some(true)
     }
 
     fn handle_presented_input(
