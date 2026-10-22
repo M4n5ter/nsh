@@ -1740,11 +1740,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
                 id: 10,
                 prop: source(2560),
             },
-            Op::Create {
-                id: 11,
-                tag: Tag::RawText,
-            },
-            Op::SetText {
+            Op::CreateText {
                 id: 11,
                 text: "R".repeat(2000).into(),
             },
@@ -1871,11 +1867,7 @@ fn source_reading_survives_prepend_and_rich_replacement() {
                 id: 20,
                 prop: source(2560),
             },
-            Op::Create {
-                id: 21,
-                tag: Tag::RawText,
-            },
-            Op::SetText {
+            Op::CreateText {
                 id: 21,
                 text: "R".repeat(2000).into(),
             },
@@ -15629,11 +15621,7 @@ fn a_page_list_in_a_cell_of_a_list_follows_that_list() {
                     offset: 0,
                 }))),
             },
-            Op::Create {
-                id: 1001,
-                tag: Tag::RawText,
-            },
-            Op::SetText {
+            Op::CreateText {
                 id: 1001,
                 text: "R".repeat(80).into(),
             },

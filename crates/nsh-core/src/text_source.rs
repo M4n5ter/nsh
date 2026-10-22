@@ -24,7 +24,8 @@ pub enum TextSource {
 }
 
 /// One rendered source segment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TextSourceSegment {
     /// Inclusive local UTF-16 start.
     pub start: u32,
@@ -39,9 +40,10 @@ pub struct TextSourceSegment {
 }
 
 /// How a parser rendered a source segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TextSourceKind {
     /// Verbatim text; UTF-8/UTF-16 conversion uses the actual rendered text.
+    #[default]
     Literal,
     /// One indivisible conversion, such as an entity or an escaped character.
     Replacement,
