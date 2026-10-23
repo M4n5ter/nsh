@@ -311,6 +311,10 @@ fn call_with(
     free(cx, f);
     // SAFETY: an inline tag check.
     if unsafe { qjs::JS_IsException(r) } {
+        // A listener made under an error boundary fails into it.
+        if dom::catch_listener_failure(cx, id) {
+            return Ok(UNDEFINED);
+        }
         Err(r)
     } else {
         Ok(r)

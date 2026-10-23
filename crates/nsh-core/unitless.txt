@@ -336,3 +336,5 @@ ui::tokens::Token::Number.0                                      # a design toke
 ui::virtual_list::VirtualList::load_more_threshold(viewports)  # in viewport lengths (a ratio)
 ui::rows::Rows::column ->                                        # the app's data: numbers of any unit, which a component scales
 ui::rows::Rows::from_columns(columns)                            # the app's data: numbers of any unit, which a component scales
+
+style::TextStyle.line_height_em                                  # a line-height length in multiples of the element font size

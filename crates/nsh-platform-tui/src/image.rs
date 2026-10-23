@@ -850,10 +850,12 @@ pub(crate) fn fitted_frame(
     let (width, height) = match mode {
         ResizeMode::Stretch => (frame.size.width, frame.size.height),
         ResizeMode::Center => (iw, ih),
-        ResizeMode::Cover | ResizeMode::Contain => {
+        ResizeMode::Cover | ResizeMode::Contain | ResizeMode::ScaleDown => {
             let (sx, sy) = (frame.size.width / iw, frame.size.height / ih);
             let scale = if mode == ResizeMode::Cover {
                 sx.max(sy)
+            } else if mode == ResizeMode::ScaleDown {
+                sx.min(sy).min(1.0)
             } else {
                 sx.min(sy)
             };

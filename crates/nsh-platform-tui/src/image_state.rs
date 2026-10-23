@@ -82,7 +82,13 @@ impl ImageRequest {
                     },
                 ),
             );
-            fitted_frame(raster, frame, self.mode).size
+            if self.mode == ResizeMode::ScaleDown {
+                self.mode
+                    .fit(natural, frame.size, nsh_core::ObjectPosition::CENTER)
+                    .size
+            } else {
+                fitted_frame(raster, frame, self.mode).size
+            }
         };
         (
             self.blur_radius / size.width.max(px(f32::MIN_POSITIVE)) * raster.width as f32,

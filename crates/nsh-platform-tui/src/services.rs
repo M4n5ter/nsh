@@ -950,12 +950,24 @@ impl Surface {
                 return true;
             }
             if self.services.popup.is_none() {
+                let editing = self.focus.is_some_and(|id| {
+                    self.node(id).is_some_and(|node| {
+                        node.kind == ViewKind::Input
+                            || node.native.is_some()
+                            || node.kind == ViewKind::WebView
+                            || node
+                                .text
+                                .as_ref()
+                                .is_some_and(|(text, _, _)| text.is_selectable())
+                    })
+                });
                 let action = key_shortcut(*key)
                     .and_then(|shortcut| {
                         self.services
                             .menu
                             .as_deref()
                             .and_then(|menu| MenuItem::find_shortcut(menu, &shortcut))
+                            .filter(|action| !editing || action.fires_while_editing())
                     })
                     .cloned();
                 if let Some(action) = action {
@@ -1377,6 +1389,7 @@ mod tests {
                 enabled: true,
                 checked: Some(true),
                 role: None,
+                when: nsh_core::keymap::When::Always,
             })]
             .into(),
             at: None,
@@ -1397,6 +1410,62 @@ mod tests {
     }
 
     #[test]
+    fn menu_shortcuts_respect_the_focused_fields_editing_keys() {
+        use nsh_core::keymap::When;
+        let mut surface = surface();
+        surface.apply(MountBatch {
+            items: vec![MountItem::Create {
+                id: 2,
+                kind: ViewKind::Input,
+            }],
+        });
+        surface.focus = Some(2);
+        for (when, fires) in [
+            (When::Auto, false),
+            (When::NotEditing, false),
+            (When::Always, true),
+        ] {
+            surface.services.menu = Some(
+                vec![MenuItem::Action(MenuAction {
+                    id: 42,
+                    label: "Move".into(),
+                    shortcut: Some(Shortcut::parse("left", false).unwrap()),
+                    enabled: true,
+                    checked: None,
+                    role: None,
+                    when,
+                })]
+                .into(),
+            );
+            assert_eq!(
+                surface.service_event(&Event::Key(KeyEvent::new(
+                    KeyCode::Left,
+                    KeyModifiers::NONE
+                ))),
+                fires
+            );
+            surface.drain_events().for_each(drop);
+        }
+        surface.focus = None;
+        surface.services.menu = Some(
+            vec![MenuItem::Action(MenuAction {
+                id: 42,
+                label: "Move".into(),
+                shortcut: Some(Shortcut::parse("left", false).unwrap()),
+                enabled: true,
+                checked: None,
+                role: None,
+                when: When::NotEditing,
+            })]
+            .into(),
+        );
+        assert!(surface.service_event(&Event::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::NONE
+        ))));
+    }
+
+    #[test]
     fn wheel_burst_moves_each_menu_detent_past_disabled_entries() {
         let mut surface = surface();
         let items = (0..5)
@@ -1408,6 +1477,7 @@ mod tests {
                     enabled: id != 1,
                     checked: None,
                     role: None,
+                    when: nsh_core::keymap::When::Always,
                 })
             })
             .collect::<Vec<_>>();

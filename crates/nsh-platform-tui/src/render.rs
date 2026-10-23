@@ -1549,7 +1549,7 @@ fn image_geometry(
     frame: Bounds<Points>,
     clip: Bounds<Points>,
 ) -> (Bounds<Points>, Bounds<Points>, ResizeMode) {
-    let content = if mode == ResizeMode::Center
+    let content = if matches!(mode, ResizeMode::Center | ResizeMode::ScaleDown)
         && let Some(Size { width, height }) = source.size
         && width.is_finite()
         && height.is_finite()
@@ -1568,10 +1568,9 @@ fn image_geometry(
             } else {
                 1.0
             };
-        Size::new(width, height)
+        mode.fit(Size::new(width, height), frame.size, ObjectPosition::CENTER)
+            .size
     } else {
-        // Keep the terminal's natural-size Center semantics. The shared
-        // ResizeMode::fit shrinks Center images, unlike this backend.
         crate::image::fitted_frame(raster, frame, mode).size
     };
     let scale = |drawn: Points, local: Points| {
@@ -4298,6 +4297,34 @@ mod tests {
         );
         assert_eq!(clip, frame);
         assert_eq!(mode, ResizeMode::Stretch);
+        for (natural, expected) in [
+            (Size::new(px(16.0), px(32.0)), Size::new(px(16.0), px(32.0))),
+            (
+                Size::new(px(128.0), px(64.0)),
+                Size::new(px(64.0), px(32.0)),
+            ),
+        ] {
+            let source = nsh_core::ImageSource {
+                size: Some(natural),
+                ..source.clone()
+            };
+            let (image, clip, mode) = image_geometry(
+                &source,
+                &crate::image::Raster {
+                    width: 256,
+                    height: 128,
+                    rgba: Vec::new(),
+                },
+                ResizeMode::ScaleDown,
+                ObjectPosition::CENTER,
+                frame.size,
+                frame,
+                frame,
+            );
+            assert_eq!(image.size, expected);
+            assert_eq!(clip, frame);
+            assert_eq!(mode, ResizeMode::Stretch);
+        }
     }
 
     #[test]
@@ -4325,6 +4352,7 @@ mod tests {
             ResizeMode::Cover,
             ResizeMode::Contain,
             ResizeMode::Center,
+            ResizeMode::ScaleDown,
             ResizeMode::Stretch,
         ] {
             let (image, clip, fitted) = image_geometry(
