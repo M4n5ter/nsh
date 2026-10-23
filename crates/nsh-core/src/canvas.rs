@@ -513,7 +513,9 @@ pub fn line_metrics(
     let width = if text.is_empty() {
         Points::ZERO
     } else {
-        size.width
+        // Canvas glyph advances can differ from a platform's normal text
+        // layout, such as the terminal's fixed-width cells.
+        engine.measure_canvas(font, text).unwrap_or(size.width)
     };
     let layout = engine.layout(&prepared, size);
     match engine.lines(&layout).first() {

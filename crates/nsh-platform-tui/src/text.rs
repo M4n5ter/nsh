@@ -1376,6 +1376,12 @@ mod tests {
         let width = nsh_core::canvas::measure_line(&engine, &font, "WWW");
         assert_eq!(width, px(fonts.shape(&font, "WWW").width));
         assert!((width - before.width).abs() > px(1.0));
+        let metrics = nsh_core::canvas::line_metrics(&engine, &font, "WWW");
+        assert_eq!(metrics.width, width);
+        assert_eq!(
+            nsh_core::canvas::line_metrics(&engine, &font, "").width,
+            Points::ZERO
+        );
     }
 
     #[test]
