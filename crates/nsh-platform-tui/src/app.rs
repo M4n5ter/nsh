@@ -311,6 +311,7 @@ impl AppView {
                 .clone()
                 .unwrap_or_else(ui_sets)
                 .iter()
+                .flat_map(nsh_core::ui::Registry::sets)
                 .filter_map(|set| set.specifier().map(str::to_owned))
                 .collect(),
         };
