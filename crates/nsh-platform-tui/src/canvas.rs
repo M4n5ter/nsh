@@ -1740,7 +1740,7 @@ mod tests {
         rasterize(
             &Drawing {
                 ops,
-                slots: Vec::new(),
+                ..Drawing::default()
             },
             &[],
             px(32.0),
@@ -1784,7 +1784,7 @@ mod tests {
                 CanvasOp::FillStyle(Paint::Slot(2)),
                 CanvasOp::FillRect([Num::Slot(0), c(0.0), c(8.0), c(8.0)]),
             ],
-            slots: Vec::new(),
+            ..Drawing::default()
         };
         let image = rasterize(
             &drawing,
@@ -1896,7 +1896,7 @@ mod tests {
                     dest: rect(0.0, 0.0, 8.0, 8.0),
                 },
             ],
-            slots: Vec::new(),
+            ..Drawing::default()
         };
         let image = rasterize(
             &drawing,
@@ -1929,7 +1929,7 @@ mod tests {
                 )),
                 dest: rect(16.0, 0.0, -16.0, 8.0),
             }],
-            slots: Vec::new(),
+            ..Drawing::default()
         };
         let image = rasterize(
             &drawing,
@@ -1994,7 +1994,7 @@ mod tests {
                             max_width: None,
                         },
                     ],
-                    slots: Vec::new(),
+                    ..Drawing::default()
                 },
                 &[],
                 px(192.0),

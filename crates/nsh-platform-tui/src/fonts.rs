@@ -953,7 +953,7 @@ mod tests {
                     max_width: None,
                 },
             ],
-            slots: Vec::new(),
+            ..nsh_core::canvas::Drawing::default()
         };
         let raster =
             crate::canvas::rasterize(&drawing, &[], px(32.0), px(32.0), &HashMap::new(), &fonts)

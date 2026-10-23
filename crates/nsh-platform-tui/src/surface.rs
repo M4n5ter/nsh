@@ -2013,7 +2013,7 @@ mod tests {
                 source: None,
                 dest: [0.0, 0.0, 16.0, 16.0].map(Num::Const),
             }],
-            slots: Vec::new(),
+            ..Drawing::default()
         }));
         assert!(surface.pending_images.is_empty() && surface.canvas_pending.is_empty());
         assert!(
