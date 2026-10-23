@@ -696,6 +696,13 @@ impl Host {
 
     /// Moves the ops committed by JS since the last call into `out`.
     pub fn take_ops(&self, out: &mut Vec<Op>) {
+        if self.cx.is_live() {
+            self.cx.with(|cx| {
+                let raw = cx.as_raw().as_ptr();
+                // SAFETY: this host owns the registered context state.
+                unsafe { (*crate::state::state(raw)).lists.publish_sources(raw) };
+            });
+        }
         let mut ops = self.shared.ops.borrow_mut();
         if out.is_empty() {
             std::mem::swap(out, &mut ops);

@@ -189,7 +189,7 @@ impl PressRecognizer {
             long_press_delay: Cell::new(LONG_PRESS),
             own: Cell::new(false),
             handles_press: Cell::new(false),
-            link: Cell::new(None),
+            link: std::cell::RefCell::new(None),
         });
         // SAFETY: the designated initializer; `handlePress:` is implemented by
         // the target, which outlives the recognizer.

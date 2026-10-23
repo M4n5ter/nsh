@@ -4,6 +4,50 @@ Performance is the project's first priority; the rules are in `AGENTS.md`. Chang
 after `nsh test --trace` timings and item counts (`nsh trace` before it, in the records below). Current baselines
 (Apple Silicon):
 
+List source publication on the updated pin (macOS Apple Silicon, unoptimized without debug info,
+five alternating pairs, `2f971948` → `28c011ed`): counter first/press work stays at 56/10 ops and
+49/7 mount items. Gallery `Bench.tsx` stays at 1226 ops / 1029 items initially and 1064 ops /
+961 items over a 3000 pt scroll. Full-scroll median core time was 151.91 → 164.81 ms, with ranges
+145.23–155.71 / 141.13–169.76 ms; initial core time was 4.73 → 5.21 ms. List-binding prepend
+stays at 19 ops / 22 items (median 1.19 → 1.18 ms), while removal changes 7 ops / 9 items to
+6 ops / 8 items (0.76 → 0.64 ms). All five pairs preserve the selected row after both splices.
+Timing ranges overlap: these traces establish bounded work and ordinary owner retention, not a
+latency improvement or production input behavior. The earlier comparison below used another base
+and build setup; its timings are not directly comparable with these.
+
+List source publication, release-profile follow-up (macOS Apple Silicon, five alternating pairs,
+`2f971948` → `63efd47a`; opt-level 3, fat LTO, one codegen unit): counter initial/press work stays
+56/10 ops and 49/7 mount items; gallery initial/3000 pt scroll stays 1226/1064 ops and 1029/961
+items. Binding prepend stays 19 ops / 22 items; removal changes 7 ops / 9 items to 6 ops / 8 items.
+Every pair retains the selected row after both splices. Core timings below are marginal medians;
+paired changes are medians of the five individual ratios, not ratios of the marginal medians.
+
+| Work | Before → after (µs) | Paired change | After slower |
+| --- | ---: | ---: | ---: |
+| Gallery initialization | 2027 → 2124 | +4.79% | 4/5 |
+| Gallery 3000 pt scroll | 37118 → 36263 | -0.83% | 2/5 |
+| Binding prepend | 267 → 328 | +14.29% | 3/5 |
+| Binding remove | 119 → 139 | +16.81% | 4/5 |
+
+CLI process-tree user+system CPU paired medians are +2.04% (counter, 3/5 higher), +1.48% (gallery,
+4/5) and +3.98% (binding, 4/5). They include bundling, the driver and trace output, not isolated
+native Host CPU or product FPS. The debug scroll median was +8.49% with 4/5 pairs slower;
+overlapping ranges do not exclude a regression. Release does not repeat that sustained-scroll
+direction, but initialization and binding costs remain. An initial shared-target cache-reuse
+attempt produced identical binaries and was excluded before any measurements; a targeted rebuild
+produced distinct binaries. Only the fixed 30 release runs were measured, without added samples.
+
+List source publication (macOS Apple Silicon, debug headless CLI, five alternating pairs against
+`36c0fa75`): `nsh test --trace` keeps counter first/press work at 56/10 ops and 49/7 mount items.
+Gallery `Bench.tsx` keeps 1226 ops / 1029 items initially and 1064 ops / 961 items over a 3000 pt
+scroll. Median core time for the full scroll was 82.30 → 83.19 ms, with overlapping ranges
+(74.02–86.05 / 70.57–85.19 ms); initial core time was 5.67 → 5.83 ms. In the core list-binding
+compat case, prepending keeps 19 ops / 22 items (median 1.18 → 1.06 ms); removing changes
+7 ops / 9 items to 6 ops / 8 items (0.58 → 0.70 ms, overlapping ranges). Both versions retain
+the selected row in ordinary insertion/removal. The correction covers a pending bind from the
+previous published source after JS has queued another source change; these ordinary traces
+establish bounded work, not a general speedup or the frequency of that cross-frame condition.
+
 `onMouseMove` (Desktop and web): Linux x86_64, debug CLI, five interleaved runs of
 `echo 'await app.press("+1")' | nsh test examples/counter/App.tsx --trace`, against main `fd772aef`.
 The first commit stays at 56 ops / 49 mount items / 21 nodes; the press stays at 10 ops / 7 items / 24 nodes.
