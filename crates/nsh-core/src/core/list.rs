@@ -1414,11 +1414,16 @@ impl ListState {
     pub(super) fn update_window(&mut self, binds: &mut Vec<(u32, u32)>) -> bool {
         self.dirty = false;
         if self.count == 0 || self.viewport <= 0.0 {
+            self.moved.clear();
             for slot in 0..self.slots.len() {
                 self.unbind(slot as u32);
             }
             return false;
         }
+        // Several splices can share one published source. Intermediate
+        // indices no longer describe that source or the slot's current item.
+        self.moved
+            .retain(|&(slot, index)| self.slots[slot as usize].index == Some(index));
         // Cells whose item moved: the runtime learns their new index.
         binds.append(&mut self.moved);
         let at = self.natural_offset();
@@ -1847,6 +1852,41 @@ mod tests {
         l.splice(90, 2, 0);
         assert_eq!(l.offset, offset);
         assert_eq!(l.count, 101);
+    }
+
+    #[test]
+    fn batched_splices_bind_only_the_final_source_indices() {
+        let mut l = list(2, 50.0, 400.0);
+        let mut binds = Vec::new();
+        l.update_window(&mut binds);
+        assert_eq!(binds, [(0, 0), (1, 1)]);
+        binds.clear();
+        // Both mutations are published together: the runtime sees only
+        // the final one-row snapshot, never the intermediate three rows.
+        l.splice(0, 0, 1);
+        l.splice(0, 3, 1);
+        l.update_window(&mut binds);
+        assert_eq!(binds, [(1, 0)]);
+
+        // A surviving moved cell still needs its final index, not each
+        // intermediate index from consecutive prepends.
+        binds.clear();
+        l.splice(0, 0, 1);
+        l.splice(0, 0, 1);
+        l.update_window(&mut binds);
+        assert_eq!(
+            binds
+                .iter()
+                .filter(|&&(slot, _)| slot == 1)
+                .copied()
+                .collect::<Vec<_>>(),
+            [(1, 2)]
+        );
+        assert!(
+            binds
+                .iter()
+                .all(|&(slot, index)| l.slots[slot as usize].index == Some(index))
+        );
     }
 
     #[test]
